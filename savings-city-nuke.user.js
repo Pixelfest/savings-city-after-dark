@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.1
+// @version      3.2
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -69,13 +69,13 @@
   const FLASH_SECONDS = 0.6;       // white flash: short, so it doesn't hide the destruction
   const LIGHT_BOOST = 3.5;         // how much brighter the scene gets for a moment (was 7)
   const FOUNDATION_HEIGHT = 0.03;  // things lower than this survive even at ground zero
-  const MAX_DEBRIS = 1500;        // pieces of rubble (instanced cubes; each moves every frame until it lies still)
+  const MAX_DEBRIS = 1500;        // pieces of rubble (instanced cubes; each moves every frame until it lies still) – × the detail setting's factor
   const BLAST_SPEED = 10;          // how hard chunks and rubble are flung near the centre, for 15 kt (scales with the yield)
   const CHUNK_SIZE = 0.2;          // buildings break into solid chunks about this big (tiles); smaller = more chunks
   const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide (wider when the chunks are bigger)
   const RUIN_SHARE = 0.75;         // at the edge of the blast this share of a building still stands (less towards the centre, none in the middle)
   const RUIN_JAGGED = 0.12;        // how much the broken tops of neighbouring columns differ (tiles; 0 = one flat cut)
-  const MAX_CHUNK_VERTICES = 60000;    // for a big city the chunk size is raised so they stay below about this (every moving chunk's
+  const MAX_CHUNK_VERTICES = 60000;    // (× the detail setting's factor: 1, 2, 4, 8, 16) for a big city the chunk size is raised so they stay below about this (every moving chunk's
                                        // vertices are recomputed and uploaded each frame: this is what the blast costs)
   const SCATTER_DEGREES = 35;      // pieces fly away from ground zero ± this much, so debris mixes
   const GRAVEL = 0.12;             // other things (roof details, trees …) blown away: chance per triangle of a rubble cube
@@ -405,7 +405,8 @@
     // Measured: about 140 vertices per (volume ÷ size³), ruins included (their columns grow with the size).
     let volume = 0;
     for (const b of solid.boxes) volume += (b.x1 - b.x0) * (b.z1 - b.z0) * (b.y1 - b.y0);
-    const size = Math.max(CHUNK_SIZE, Math.cbrt((volume * 140) / MAX_CHUNK_VERTICES));
+    const f = detailFactor();
+    const size = Math.max(CHUNK_SIZE / Math.cbrt(f), Math.cbrt((volume * 140) / (MAX_CHUNK_VERTICES * f)));
     solid.size = size;
     // per box: columns with their own break height; below it a static ruin, above it chunks
     for (const b of solid.boxes) {
@@ -538,10 +539,16 @@
 
   // ---------- debris ----------
   let debris = null, dN = 0;
-  const D = { p: new Float32Array(MAX_DEBRIS * 3), v: new Float32Array(MAX_DEBRIS * 3), r: new Float32Array(MAX_DEBRIS * 3), w: new Float32Array(MAX_DEBRIS * 3), s: new Float32Array(MAX_DEBRIS), rest: new Uint8Array(MAX_DEBRIS) };
+  // how much rubble: MAX_DEBRIS × the detail setting's factor (fixed when the bomb is prepared)
+  const detailFactor = () => (window.scCore && window.scCore.detail ? window.scCore.detail().factor : 1);
+  let maxDebris = MAX_DEBRIS, D = null;
+  function allocDebris() {
+    maxDebris = MAX_DEBRIS * detailFactor();
+    D = { p: new Float32Array(maxDebris * 3), v: new Float32Array(maxDebris * 3), r: new Float32Array(maxDebris * 3), w: new Float32Array(maxDebris * 3), s: new Float32Array(maxDebris), rest: new Uint8Array(maxDebris) };
+  }
 
   function spawnDebris(job, i, d, cy) {
-    if (!debris || dN >= MAX_DEBRIS) return;
+    if (!debris || dN >= maxDebris) return;
     const x = (job.wx(i) + job.wx(i + 1) + job.wx(i + 2)) / 3, z = (job.wz(i) + job.wz(i + 1) + job.wz(i + 2)) / 3;
     // size from the triangle's area
     const ax = job.wx(i + 1) - job.wx(i), ay = job.wy(i + 1) - job.wy(i), az = job.wz(i + 1) - job.wz(i);
@@ -552,7 +559,7 @@
     spawnDebrisAt(x, cy, z, d, color, size);
   }
   function spawnDebrisAt(x, cy, z, d, color, size) {
-    if (!debris || dN >= MAX_DEBRIS) return;
+    if (!debris || dN >= maxDebris) return;
     const k = dN++;
     const dx = (x - nuke.cx) / (d || 1), dz = (z - nuke.cz) / (d || 1);
     const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
@@ -730,7 +737,7 @@
         carsDone.add(car);
         window.dispatchEvent(new CustomEvent('sc:car-exploded', { detail: { x: car.x, z: car.z, cause: 'nuke' } }));
         if (!car.scAbandoned) for (let n = 1 + (Math.random() < 0.5 ? 1 : 0); n > 0; n--) window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: car.x, z: car.z, cause: 'nuke', who: 'occupant' } }));
-        if (d <= nuke.total && debris) for (let n = 0; n < 6 && dN < MAX_DEBRIS; n++) {   // a few car parts flying off
+        if (d <= nuke.total && debris) for (let n = 0; n < 6 && dN < maxDebris; n++) {   // a few car parts flying off
           const k = dN++, dx = (car.x - nuke.cx) / (d || 1), dz = (car.z - nuke.cz) / (d || 1);
           D.p.set([car.x, 0.07, car.z], k * 3); D.v.set([dx * rnd(1, 3), rnd(0.5, 1.8), dz * rnd(1, 3)], k * 3);
           D.r.set([0, 0, 0], k * 3); D.w.set([rnd(-9, 9), rnd(-9, 9), rnd(-9, 9)], k * 3); D.s[k] = rnd(0.02, 0.045); D.rest[k] = 0;
@@ -942,6 +949,7 @@
   // finding everything that can break, sorting it by distance and cutting it into plates.
   let ready = false, preparing = false, fired = false, onReady = null;
   function* preparation() {
+    allocDebris();
     const c = cityShape();
     nuke = { t0: 0, cx: target ? target.x : c.cx, cz: target ? target.z : c.cz, R: c.R, ...effects(yieldTons) };
     const root = new K.Object3D(); root.userData.scNuke = true; root.name = 'sc-nuke'; scene.add(root);
@@ -958,7 +966,7 @@
     try { yield* planSolids(); yield* flagSolidTriangles(); yield; buildSolids(); }
     catch (e) { console.warn('[nuke] solid buildings failed: buildings will only be cut off', e); solid.pieces = []; solid.set = null; solid.mesh = null; for (const j of jobs) j.solid = null; }
     const toBreak = jobs.reduce((x, j) => x + j.breakable, 0);
-    debrisChance = Math.min(1 / GRAVEL, (MAX_DEBRIS * 0.9) / Math.max(1, toBreak * GRAVEL));
+    debrisChance = Math.min(1 / GRAVEL, (maxDebris * 0.9) / Math.max(1, toBreak * GRAVEL));
     console.info('[nuke] ready · ground zero', nuke.cx.toFixed(1), nuke.cz.toFixed(1), '· city radius', nuke.R.toFixed(1),
       '· meshes', jobs.length, '· other pieces that will break', toBreak,
       '· building boxes', solid.boxes.length, '· chunk size', (solid.size || 0).toFixed(2), '· pieces', solid.pieces.length, '(' + (solid.verts / 3 | 0) + ' triangles)');
@@ -1002,7 +1010,7 @@
     dust.position.set(nuke.cx, 0.06, nuke.cz);
     disc = new K.Mesh(scorchDisc(), lam({ vertexColors: true }));
     disc.position.set(nuke.cx, 0.003, nuke.cz); disc.receiveShadow = true;
-    debris = new K.Instanced(cube(), lam({ color: '#ffffff' }), MAX_DEBRIS);
+    debris = new K.Instanced(cube(), lam({ color: '#ffffff' }), maxDebris);
     debris.frustumCulled = false; debris.castShadow = true; debris.receiveShadow = true; debris.count = 0;
     debris.setColorAt(0, new K.Color('#ffffff'));
     for (const m of [cloud, fireball, shell, dust, disc, debris]) { m.frustumCulled = false; root.add(m); }

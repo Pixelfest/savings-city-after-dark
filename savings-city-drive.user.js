@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – drive a car (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Space handbrake, C camera, E to get out). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -43,7 +43,8 @@
 
   // ---- settings (tiles, seconds; 1 tile ≈ 20 m, so 1 tile/s ≈ 72 km/h) ----
   const ENTER_DISTANCE = 0.2;      // how close you must be to a car's body to get in (any side, front or back)
-  const MAX_SPEED = 80 / 72;       // top speed: 80 km/h
+  const MAX_SPEED = 80 / 72;       // top speed: 80 km/h (a slider in the core's settings: 40 … 200)
+  const maxSpeed = () => ((window.scCore && window.scCore.settings && window.scCore.settings.get('carTopSpeed')) || 80) / 72;
   const MAX_REVERSE = 25 / 72;     // 25 km/h backwards
   const ENGINE = 0.8;              // acceleration from standstill (less and less towards top speed: 0–80 in about 4 s)
   const BRAKE = 1.6;               // braking with S (80 → 0 in about 0.7 s)
@@ -77,6 +78,7 @@
   // ---------- roads (ground height) ----------
   let segs = null;                 // per tile: road lines [ax, az, bx, bz]
   whenCore((c) => c.onCity((d) => { try { buildRoads(d.roads); } catch (e) { console.warn('[drive] roads', e); } }));
+  whenCore((c) => c.settings && c.settings.define({ id: 'carTopSpeed', label: 'Topsnelheid auto (zelf rijden)', min: 40, max: 200, step: 10, value: 80, format: (v) => `${v} km/u` }));
   function buildRoads(keys) {
     segs = new Map();
     for (const k of keys) {
@@ -287,7 +289,7 @@
     const steerIn = (down('KeyD', 'ArrowRight') ? 1 : 0) - (down('KeyA', 'ArrowLeft') ? 1 : 0);
     // pedals
     let a = 0;
-    if (gas && c.v >= -0.05) a = ENGINE * Math.max(0, 1 - c.v / MAX_SPEED);
+    if (gas && c.v >= -0.05) a = ENGINE * Math.max(0, 1 - c.v / maxSpeed());
     else if (gas) a = BRAKE;                                       // rolling back: W brakes first
     if (brake && c.v > 0.05) a = -BRAKE;
     else if (brake) a = -ENGINE * 0.6 * Math.max(0, 1 + c.v / MAX_REVERSE);

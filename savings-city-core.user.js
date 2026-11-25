@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -35,6 +35,10 @@
  * - onFrame(fn): one requestAnimationFrame loop for everyone; fn(dt, now), dt in seconds (at most
  *   0.1). Errors are caught per callback (and reported once).
  * - puff(x, y, z, opts): a dust puff (grows, drifts, fades) that works without walk mode.
+ * - settings: sliders other scripts add (define({ id, label, min, max, step, value, format?, help? }),
+ *   get(id), set(id, v), onChange(id, fn)); kept in localStorage. A button in the menu opens a
+ *   popup with all of them. The core's own: 'detail' (1 = normal … 5 = most detailed), read through
+ *   detail() → { level, factor: 2^(level − 1) } – scripts multiply their piece budgets by it.
  * - damage(event) / onDamage(fn): the damage bus. Weapons and disasters describe what happens;
  *   whatever can break registers a handler and decides for itself:
  *     { kind: 'blast' | 'impact' | 'push' | 'crush', x, y, z, radius, power, dir: {x,y,z}, n: {x,y,z},
@@ -271,13 +275,110 @@
     };
   }
 
+  // ---------- settings (sliders in a popup) ----------
+  const SETTINGS_KEY = 'sc-settings';
+  const defs = [], values = (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; } })();
+  const changeFns = new Map();
+  let popupEl = null;                                            // the open popup, if any
+  const settings = {
+    // { id, label, min, max, step, value (default), format(v) → text, help }
+    define(d) {
+      if (!d || !d.id || defs.some((x) => x.id === d.id)) return;
+      defs.push(d);
+      if (popupEl) renderPopup();
+    },
+    get(id) {
+      const d = defs.find((x) => x.id === id), v = values[id];
+      if (v === undefined || v === null) return d ? d.value : undefined;
+      return d ? Math.min(d.max, Math.max(d.min, v)) : v;
+    },
+    set(id, v) {
+      values[id] = v;
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(values)); } catch {}
+      for (const fn of changeFns.get(id) || []) { try { fn(v); } catch (e) { console.warn('[core] setting', id, e); } }
+    },
+    onChange(id, fn) { if (!changeFns.has(id)) changeFns.set(id, []); changeFns.get(id).push(fn); },
+    list: () => defs.map((d) => ({ ...d, current: settings.get(d.id) })),
+  };
+  const DETAIL_NAMES = ['', 'normaal', 'meer', 'veel', 'heel veel', 'maximaal'];
+  settings.define({ id: 'detail', label: 'Detail bij vernielen', min: 1, max: 5, step: 1, value: 1,
+    format: (v) => `${v} · ${DETAIL_NAMES[v]}${v > 1 ? ` (${2 ** (v - 1)}× zoveel stukken)` : ''}`,
+    help: 'Hoe fijn gebouwen in stukken breken (raket, monster, kernbom). Hoger = mooier, maar zwaarder voor de computer.' });
+  const detail = () => { const level = settings.get('detail') || 1; return { level, factor: 2 ** (level - 1) }; };
+
+  function renderPopup() {
+    const list = popupEl.querySelector('.list');
+    list.innerHTML = '';
+    for (const d of defs) {
+      const row = document.createElement('div');
+      row.className = 'set';
+      const v = settings.get(d.id), fmt = (x) => (d.format ? d.format(x) : String(x));
+      row.innerHTML = `<div class="head"><label for="sc-set-${d.id}">${d.label}</label><b></b></div>
+        <input id="sc-set-${d.id}" type="range" min="${d.min}" max="${d.max}" step="${d.step || 1}" value="${v}">
+        ${d.help ? `<div class="help">${d.help}</div>` : ''}`;
+      const out = row.querySelector('b'), input = row.querySelector('input');
+      out.textContent = fmt(v);
+      input.addEventListener('input', () => { const x = parseFloat(input.value); out.textContent = fmt(x); settings.set(d.id, x); });
+      list.appendChild(row);
+    }
+  }
+  function openSettings() {
+    if (popupEl) { closeSettings(); return; }
+    popupEl = document.createElement('div');
+    popupEl.id = 'sc-settings-popup';
+    popupEl.innerHTML = `
+      <style>
+        #sc-settings-popup{position:fixed;inset:0;z-index:10050;display:flex;align-items:center;justify-content:center;background:rgba(10,12,20,.45);font:500 15px/1.4 system-ui,sans-serif}
+        #sc-settings-popup .box{width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;background:#1d2233;color:#fff;border-radius:16px;padding:20px 22px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+        #sc-settings-popup h2{margin:0 0 4px;font:800 22px/1.2 system-ui,sans-serif;color:#ffd23f}
+        #sc-settings-popup .sub{opacity:.75;font-size:13px;margin-bottom:8px}
+        #sc-settings-popup .set{background:#151927;border-radius:10px;padding:10px 12px;margin-top:10px}
+        #sc-settings-popup .head{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+        #sc-settings-popup .head label{font-weight:700}
+        #sc-settings-popup .head b{font-variant-numeric:tabular-nums;text-align:right;color:#ffd23f}
+        #sc-settings-popup input[type=range]{width:100%;margin:8px 0 2px;accent-color:#ffd23f}
+        #sc-settings-popup .help{font-size:12px;opacity:.7}
+        #sc-settings-popup .buttons{display:flex;gap:10px;justify-content:space-between;margin-top:16px}
+        #sc-settings-popup .buttons button{border:0;border-radius:10px;padding:10px 18px;font:800 15px system-ui,sans-serif;cursor:pointer;background:#3a4160;color:#fff}
+        #sc-settings-popup .buttons .close{background:#ffd23f;color:#223}
+      </style>
+      <div class="box" role="dialog" aria-label="Instellingen">
+        <h2>Instellingen</h2>
+        <div class="sub">Worden onthouden in deze browser. Ze gelden voor wat hierna gebeurt.</div>
+        <div class="list"></div>
+        <div class="buttons"><button type="button" class="reset">Standaard</button><button type="button" class="close">Klaar</button></div>
+      </div>`;
+    document.body.appendChild(popupEl);
+    renderPopup();
+    popupEl.querySelector('.close').addEventListener('click', closeSettings);
+    popupEl.querySelector('.reset').addEventListener('click', () => { for (const d of defs) settings.set(d.id, d.value); renderPopup(); });
+    popupEl.addEventListener('click', (e) => { if (e.target === popupEl) closeSettings(); });
+    popupEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+  }
+  function closeSettings() { if (popupEl) { popupEl.remove(); popupEl = null; } }
+  // the button in the app's menu (next to the other scripts' buttons)
+  const SVG = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="g-ico" aria-hidden="true"';
+  const ICON = `<svg ${SVG}><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></svg>`;
+  function ensureButton() {
+    if (document.getElementById('sc-settings')) return;
+    const row = document.querySelector('.hz-tr .menu-mini'); if (!row) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-settings';
+    b.title = 'Instellingen (scripts)'; b.setAttribute('aria-label', 'Instellingen (scripts)');
+    b.innerHTML = '<b class="s-bg"></b>' + ICON;
+    b.addEventListener('click', (e) => { e.stopPropagation(); openSettings(); });
+    row.appendChild(b);
+  }
+  const startButton = () => { ensureButton(); new MutationObserver(ensureButton).observe(document.body, { childList: true, subtree: true }); };
+  if (document.body) startButton(); else document.addEventListener('DOMContentLoaded', startButton);
+
   // ---------- small shared helpers ----------
   const isFacade = (m) => !!(m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade');
   // the building (group with userData.projectId) an object belongs to, or null
   function projectOf(o) { for (let p = o; p; p = p.parent) if (p.userData && p.userData.projectId !== undefined) return p; return null; }
 
   window.scCore = {
-    version: '1.1',
+    version: '1.2',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
@@ -290,6 +391,7 @@
     onCity(fn) { if (typeof fn === 'function') { cityFns.push(fn); if (city) try { fn(city); } catch (e) { console.warn('[core] city', e); } } },
     traffic: () => trafficCars,
     out, audio, onFrame, puff, damage, onDamage, isFacade, projectOf,
+    settings, detail, openSettings,
   };
   // scripts that loaded before the core and are waiting for it
   const waiting = Array.isArray(window.scCoreWaiting) ? window.scCoreWaiting : [];

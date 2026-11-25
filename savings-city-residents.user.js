@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.16
+// @version      1.17
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -46,8 +46,8 @@
 
 
   // ---- settings -------------------------------------------------------------------------
-  const PER_ROAD = 2;             // residents per road tile
-  const MAX_PEOPLE = 2000;
+  const PER_ROAD = 2;             // residents per road tile (a slider in the core's settings: 0.5 … 4)
+  const MAX_PEOPLE = 4000;
   const SPEED = 0.15;             // tiles per second (cars drive about 1–2)
   const SPEED_VARIATION = 0.35;   // ±35 %
   const SIDEWALK_OFFSET = 0.205;  // distance from the road line (middle of the sidewalk)
@@ -209,7 +209,8 @@
     drops.length = 0;
     loose.length = 0; for (const set of looseSets) { set.list.length = 0; set.ring = 0; }
     if (!net.edges.length) return;
-    const count = Math.min(MAX_PEOPLE, Math.round(net.edges.length * PER_ROAD));
+    const perRoad = (window.scCore && window.scCore.settings && window.scCore.settings.get('residents')) || PER_ROAD;
+    const count = Math.min(MAX_PEOPLE, Math.round(net.edges.length * perRoad));
     while (people.length < count) {
       const p = newPerson();
       const [a, b] = pick(net.edges);
@@ -952,7 +953,15 @@
     if (BLOOD) stepBlood(dt, n, m);
   }
   let tip = null, bodyM = null, headM = null, childBody = null, childHead = null;
-  whenCore((c) => c.onFrame(frame));
+  whenCore((c) => {
+    c.onFrame(frame);
+    if (c.settings) {
+      c.settings.define({ id: 'residents', label: 'Inwoners per stuk straat', min: 0.5, max: 4, step: 0.5, value: PER_ROAD,
+        format: (v) => `${v}${net ? ` (≈ ${Math.min(MAX_PEOPLE, Math.round(net.edges.length * v))} mensen)` : ''}`,
+        help: 'Meer mensen = drukker op straat, maar zwaarder. Iedereen begint opnieuw.' });
+      c.settings.onChange('residents', () => { seenVersion = -1; });   // new people at the next frame
+    }
+  });
 
   // ---------- deaths ----------
   // Every death is announced (the bodycount script counts them): sc:kill { x, z, cause }.

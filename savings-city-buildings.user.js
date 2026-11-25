@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -228,9 +228,11 @@
   // ---- cutting a building into chunks, in time slices ----
   // Chunk size for a building: CHUNK_SIZE, or bigger so there are about MAX_CHUNKS at most
   // (measured: shatter makes about 7.7 × volume / size³ pieces – it cuts until every side is short).
+  // The detail setting (core: 1 … 5) multiplies the number of chunks by 1, 2, 4, 8, 16.
   function chunkSizeFor(bd) {
     const volume = bd.boxes.reduce((v, b) => v + (b.x1 - b.x0) * (b.y1 - b.y0) * (b.z1 - b.z0), 0);
-    return Math.max(CHUNK_SIZE, Math.cbrt((7.7 * volume) / MAX_CHUNKS));
+    const f = C() && C().detail ? C().detail().factor : 1;
+    return Math.max(CHUNK_SIZE / Math.cbrt(f), Math.cbrt((7.7 * volume) / (MAX_CHUNKS * f)));
   }
   function* cutBuilding(bd, st) {
     const pieces = [], size = st.size = chunkSizeFor(bd);
@@ -353,7 +355,8 @@
     if (!st.ready) { st.hits += opts.count ?? 1; st.pending.push(() => { st.hits -= opts.count ?? 1; hit(st.bd, p, n, opts); }); return true; }
     crater(st.bd, p, n, opts.radius || HOLE_RADIUS);
     st.hits += opts.count ?? 1;
-    if (st.hits >= (opts.collapseAt || HITS_TO_COLLAPSE)) collapse(st.bd, { at: p, out: n });
+    const hitsNeeded = opts.collapseAt || (C() && C().settings ? C().settings.get('hitsToCollapse') : 0) || HITS_TO_COLLAPSE;
+    if (st.hits >= hitsNeeded) collapse(st.bd, { at: p, out: n });
     return true;
   }
   // the building comes down; opts: { at: {x,y,z} | [x,y,z], out: {x,z} } or { at, push: [x,0,z] | {x,z}, force, spread }
@@ -505,6 +508,8 @@
     if (!c) { if ((attach.n = (attach.n || 0) + 1) < 240) setTimeout(attach, 250); else console.warn('[buildings] savings-city-core is missing'); return; }
     c.onFrame(step);
     c.onDamage(onDamage);
+    if (c.settings) c.settings.define({ id: 'hitsToCollapse', label: 'Raketten tot een gebouw instort', min: 1, max: 20, step: 1, value: HITS_TO_COLLAPSE,
+      format: (v) => (v === 1 ? '1 raket' : `${v} raketten`) });
   })();
 
   window.scBuildings = {
