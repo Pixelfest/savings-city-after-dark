@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.10
+// @version      1.11
 // @description  Simple, static little figures that slowly walk the sidewalks and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -110,9 +110,28 @@
     if (appModule) return appModule;
     const s = [...document.querySelectorAll('script[type="module"][src]')].find((s) => /\/index-[^/]*\.js/.test(s.src));
     if (!s) throw new Error('main module not found');
-    const m = await import(s.src);
+    const m = findHelpers(await import(s.src));
     if (typeof m.v !== 'function' || typeof m.a !== 'function') throw new Error('app internals changed');
     return (appModule = m);
+  }
+  // The app's minified export names change with every build, so its helpers are recognised by
+  // what their code looks like (checked against the builds of 24 and 25 Nov 2026):
+  //   v = placed projects → [{id, fp, gx, gy, facing}]   A = rotate a footprint (fp, facing)
+  //   a = front-door road keys (gx, gy, fp, facing)      w = floors of a project
+  //   S = cells of a footprint                           n = tiles of the welcome sign
+  function findHelpers(m) {
+    const fns = Object.values(m).filter((f) => typeof f === 'function');
+    const code = (f) => { try { return Function.prototype.toString.call(f); } catch { return ''; } };
+    const find = (re) => fns.find((f) => re.test(code(f)));
+    const isSign = (a) => Array.isArray(a) && a.length >= 4 && a.length <= 64 && a.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isInteger));
+    return {
+      v: find(/\.filter\(\w+\)\.map\(\w+=>\(\{id:\w+\.id,fp:/),
+      A: find(/^function\s*\w*\(\w+,\w+\)\{let \w+=\w+\.base\?\?\w+/),
+      a: find(/^function\s*\w*\(\w+,\w+,\w+,\w+\)\{\w+=\w+\(\w+,\w+\);let \w+=\[\];for\(let\[\w+,\w+\]of /),
+      w: find(/^function\s*\w*\(\w+,\w+=\w+\)\{return \w+\(\w+\)\?Math\.min\(/),
+      S: find(/\{let (\w+)=\[\];for\(let (\w+)=0;\2<\w+\.w;\2\+\+\)for\(let (\w+)=0;\3<\w+\.d;\3\+\+\)\w+\(\w+,\2,\3\)&&\1\.push/),
+      n: Object.values(m).find(isSign),
+    };
   }
 
   // ---------- road network ----------
