@@ -1,0 +1,1164 @@
+// ==UserScript==
+// @name         Savings City – nuke
+// @namespace    savings-city-tweaks
+// @version      2.4
+// @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
+// @match        https://your-savings-city-host.example/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+/*
+ * How it works
+ * ------------
+ * - The renderer is caught through three.js' devtools hook; the scene comes from the first render.
+ *   All three.js classes are borrowed from objects already in the scene (no extra download).
+ * - Nearly everything the app draws is merged geometry with a colour per vertex (city blocks of
+ *   buildings, trees, lots). When the shockwave front passes, every triangle is handled by its
+ *   distance from ground zero:
+ *     – within TOTAL_RADIUS: everything above the foundations is blown away;
+ *     – further out: things are broken off above a height that grows towards the edge;
+ *     – what's left is scorched (vertex colours darkened, more so near the centre).
+ * - Buildings are solids: the boxes their walls are made of are cut (during the countdown) into a
+ *   ruin of uneven columns and, above that, convex chunks (CHUNK_SIZE) with the facade (windows,
+ *   colours) on the outside and broken concrete inside. At the flash the walls are swapped for
+ *   these pieces; when the shockwave reaches a chunk it is flung outward and up, tumbles, lands and
+ *   comes to rest on its largest face. Nothing stands near ground zero; further out more of each
+ *   building remains (RUIN_SHARE), jagged (RUIN_JAGGED).
+ *   Other things (roof details, trees …) above the ruins vanish into rubble cubes.
+ *   Small rubble cubes in the building's colours fly along as gravel.
+ * - Mushroom cloud, fireball, shockwave dome and dust ring are low-poly shapes; the cloud is a few
+ *   hundred instanced puffs (cap that rolls outward, stem, skirt), glowing first, then cooling.
+ * - Camera shake = shaking the canvas element, so it also works in walk mode.
+ * - Residents (residents script) all run, and fall as the wave reaches them. Cars are vaporised
+ *   near the centre and burnt out further away; all of them stop.
+ * - If the app later rebuilds parts of the city (e.g. after a data refresh), those are destroyed
+ *   again straight away. Nothing is sent to the server: reload the page and the city is back.
+ */
+(function () {
+  'use strict';
+
+  // ---- settings (distances in tiles; 1 tile ≈ 20 m) --------------------------------------
+  const COUNTDOWN = 10;            // seconds between the click and the blast (0 = immediately)
+  const WAVE_SECONDS = 6;          // time for the shockwave to reach the edge
+  const WAVE_DELAY = 0.2;          // the wave leaves after the flash, so you can see the buildings break
+  const FLASH_SECONDS = 0.6;       // white flash: short, so it doesn't hide the destruction
+  const LIGHT_BOOST = 3.5;         // how much brighter the scene gets for a moment (was 7)
+  const TOTAL_FRACTION = 0.10;     // share of the city radius that is flattened completely
+  const EDGE_FRACTION = 1.15;      // how far (× city radius) the wave still does damage
+  const FOUNDATION_HEIGHT = 0.03;  // things lower than this survive even at ground zero
+  const MAX_DEBRIS = 8000;        // pieces of rubble (small instanced cubes)
+  const BLAST_SPEED = 10;          // how hard chunks and rubble are flung (tiles per second near the centre)
+  const CHUNK_SIZE = 0.2;          // buildings break into solid chunks about this big (tiles); smaller = more chunks
+  const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide
+  const RUIN_SHARE = 0.75;         // at the edge of the blast this share of a building still stands (less towards the centre, none in the middle)
+  const RUIN_JAGGED = 0.12;        // how much the broken tops of neighbouring columns differ (tiles; 0 = one flat cut)
+  const MAX_CHUNK_VERTICES = 150000;   // for a big city the chunk size is raised so they stay below this (performance)
+  const SCATTER_DEGREES = 35;      // pieces fly away from ground zero ± this much, so debris mixes
+  const GRAVEL = 0.35;             // other things (roof details, trees …) blown away: chance per triangle of a rubble cube
+  const CLOUD_PUFFS = 500;
+  const CLOUD_LINGER = 20;         // after this many seconds the cloud rises and drifts away
+  const SHAKE = 22;                // camera shake strength (pixels)
+  const SOUND = true;
+  // -----------------------------------------------------------------------------------------
+
+  // ---------- catch the scene ----------
+  let scene = null, renderer = null;
+  const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
+  hook.addEventListener('observe', (e) => {
+    const r = e.detail;
+    if (!r || !r.isWebGLRenderer || r.__scNuke) return;
+    r.__scNuke = true; renderer = r;
+    const orig = r.render;
+    r.render = function (s, c) {
+      if (!scene && s && s.isScene && c && c.isOrthographicCamera) scene = s;
+      return orig.apply(this, arguments);
+    };
+  });
+
+  // The traffic list (same trick as the other scripts): the app moves its cars with
+  // traffic.cars.forEach(...) every frame.
+  let trafficCars = null;
+  const origForEach = Array.prototype.forEach;
+  Array.prototype.forEach = function () {
+    if (this !== trafficCars && this.length) {
+      const c = this[0];
+      if (c && typeof c === 'object' && typeof c.base === 'number' && typeof c.heading === 'number' && 'from' in c && 'to' in c) trafficCars = this;
+    }
+    return origForEach.apply(this, arguments);
+  };
+
+  // ---------- small helpers ----------
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
+  const smooth = (x) => { x = clamp01(x); return x * x * (3 - 2 * x); };
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const mine = (o) => { for (let p = o; p; p = p.parent) if (p.userData && p.userData.scNuke) return true; return false; };
+
+  let K = null;   // borrowed three.js classes
+  function classes() {
+    if (K) return K;
+    let mesh = null, inst = null, lambert = null, color = null;
+    scene.traverse((o) => {
+      if (!mesh && o.isMesh && !o.isInstancedMesh && !o.isSkinnedMesh && o.geometry && o.geometry.attributes.position) mesh = o;
+      if (!inst && o.isInstancedMesh) inst = o;
+      const ms = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+      for (const m of ms) { if (!lambert && m.isMeshLambertMaterial) lambert = m; if (!color && m.color && m.color.isColor) color = m.color; }
+    });
+    if (!mesh || !inst || !lambert || !color) return null;
+    let proto = Object.getPrototypeOf(mesh.geometry);
+    while (proto && !Object.prototype.hasOwnProperty.call(proto, 'translate')) proto = Object.getPrototypeOf(proto);
+    let o3 = Object.getPrototypeOf(scene);
+    while (o3 && !Object.prototype.hasOwnProperty.call(o3, 'add')) o3 = Object.getPrototypeOf(o3);
+    K = {
+      Mesh: mesh.constructor, Instanced: inst.constructor, Geometry: proto.constructor, Object3D: o3.constructor,
+      Attr: mesh.geometry.attributes.position.constructor, Lambert: lambert.constructor, Color: color.constructor,
+      M4: mesh.matrix.constructor, V3: mesh.position.constructor, Q: mesh.quaternion.constructor,
+    };
+    return K;
+  }
+
+  function geometry(pos, nor, col) {
+    const g = new K.Geometry();
+    g.setAttribute('position', new K.Attr(new Float32Array(pos), 3));
+    g.setAttribute('normal', new K.Attr(new Float32Array(nor), 3));
+    if (col) g.setAttribute('color', new K.Attr(new Float32Array(col), 3));
+    return g;
+  }
+  // Low-poly ball (icosahedron, flat shaded), radius 1.
+  function icosa() {
+    const t = (1 + Math.sqrt(5)) / 2;
+    const v = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]].map((p) => { const l = Math.hypot(...p); return p.map((c) => c / l); });
+    const f = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]];
+    const P = [], N = [];
+    for (const [a, b, c] of f) {
+      const A = v[a], B = v[b], C = v[c];
+      const n = [(A[0] + B[0] + C[0]) / 3, (A[1] + B[1] + C[1]) / 3, (A[2] + B[2] + C[2]) / 3], l = Math.hypot(...n);
+      for (const p of [A, B, C]) { P.push(...p); N.push(n[0] / l, n[1] / l, n[2] / l); }
+    }
+    return geometry(P, N);
+  }
+  function cube() {
+    const P = [], N = [], h = 0.5;
+    const quad = (a, b, c, e, n) => { for (const v of [a, b, c, a, c, e]) { P.push(...v); N.push(...n); } };
+    quad([-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h], [0, 0, 1]); quad([h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h], [0, 0, -1]);
+    quad([h, -h, h], [h, -h, -h], [h, h, -h], [h, h, h], [1, 0, 0]); quad([-h, -h, -h], [-h, -h, h], [-h, h, h], [-h, h, -h], [-1, 0, 0]);
+    quad([-h, h, h], [h, h, h], [h, h, -h], [-h, h, -h], [0, 1, 0]); quad([-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h], [0, -1, 0]);
+    return geometry(P, N);
+  }
+  // Half a ball (open at the bottom), radius 1 – the shockwave dome.
+  function dome() {
+    const P = [], N = [], S = 16, R = 6;
+    const pt = (i, j) => { const a = (i / S) * Math.PI * 2, b = (j / R) * Math.PI / 2; return [Math.cos(a) * Math.cos(b), Math.sin(b), Math.sin(a) * Math.cos(b)]; };
+    for (let i = 0; i < S; i++) for (let j = 0; j < R; j++) {
+      const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1);
+      for (const p of [a, c, b, a, d, c]) { P.push(...p); N.push(...p); }
+    }
+    return geometry(P, N);
+  }
+  // Flat ring from radius `inner` to 1, facing up.
+  function ring(inner) {
+    const P = [], N = [], S = 48;
+    for (let i = 0; i < S; i++) {
+      const a0 = (i / S) * Math.PI * 2, a1 = ((i + 1) / S) * Math.PI * 2;
+      const o0 = [Math.cos(a0), 0, Math.sin(a0)], o1 = [Math.cos(a1), 0, Math.sin(a1)];
+      const i0 = o0.map((v) => v * inner), i1 = o1.map((v) => v * inner);
+      for (const p of [i0, o1, o0, i0, i1, o1]) { P.push(...p); N.push(0, 1, 0); }
+    }
+    return geometry(P, N);
+  }
+  // Scorched ground: a disc, dark in the middle fading to grass colour at the rim.
+  function scorchDisc() {
+    const P = [], N = [], C = [], S = 48, rings = 6;
+    const mid = new K.Color('#1f1b18'), rim = new K.Color('#b9d49b'), tmp = new K.Color();
+    const col = (f) => { tmp.copy(mid).lerp(rim, f * f); return [tmp.r, tmp.g, tmp.b]; };
+    for (let r = 0; r < rings; r++) {
+      const f0 = r / rings, f1 = (r + 1) / rings;
+      for (let i = 0; i < S; i++) {
+        const a0 = (i / S) * Math.PI * 2, a1 = ((i + 1) / S) * Math.PI * 2;
+        const p = (f, a) => [Math.cos(a) * f, 0, Math.sin(a) * f];
+        const quad = [[p(f0, a0), f0], [p(f1, a1), f1], [p(f1, a0), f1], [p(f0, a0), f0], [p(f0, a1), f0], [p(f1, a1), f1]];
+        for (const [v, f] of quad) { P.push(...v); N.push(0, 1, 0); C.push(...col(f)); }
+      }
+    }
+    return geometry(P, N, C);
+  }
+
+  // ---------- the city: centre and size ----------
+  function cityShape() {
+    let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity, n = 0;
+    scene.traverse((g) => {
+      if (!g.userData || g.userData.projectId === undefined) return;
+      n++;
+      x0 = Math.min(x0, g.position.x); z0 = Math.min(z0, g.position.z);
+      x1 = Math.max(x1, g.position.x + 2); z1 = Math.max(z1, g.position.z + 2);
+    });
+    if (!n) return { cx: 0, cz: 0, R: 10 };
+    const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+    return { cx, cz, R: Math.max(4, Math.hypot(x1 - x0, z1 - z0) / 2) };
+  }
+
+  // ---------- state ----------
+  let nuke = null;   // { t0, cx, cz, R, total, edge, H, ... }
+  const elapsed = () => (performance.now() - nuke.t0) / 1000;
+  const front = (t) => { t = Math.max(0, t - WAVE_DELAY); return nuke.edge * clamp01((1 - Math.exp(-t / (WAVE_SECONDS / 3.5))) / (1 - Math.exp(-3.5))); };
+  // How high things may still stand at distance d once the wave has passed.
+  function keepHeight(d) {
+    if (d <= nuke.total) return FOUNDATION_HEIGHT;
+    const f = clamp01((d - nuke.total) / (nuke.edge - nuke.total));
+    return FOUNDATION_HEIGHT + f * f * f * 4;
+  }
+  const scorch = (d) => 0.22 + 0.78 * smooth(d / nuke.edge);
+
+  // ---------- destroying geometry ----------
+  // Every mesh in reach gets a list of its triangles (or vertices) sorted by distance from ground
+  // zero; each frame the ones the front has passed are handled.
+  const prepared = new WeakSet();
+  const jobs = [];
+  let debrisChance = 1;
+
+  function eligible(o) {
+    if (mine(o) || o.isInstancedMesh || o.isSkinnedMesh) return false;
+    if (!(o.isMesh || o.isPoints) || !o.geometry || !o.geometry.attributes.position) return false;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    if (o.isMesh && ms.some((m) => m && m.isShaderMaterial)) return false;
+    if (o.isPoints && ms.some((m) => m && m.uniforms && m.uniforms.uCenter)) return false;   // snowfall
+    const g = o.geometry;
+    if (!g.boundingBox) g.computeBoundingBox();
+    const b = g.boundingBox;
+    if (b.max.x - b.min.x > 300 || b.max.z - b.min.z > 300) return false;                      // the ground plane
+    return true;
+  }
+
+  function prepare(o, uses, instant) {
+    if (uses.get(o.geometry) > 1) o.geometry = o.geometry.clone();   // shared geometry: give this mesh its own copy
+    const g = o.geometry;
+    prepared.add(g);
+    o.updateWorldMatrix(true, false);
+    const e = o.matrixWorld.elements, pos = g.attributes.position, col = g.attributes.color, idx = g.index;
+    const wx = (i) => e[0] * pos.getX(i) + e[4] * pos.getY(i) + e[8] * pos.getZ(i) + e[12];
+    const wy = (i) => e[1] * pos.getX(i) + e[5] * pos.getY(i) + e[9] * pos.getZ(i) + e[13];
+    const wz = (i) => e[2] * pos.getX(i) + e[6] * pos.getY(i) + e[10] * pos.getZ(i) + e[14];
+    const triMode = o.isMesh && !idx;
+    const n = triMode ? Math.floor(pos.count / 3) : pos.count;   // a stray vertex count must not stop everything
+    const dist = new Float32Array(n), order = new Uint32Array(n);
+    let breakable = 0;
+    let mats = Array.isArray(o.material) ? o.material[0] : o.material;
+    for (let k = 0; k < n; k++) {
+      let x, z;
+      if (triMode) { const i = k * 3; x = (wx(i) + wx(i + 1) + wx(i + 2)) / 3; z = (wz(i) + wz(i + 1) + wz(i + 2)) / 3; }
+      else { x = wx(k); z = wz(k); }
+      dist[k] = Math.hypot(x - nuke.cx, z - nuke.cz);
+      order[k] = k;
+      // will this piece be blown off? (for the debris budget)
+      if (triMode && dist[k] <= nuke.edge) { const i = k * 3; if (Math.max(wy(i), wy(i + 1), wy(i + 2)) > keepHeight(dist[k])) breakable++; }
+    }
+    order.sort((a, b) => dist[a] - dist[b]);
+    let shown = true; for (let q = o; q; q = q.parent) if (!q.visible) shown = false;   // hidden copies only vanish
+    const job = { o, g, pos, col, nor: g.attributes.normal, triMode, dist, order, next: 0, wx, wy, wz, inv: null, matColor: mats && mats.color, visible: o.visible, breakable,
+      animate: triMode && o.isMesh && shown, frags: null };
+    jobs.push(job);
+    if (instant) advance(job, front(elapsed()), false);
+    return job;
+  }
+
+  function advance(job, f, makeDebris) {
+    const { pos, col, order, dist } = job;
+    let changed = false;
+    while (job.next < order.length && dist[order[job.next]] <= f) {
+      const k = order[job.next++], d = dist[k];
+      if (d > nuke.edge) { job.next = order.length; break; }
+      const keep = keepHeight(d), dark = scorch(d);
+      changed = true;
+      if (job.solid && job.solid[k]) continue;                  // part of a solid building: handled as chunks
+      if (job.triMode) {
+        const i = k * 3;
+        const y0 = job.wy(i), y1 = job.wy(i + 1), y2 = job.wy(i + 2), cy = (y0 + y1 + y2) / 3;
+        const lo = Math.min(y0, y1, y2), hi = Math.max(y0, y1, y2);
+        if (hi <= keep) {
+          // stays: scorched
+          if (col) for (let v = i; v < i + 3; v++) col.setXYZ(v, col.getX(v) * dark, col.getY(v) * dark, col.getZ(v) * dark);
+        } else if (lo < keep && keep > FOUNDATION_HEIGHT) {
+          // a wall reaching above the break height: broken off there (top part becomes debris)
+          if (makeDebris && Math.random() < debrisChance) spawnDebris(job, i, d, (keep + hi) / 2);
+          if (!job.inv) job.inv = job.o.matrixWorld.clone().invert();
+          for (let v = i; v < i + 3; v++) {
+            if (job.wy(v) > keep) { const w = new K.V3(job.wx(v), keep, job.wz(v)).applyMatrix4(job.inv); pos.setXYZ(v, w.x, w.y, w.z); }
+            if (col) col.setXYZ(v, col.getX(v) * dark, col.getY(v) * dark, col.getZ(v) * dark);
+          }
+        } else {
+          if (makeDebris && Math.random() < debrisChance * GRAVEL) spawnDebris(job, i, d, cy);
+          // blown off (a roof detail, a tree …): gone, the rubble cube above flies for it
+          const lx = (pos.getX(i) + pos.getX(i + 1) + pos.getX(i + 2)) / 3, ly = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3, lz = (pos.getZ(i) + pos.getZ(i + 1) + pos.getZ(i + 2)) / 3;
+          for (let v = i; v < i + 3; v++) pos.setXYZ(v, lx, ly, lz);
+        }
+      } else {
+        // indexed meshes and point clouds: squash vertices down to what may still stand
+        const y = job.wy(k);
+        if (y > keep) {
+          if (job.o.isPoints) pos.setY(k, pos.getY(k) - 1000);           // lights in blown-away trees: gone
+          else {
+            if (!job.inv) job.inv = job.o.matrixWorld.clone().invert();
+            const v = new K.V3(job.wx(k), keep, job.wz(k)).applyMatrix4(job.inv);
+            pos.setXYZ(k, v.x, v.y, v.z);
+          }
+        }
+        if (col) col.setXYZ(k, col.getX(k) * dark, col.getY(k) * dark, col.getZ(k) * dark);
+      }
+    }
+    if (changed) {
+      pos.needsUpdate = true;
+      if (col) col.needsUpdate = true;
+      job.g.boundingSphere = null;
+    }
+  }
+
+  function scan(instant) {
+    const uses = new Map(), list = [];
+    scene.traverse((o) => { if (o.geometry) uses.set(o.geometry, (uses.get(o.geometry) || 0) + 1); if (eligible(o) && !prepared.has(o.geometry)) list.push(o); });
+    let added = 0;
+    for (const o of list) {
+      if (prepared.has(o.geometry)) continue;
+      try { prepare(o, uses, instant); added++; } catch (e) { prepared.add(o.geometry); console.warn('[nuke] skipped', o.name || o.type, e); }
+    }
+    if (added && instant) window.dispatchEvent(new Event('sc:geometry-changed'));
+    return added;
+  }
+
+  // ---------- flying chunks ----------
+  // Chunks (see "solid buildings" below) are prepared during the countdown, so the blast itself
+  // only has to move them: outward and up, tumbling; after landing they tip onto their largest face.
+  const fragments = [];
+  let nukeRoot = null;
+
+  // The shockwave reached this chunk: it starts flying.
+  function launch(fr) {
+    if (fr.active) return;
+    fr.active = true;
+    const d = fr.d || 1, [cx, cy, cz] = fr.pivot;
+    // away from ground zero, turned a random bit so neighbouring buildings' debris mixes
+    const turn = rnd(-1, 1) * SCATTER_DEGREES * Math.PI / 180, bx = (cx - nuke.cx) / d, bz = (cz - nuke.cz) / d;
+    const dx = bx * Math.cos(turn) - bz * Math.sin(turn), dz = bx * Math.sin(turn) + bz * Math.cos(turn);
+    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
+    const out = BLAST_SPEED * power * rnd(0.3, 1.3) + 0.3;
+    let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
+    Object.assign(fr, {
+      R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0],
+      v: [dx * out + rnd(-0.2, 0.2), rnd(0.4, 1.8) * power + 0.25 + cy * 0.25, dz * out + rnd(-0.2, 0.2)],
+      axis: [ax / al, ay / al, az / al], w: rnd(1.5, 7) * power + 0.6, age: 0, landed: false, rest: false, minY: cy,
+    });
+    fragments.push(fr);
+  }
+
+  // rotation of `angle` around a unit axis, as a 3×3 matrix (row-major)
+  function rot(x, y, z, angle) {
+    const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+    return [t * x * x + c, t * x * y - s * z, t * x * z + s * y, t * x * y + s * z, t * y * y + c, t * y * z - s * x, t * x * z - s * y, t * y * z + s * x, t * z * z + c];
+  }
+  const mul = (A, B) => [
+    A[0] * B[0] + A[1] * B[3] + A[2] * B[6], A[0] * B[1] + A[1] * B[4] + A[2] * B[7], A[0] * B[2] + A[1] * B[5] + A[2] * B[8],
+    A[3] * B[0] + A[4] * B[3] + A[5] * B[6], A[3] * B[1] + A[4] * B[4] + A[5] * B[7], A[3] * B[2] + A[4] * B[5] + A[5] * B[8],
+    A[6] * B[0] + A[7] * B[3] + A[8] * B[6], A[6] * B[1] + A[7] * B[4] + A[8] * B[7], A[6] * B[2] + A[7] * B[5] + A[8] * B[8]];
+
+  function writeFragment(fr) {
+    const { pl, orig, n0, R, pivot, off } = fr, pos = pl.pos, nor = pl.nor;
+    let minY = Infinity;
+    for (let n = 0, k = fr.start; n < fr.count; n++, k++) {
+      const a = orig[n * 3], b = orig[n * 3 + 1], c = orig[n * 3 + 2];
+      const py = pivot[1] + off[1] + R[3] * a + R[4] * b + R[5] * c;
+      pos.setXYZ(k, pivot[0] + off[0] + R[0] * a + R[1] * b + R[2] * c, py, pivot[2] + off[2] + R[6] * a + R[7] * b + R[8] * c);
+      const p = n0[n * 3], q = n0[n * 3 + 1], r = n0[n * 3 + 2];
+      nor.setXYZ(k, R[0] * p + R[1] * q + R[2] * r, R[3] * p + R[4] * q + R[5] * r, R[6] * p + R[7] * q + R[8] * r);
+      if (py < minY) minY = py;
+    }
+    // only upload the part of the layer that moved
+    pl.lo = Math.min(pl.lo ?? Infinity, fr.start); pl.hi = Math.max(pl.hi ?? -Infinity, fr.start + fr.count);
+    fr.minY = minY;
+  }
+
+  function flushPools() {
+    for (const pl of solid.pool ? [solid.pool] : []) {
+      if (pl.lo === undefined || pl.lo === Infinity) continue;
+      for (const a of [pl.pos, pl.nor]) {
+        if (a.addUpdateRange) { a.addUpdateRange(pl.lo * 3, (pl.hi - pl.lo) * 3); }
+        a.needsUpdate = true;
+      }
+      pl.lo = pl.hi = undefined;
+    }
+  }
+
+  function stepFragments(dt) {
+    if (!dt) return;
+    stepFragmentsInner(dt);
+    flushPools();
+  }
+  function stepFragmentsInner(dt) {
+    const ground = 0.04;
+    for (const fr of fragments) {
+      if (fr.rest) continue;
+      fr.age += dt;
+      fr.v[1] -= 6 * dt;                                         // gravity
+      for (let a = 0; a < 3; a++) fr.off[a] += fr.v[a] * dt;
+      if (!fr.landed) fr.R = mul(rot(...fr.axis, fr.w * dt), fr.R);   // tumbling through the air
+      else {
+        // on the ground: tip over until the plate lies flat (its face pointing up or down)
+        const [x, y, z] = fr.normal, R = fr.R;
+        const n = [R[0] * x + R[1] * y + R[2] * z, R[3] * x + R[4] * y + R[5] * z, R[6] * x + R[7] * y + R[8] * z];
+        const up = -1;                                           // ends up lying on its largest face
+        const tilt = Math.acos(Math.min(1, Math.max(-1, n[1] * up)));
+        if (tilt > 0.01) {
+          let ax = -n[2] * up, az = n[0] * up; let l = Math.hypot(ax, az);   // n × (0, up, 0): turns n towards straight up/down
+          if (l < 1e-6) { ax = 1; az = 0; l = 1; }                 // exactly the wrong way up: any horizontal axis
+          fr.R = mul(rot(ax / l, 0, az / l, Math.min(tilt, 6 * dt)), R);
+        }
+        const k = Math.exp(-5 * dt); fr.v[0] *= k; fr.v[2] *= k;
+        if ((tilt <= 0.01 && Math.hypot(fr.v[0], fr.v[2]) < 0.05) || fr.age > 12) fr.rest = true;
+      }
+      writeFragment(fr);
+      if (fr.minY < ground) {                                    // touching the ground: stay on top of it
+        fr.off[1] += ground - fr.minY;
+        if (!fr.landed) { fr.landed = true; fr.v[0] *= 0.4; fr.v[2] *= 0.4; }
+        fr.v[1] = Math.max(0, fr.v[1]) * 0.1;
+        writeFragment(fr);
+      }
+    }
+  }
+
+  // ---------- solid buildings ----------
+  // Every building's walls are made by the app from rectangular boxes ("masses": a rectangle of
+  // walls plus a flat top, one box per tier), all in one indexed facade mesh per building. Those
+  // boxes are the building's solid volume. During the countdown each box is cut into columns
+  // (RUIN_COLUMN wide), each column gets its own break height (the ruin's jagged top), and
+  // everything above that is cut into convex chunks by random planes (about CHUNK_SIZE big).
+  // Outside faces of the chunks keep the facade: same texture coordinates (windows) and colours
+  // as the original walls and roof; faces inside the building are broken concrete.
+  // At the flash the original walls are swapped for these pieces (they look the same); when the
+  // shockwave reaches a chunk it flies off, the ruin stays, scorched, with a broken concrete top.
+  const JF = [0.04, 0.96];                                       // the facade texture's plain spot (roofs use it)
+  const solid = { boxes: [], pieces: [], pool: null, next: 0, verts: 0, hiddenMeshes: [] };
+  const isFacade = (m) => m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade';
+
+  // Read the boxes of one building's facade mesh (world coordinates).
+  function readMasses(mesh) {
+    const g = mesh.geometry, pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv, col = g.attributes.color;
+    if (!pos || !nor || !uv || !col || pos.count % 4) return [];
+    mesh.updateWorldMatrix(true, false);
+    const e = mesh.matrixWorld.elements;
+    const W = (i) => [e[0] * pos.getX(i) + e[4] * pos.getY(i) + e[8] * pos.getZ(i) + e[12], e[1] * pos.getX(i) + e[5] * pos.getY(i) + e[9] * pos.getZ(i) + e[13], e[2] * pos.getX(i) + e[6] * pos.getY(i) + e[10] * pos.getZ(i) + e[14]];
+    const tops = [], walls = [];
+    for (let q = 0; q < pos.count; q += 4) {
+      const nx = nor.getX(q), ny = nor.getY(q), nz = nor.getZ(q);
+      const wn = [e[0] * nx + e[4] * ny + e[8] * nz, e[1] * nx + e[5] * ny + e[9] * nz, e[2] * nx + e[6] * ny + e[10] * nz];
+      const P = [0, 1, 2, 3].map((k) => W(q + k)), c = [col.getX(q), col.getY(q), col.getZ(q)];
+      if (wn[1] > 0.9) {
+        tops.push({ x0: Math.min(...P.map((p) => p[0])), x1: Math.max(...P.map((p) => p[0])), z0: Math.min(...P.map((p) => p[2])), z1: Math.max(...P.map((p) => p[2])), y1: P[0][1], roof: c });
+      } else if (Math.abs(wn[0]) > 0.9 || Math.abs(wn[2]) > 0.9) {
+        const ax = Math.abs(wn[0]) > 0.9 ? 0 : 2, along = ax === 0 ? 2 : 0, sign = Math.sign(wn[ax]);
+        // u depends on the position along the wall, v on the height: read both lines off the quad
+        const U = [0, 1, 2, 3].map((k) => [uv.getX(q + k), uv.getY(q + k)]);
+        let a = 0, b = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][along] - P[0][along]) > 1e-5) { b = k; break; }
+        let c2 = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][1] - P[0][1]) > 1e-5) { c2 = k; break; }
+        const du = (U[b][0] - U[a][0]) / (P[b][along] - P[a][along]), dv = (U[c2][1] - U[0][1]) / (P[c2][1] - P[0][1]);
+        walls.push({ ax, along, sign, at: P[0][ax], s0: Math.min(...P.map((p) => p[along])), s1: Math.max(...P.map((p) => p[along])),
+          y0: Math.min(...P.map((p) => p[1])), y1: Math.max(...P.map((p) => p[1])), c,
+          u: (s) => U[a][0] + (s - P[a][along]) * du, v: (y) => U[0][1] + (y - P[0][1]) * dv });
+      }
+    }
+    const near = (a, b) => Math.abs(a - b) < 1e-3;
+    const boxes = [];
+    for (const t of tops) {
+      const lim = { x: [t.x0, t.x1], z: [t.z0, t.z1] };
+      const own = walls.filter((w) => near(w.y1, t.y1) && near(w.at, w.ax === 0 ? (w.sign > 0 ? t.x1 : t.x0) : (w.sign > 0 ? t.z1 : t.z0)) &&
+        w.s0 >= (w.along === 0 ? lim.x[0] : lim.z[0]) - 1e-3 && w.s1 <= (w.along === 0 ? lim.x[1] : lim.z[1]) + 1e-3);
+      if (own.length < 1) continue;
+      const y0 = Math.min(...own.map((w) => w.y0));
+      if (t.y1 - y0 < 0.005 || t.x1 - t.x0 < 0.01 || t.z1 - t.z0 < 0.01) continue;
+      boxes.push({ x0: t.x0, x1: t.x1, z0: t.z0, z1: t.z1, y0, y1: t.y1, roof: t.roof, walls: own, wallColor: own[0].c });
+    }
+    for (const b of boxes) b.siblings = boxes;
+    return boxes;
+  }
+
+  const insideBox = (b, p, eps = 1e-4) => p[0] > b.x0 + eps && p[0] < b.x1 - eps && p[1] > b.y0 + eps && p[1] < b.y1 - eps && p[2] > b.z0 + eps && p[2] < b.z1 - eps;
+
+  // ---- convex polyhedra: a list of faces { v: [[x, y, z], …] counter-clockwise seen from outside, n, tag } ----
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  function newell(v) {
+    let x = 0, y = 0, z = 0;
+    for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; x += (a[1] - b[1]) * (a[2] + b[2]); y += (a[2] - b[2]) * (a[0] + b[0]); z += (a[0] - b[0]) * (a[1] + b[1]); }
+    return [x, y, z];   // length = 2 × area
+  }
+  function face(v, n, tag) { if (dot(newell(v), n) < 0) v = v.slice().reverse(); return { v, n, tag }; }
+  function boxPoly(x0, y0, z0, x1, y1, z1, tags) {
+    return [
+      face([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], [1, 0, 0], tags['+x']),
+      face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0], tags['-x']),
+      face([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], [0, 1, 0], tags['+y']),
+      face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0], tags['-y']),
+      face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1], tags['+z']),
+      face([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], [0, 0, -1], tags['-z']),
+    ];
+  }
+  // cut a convex polyhedron by the plane n·p = d: [part behind, part in front]
+  function split(poly, n, d) {
+    const back = [], front = [], cut = [];
+    const EPS = 1e-9;
+    for (const f of poly) {
+      const b = [], fr = [], m = f.v.length;
+      for (let i = 0; i < m; i++) {
+        const a = f.v[i], c = f.v[(i + 1) % m];
+        let da = dot(n, a) - d, dc = dot(n, c) - d;
+        if (Math.abs(da) < EPS) da = 0; if (Math.abs(dc) < EPS) dc = 0;
+        if (da <= 0) b.push(a);
+        if (da >= 0) fr.push(a);
+        if (da === 0) cut.push(a);
+        if ((da < 0 && dc > 0) || (da > 0 && dc < 0)) {
+          const t = da / (da - dc), p = [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t, a[2] + (c[2] - a[2]) * t];
+          b.push(p); fr.push(p); cut.push(p);
+        }
+      }
+      if (b.length >= 3 && Math.hypot(...newell(b)) > 1e-10) back.push({ v: b, n: f.n, tag: f.tag });
+      if (fr.length >= 3 && Math.hypot(...newell(fr)) > 1e-10) front.push({ v: fr, n: f.n, tag: f.tag });
+    }
+    // the new face where the cut went through: the cut points, in order around their middle
+    const seen = new Set(), pts = [];
+    for (const p of cut) { const k = p.map((x) => Math.round(x * 1e6)).join(','); if (!seen.has(k)) { seen.add(k); pts.push(p); } }
+    if (pts.length >= 3 && back.length && front.length) {
+      const c = pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] + p[1] / pts.length, s[2] + p[2] / pts.length], [0, 0, 0]);
+      let u = cross(n, Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]); const ul = Math.hypot(...u); u = u.map((x) => x / ul);
+      const w = cross(n, u);
+      pts.sort((p, q) => Math.atan2(dot(sub(p, c), w), dot(sub(p, c), u)) - Math.atan2(dot(sub(q, c), w), dot(sub(q, c), u)));
+      back.push(face(pts, n, 'cut'));
+      front.push(face(pts.slice(), [-n[0], -n[1], -n[2]], 'cut'));
+    }
+    return [back, front];
+  }
+  function bounds(poly) {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const f of poly) for (const p of f.v) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
+    return { lo, hi };
+  }
+  // keep cutting the largest direction with a slightly tilted plane until pieces are about `size`
+  function shatter(poly, size, out, depth = 0) {
+    const { lo, hi } = bounds(poly), ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    const k = ext[0] >= ext[1] && ext[0] >= ext[2] ? 0 : ext[1] >= ext[2] ? 1 : 2, L = ext[k];
+    if (L <= size * rnd(0.8, 1.25) || depth > 40) { out.push(poly); return; }
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const tilt = attempt < 3 ? 0.5 : 0.1;                       // a cut that failed: try again, straighter
+      const n = [rnd(-tilt, tilt), rnd(-tilt, tilt), rnd(-tilt, tilt)]; n[k] = 1;
+      const nl = Math.hypot(...n); for (let a = 0; a < 3; a++) n[a] /= nl;
+      const c = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]; c[k] += L * rnd(-0.18, 0.18);
+      const [a, b] = split(poly, n, dot(n, c));
+      if (a.length >= 4 && b.length >= 4) { shatter(a, size, out, depth + 1); shatter(b, size, out, depth + 1); return; }
+    }
+    out.push(poly);
+  }
+
+  // How high a column of a ruin still stands, for a building of height H: nothing near the centre,
+  // a growing share of the building further out, uneven from column to column.
+  function columnKeep(d, H) {
+    if (d > nuke.edge) return Infinity;
+    if (d <= nuke.total) return FOUNDATION_HEIGHT;
+    const f = clamp01((d - nuke.total) / (nuke.edge - nuke.total));
+    let k = FOUNDATION_HEIGHT + (H - FOUNDATION_HEIGHT) * RUIN_SHARE * Math.pow(f, 0.8) + RUIN_JAGGED * rnd(-1, 1);
+    if (Math.random() < 0.15) k -= RUIN_JAGGED * rnd(1, 2.5);      // a part that came down further
+    return Math.max(FOUNDATION_HEIGHT, k);
+  }
+
+  // Triangles (with colour and facade texture coordinates) for one piece.
+  function pieceTriangles(poly, box, concrete) {
+    const tris = [];
+    for (const f of poly) {
+      let c = concrete, uvOf = () => JF;
+      const t = f.tag;
+      if (t && t !== 'cut' && t.ext) {
+        const mid = f.v.reduce((s, p) => [s[0] + p[0] / f.v.length, s[1] + p[1] / f.v.length, s[2] + p[2] / f.v.length], [0, 0, 0]);
+        const out = [mid[0] + f.n[0] * 0.004, mid[1] + f.n[1] * 0.004, mid[2] + f.n[2] * 0.004];
+        if (!box.siblings.some((b) => insideBox(b, out, -1e-4))) {    // really on the outside of the building
+          if (t.side === '+y') c = box.roof;
+          else {
+            const ax = t.side[1] === 'x' ? 0 : 2, sign = t.side[0] === '+' ? 1 : -1;
+            const w = box.walls.find((w) => w.ax === ax && w.sign === sign && mid[1] >= w.y0 - 1e-3 && mid[1] <= w.y1 + 1e-3 && mid[w.along] >= w.s0 - 1e-3 && mid[w.along] <= w.s1 + 1e-3);
+            if (w) { c = w.c; uvOf = (p) => [w.u(p[w.along]), w.v(p[1])]; }
+          }
+        }
+      }
+      const vs = f.v.map((p) => ({ p, n: f.n, c, uv: uvOf(p) }));
+      for (let i = 1; i + 1 < vs.length; i++) tris.push([vs[0], vs[i], vs[i + 1]]);
+    }
+    return tris;
+  }
+
+  function* planSolids() {
+    // all buildings' boxes, nearest first
+    const masses = [];
+    scene.traverse((o) => {
+      if (!o.isMesh || o.isInstancedMesh || !o.geometry || !o.geometry.index || mine(o)) return;
+      const m = Array.isArray(o.material) ? o.material[0] : o.material;
+      if (!isFacade(m)) return;
+      let pid = null; for (let p = o; p && pid === null; p = p.parent) if (p.userData && p.userData.projectId !== undefined) pid = p.userData.projectId;
+      if (pid !== null) masses.push(o);
+    });
+    let mat = null;
+    for (const o of masses) {
+      const boxes = readMasses(o);
+      for (const b of boxes) {
+        const dx = Math.max(b.x0 - nuke.cx, 0, nuke.cx - b.x1), dz = Math.max(b.z0 - nuke.cz, 0, nuke.cz - b.z1);
+        b.dMin = Math.hypot(dx, dz);
+        if (b.dMin > nuke.edge) continue;                          // out of reach: stays as it is
+        b.mesh = o; solid.boxes.push(b);
+      }
+      mat = mat || (Array.isArray(o.material) ? o.material[0] : o.material);
+      yield;
+    }
+    if (!solid.boxes.length || !mat) return;
+    solid.boxes.sort((a, b) => a.dMin - b.dMin);
+    // One chunk size for the whole city, raised for a big city so the pieces stay within budget.
+    // (A chunk is cut until it is no longer than the size in any direction: never a long stick.)
+    // Measured: about 220 vertices per (volume ÷ size³).
+    let volume = 0;
+    for (const b of solid.boxes) volume += (b.x1 - b.x0) * (b.z1 - b.z0) * (b.y1 - b.y0);
+    const size = Math.max(CHUNK_SIZE, Math.cbrt((volume * 220) / MAX_CHUNK_VERTICES));
+    solid.size = size;
+    // per box: columns with their own break height; below it a static ruin, above it chunks
+    for (const b of solid.boxes) {
+      const nx = Math.max(1, Math.round((b.x1 - b.x0) / RUIN_COLUMN)), nz = Math.max(1, Math.round((b.z1 - b.z0) / RUIN_COLUMN));
+      const xs = [b.x0], zs = [b.z0];
+      for (let i = 1; i < nx; i++) xs.push(b.x0 + (b.x1 - b.x0) * (i + rnd(-0.25, 0.25)) / nx); xs.push(b.x1);
+      for (let i = 1; i < nz; i++) zs.push(b.z0 + (b.z1 - b.z0) * (i + rnd(-0.25, 0.25)) / nz); zs.push(b.z1);
+      const wall = b.wallColor, concreteBase = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];   // broken inside: the building's colour, dusty
+      const H = Math.max(...b.siblings.map((s) => s.y1));
+      for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
+        const x0 = xs[i], x1 = xs[i + 1], z0 = zs[j], z1 = zs[j + 1];
+        const d = Math.hypot((x0 + x1) / 2 - nuke.cx, (z0 + z1) / 2 - nuke.cz);
+        const keep = Math.min(b.y1, Math.max(b.y0, columnKeep(d, H)));
+        const tags = (yTop) => ({
+          '+x': { side: '+x', ext: Math.abs(x1 - b.x1) < 1e-6 }, '-x': { side: '-x', ext: Math.abs(x0 - b.x0) < 1e-6 },
+          '+z': { side: '+z', ext: Math.abs(z1 - b.z1) < 1e-6 }, '-z': { side: '-z', ext: Math.abs(z0 - b.z0) < 1e-6 },
+          '+y': { side: '+y', ext: Math.abs(yTop - b.y1) < 1e-6 }, '-y': { side: '-y', ext: false },
+        });
+        const shade = rnd(0.88, 1.08), concrete = concreteBase.map((v) => v * shade);
+        if (keep > b.y0 + 1e-4) {                                 // the ruin that stays
+          const tris = pieceTriangles(boxPoly(x0, b.y0, z0, x1, keep, z1, tags(keep)), b, concrete);
+          solid.pieces.push({ tris, d, still: true, dark: scorch(d) });
+          solid.verts += tris.length * 3;
+        }
+        if (b.y1 > keep + 1e-4) {                                 // what gets blown away
+          const chunks = [];
+          shatter(boxPoly(x0, keep, z0, x1, b.y1, z1, tags(b.y1)), size, chunks);
+          for (const ch of chunks) {
+            const s2 = rnd(0.9, 1.1), tris = pieceTriangles(ch, b, concrete.map((v) => v * s2));
+            const { lo, hi } = bounds(ch);
+            const cx = (lo[0] + hi[0]) / 2, cz = (lo[2] + hi[2]) / 2;
+            let big = null, area = -1;                            // it lands on its largest face
+            for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
+            solid.pieces.push({ tris, d: Math.hypot(cx - nuke.cx, cz - nuke.cz), still: false, normal: big, dark: scorch(d) });
+            solid.verts += tris.length * 3;
+          }
+        }
+      }
+      yield;
+    }
+    solid.mat = mat;
+  }
+
+  // Which triangles of the drawn city meshes belong to a box that is replaced: hidden at the flash.
+  function* flagSolidTriangles() {
+    if (!solid.boxes.length) return;
+    const cell = new Map(), key = (x, z) => Math.floor(x) + ',' + Math.floor(z);
+    for (const b of solid.boxes) for (let x = Math.floor(b.x0); x <= Math.floor(b.x1); x++) for (let z = Math.floor(b.z0); z <= Math.floor(b.z1); z++) {
+      const k = x + ',' + z; (cell.get(k) || cell.set(k, []).get(k)).push(b);
+    }
+    const E = 1e-3;
+    const within = (b, x, y, z) => x >= b.x0 - E && x <= b.x1 + E && y >= b.y0 - E && y <= b.y1 + E && z >= b.z0 - E && z <= b.z1 + E;
+    const onSurface = (b, x, y, z) => Math.abs(x - b.x0) < E || Math.abs(x - b.x1) < E || Math.abs(z - b.z0) < E || Math.abs(z - b.z1) < E || Math.abs(y - b.y1) < E;
+    for (const job of jobs) {
+      if (!job.animate || !job.triMode) continue;
+      const n = job.order.length;
+      let flags = null;
+      for (let k = 0; k < n; k++) {
+        const i = k * 3;
+        const cx = (job.wx(i) + job.wx(i + 1) + job.wx(i + 2)) / 3, cz = (job.wz(i) + job.wz(i + 1) + job.wz(i + 2)) / 3;
+        const list = cell.get(key(cx, cz));
+        if (!list) continue;
+        for (const b of list) {
+          let ok = true;
+          for (let v = i; v < i + 3 && ok; v++) { const x = job.wx(v), y = job.wy(v), z = job.wz(v); ok = within(b, x, y, z) && onSurface(b, x, y, z); }
+          if (ok) { (flags || (flags = new Uint8Array(n)))[k] = 1; break; }
+        }
+        if (k % 20000 === 19999) yield;
+      }
+      if (flags) { job.solid = flags; let c = 0; for (const f of flags) c += f; job.breakable = Math.max(0, job.breakable - c); }
+      yield;
+    }
+  }
+
+  // Write all pieces into one layer with the facade material; drawn from the flash on.
+  function buildSolids() {
+    if (!solid.pieces.length || !solid.mat) return;
+    solid.pieces.sort((a, b) => a.d - b.d);
+    const total = solid.pieces.reduce((s, p) => s + p.tris.length * 3, 0);
+    const g = new K.Geometry();
+    const attr = (w) => { const at = new K.Attr(new Float32Array(Math.max(3, total) * w), w); if (at.setUsage) at.setUsage(35048); return at; };
+    g.setAttribute('position', attr(3)); g.setAttribute('normal', attr(3)); g.setAttribute('color', attr(3)); g.setAttribute('uv', attr(2));
+    const P = g.attributes.position, N = g.attributes.normal, C = g.attributes.color, U = g.attributes.uv;
+    const pl = { g, pos: P, nor: N, col: C, drawn: total, solid: true };
+    let k = 0;
+    for (const pc of solid.pieces) {
+      let px = 0, py = 0, pz = 0, m = 0;
+      for (const t of pc.tris) for (const v of t) { px += v.p[0]; py += v.p[1]; pz += v.p[2]; m++; }
+      const pivot = [px / m, py / m, pz / m];
+      const fr = { pl, pivot, normal: pc.normal || [0, -1, 0], d: pc.d, start: k, count: m, active: false, still: pc.still, dark: pc.dark, solid: true,
+        orig: new Float32Array(m * 3), n0: new Float32Array(m * 3) };
+      let q = 0;
+      for (const t of pc.tris) for (const v of t) {
+        P.setXYZ(k, v.p[0], v.p[1], v.p[2]); N.setXYZ(k, v.n[0], v.n[1], v.n[2]); C.setXYZ(k, v.c[0], v.c[1], v.c[2]); U.setXY(k, v.uv[0], v.uv[1]);
+        fr.orig.set([v.p[0] - pivot[0], v.p[1] - pivot[1], v.p[2] - pivot[2]], q * 3); fr.n0.set(v.n, q * 3);
+        k++; q++;
+      }
+      pc.fr = fr; pc.tris = null;
+    }
+    g.setDrawRange(0, total);
+    const mesh = new K.Mesh(g, solid.mat);
+    mesh.frustumCulled = false; mesh.castShadow = mesh.receiveShadow = true; mesh.visible = false;
+    nukeRoot.add(mesh);
+    solid.mesh = mesh; solid.pool = pl;
+  }
+
+  // The flash: original walls out, solid pieces in (they look the same).
+  function showSolids() {
+    if (!solid.mesh) return;
+    solid.mesh.visible = true;
+    for (const job of jobs) {
+      if (!job.solid) continue;
+      const pos = job.pos;
+      for (let k = 0; k < job.solid.length; k++) {
+        if (!job.solid[k]) continue;
+        const i = k * 3, lx = (pos.getX(i) + pos.getX(i + 1) + pos.getX(i + 2)) / 3, ly = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3, lz = (pos.getZ(i) + pos.getZ(i + 1) + pos.getZ(i + 2)) / 3;
+        for (let v = i; v < i + 3; v++) pos.setXYZ(v, lx, ly, lz);
+      }
+      pos.needsUpdate = true; job.g.boundingSphere = null;
+    }
+    // a building drawn on its own (not merged into a city block) is simply hidden
+    const swapped = new Set(solid.boxes.map((b) => b.mesh));
+    for (const o of swapped) { let shown = true; for (let q = o; q; q = q.parent) if (!q.visible) shown = false; if (shown) o.visible = false; }
+  }
+
+  // Each frame: pieces the front has passed fly off (chunks) or get scorched (the ruin).
+  function advanceSolids(f) {
+    if (!solid.pool) return;
+    const pcs = solid.pieces, C = solid.pool.col;
+    let scorched = false, lo = Infinity, hi = -Infinity;
+    while (solid.next < pcs.length && pcs[solid.next].d <= f) {
+      const fr = pcs[solid.next++].fr;
+      lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count);
+      if (fr.still) {
+        for (let k = fr.start; k < fr.start + fr.count; k++) C.setXYZ(k, C.getX(k) * fr.dark, C.getY(k) * fr.dark, C.getZ(k) * fr.dark);
+        scorched = true;
+      } else {
+        const dk = 0.55 + 0.45 * fr.dark;                         // flying chunks: a little scorched
+        for (let k = fr.start; k < fr.start + fr.count; k++) C.setXYZ(k, C.getX(k) * dk, C.getY(k) * dk, C.getZ(k) * dk);
+        scorched = true;
+        launch(fr);
+        if (debris && Math.random() < 0.5 * debrisChance) spawnDebrisAt(fr.pivot[0], fr.pivot[1], fr.pivot[2], fr.d, [C.getX(fr.start), C.getY(fr.start), C.getZ(fr.start)], 0.03);
+      }
+    }
+    if (scorched) {
+      if (C.addUpdateRange) { C.addUpdateRange(lo * 3, (hi - lo) * 3); }
+      C.needsUpdate = true;
+    }
+  }
+
+  // ---------- debris ----------
+  let debris = null, dN = 0;
+  const D = { p: new Float32Array(MAX_DEBRIS * 3), v: new Float32Array(MAX_DEBRIS * 3), r: new Float32Array(MAX_DEBRIS * 3), w: new Float32Array(MAX_DEBRIS * 3), s: new Float32Array(MAX_DEBRIS), rest: new Uint8Array(MAX_DEBRIS) };
+
+  function spawnDebris(job, i, d, cy) {
+    if (!debris || dN >= MAX_DEBRIS) return;
+    const x = (job.wx(i) + job.wx(i + 1) + job.wx(i + 2)) / 3, z = (job.wz(i) + job.wz(i + 1) + job.wz(i + 2)) / 3;
+    // size from the triangle's area
+    const ax = job.wx(i + 1) - job.wx(i), ay = job.wy(i + 1) - job.wy(i), az = job.wz(i + 1) - job.wz(i);
+    const bx = job.wx(i + 2) - job.wx(i), by = job.wy(i + 2) - job.wy(i), bz = job.wz(i + 2) - job.wz(i);
+    const area = Math.hypot(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx) / 2;
+    const size = Math.max(0.02, Math.min(0.1, Math.sqrt(area) * 0.6));     // gravel between the big chunks
+    const color = job.col ? [job.col.getX(i), job.col.getY(i), job.col.getZ(i)] : job.matColor ? [job.matColor.r, job.matColor.g, job.matColor.b] : null;
+    spawnDebrisAt(x, cy, z, d, color, size);
+  }
+  function spawnDebrisAt(x, cy, z, d, color, size) {
+    if (!debris || dN >= MAX_DEBRIS) return;
+    const k = dN++;
+    const dx = (x - nuke.cx) / (d || 1), dz = (z - nuke.cz) / (d || 1);
+    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
+    const out = BLAST_SPEED * power * rnd(0.4, 1.2) + 0.2;
+    D.p.set([x, cy, z], k * 3);
+    D.v.set([dx * out + rnd(-0.3, 0.3), rnd(0.3, 2.2) * power + cy * 0.3, dz * out + rnd(-0.3, 0.3)], k * 3);
+    D.r.set([rnd(0, 6), rnd(0, 6), rnd(0, 6)], k * 3);
+    D.w.set([rnd(-9, 9), rnd(-9, 9), rnd(-9, 9)], k * 3);
+    D.s[k] = size; D.rest[k] = 0;
+    const c = new K.Color();
+    if (color) c.setRGB(color[0], color[1], color[2]); else c.set('#8a8580');
+    c.multiplyScalar(0.55 + 0.35 * Math.random());              // dirty, scorched
+    debris.setColorAt(k, c);
+    debris.instanceColor.needsUpdate = true;
+  }
+
+  const tmpM = () => ({ m: new K.M4(), q: new K.Q(), e: new (scene.rotation.constructor)(), v: new K.V3(), s: new K.V3() });
+  let T = null;
+  function stepDebris(dt) {
+    if (!debris) return;
+    let moved = false;
+    for (let k = 0; k < dN; k++) {
+      if (D.rest[k] === 2) continue;
+      const j = k * 3, s = D.s[k];
+      D.v[j + 1] -= 6 * dt;                                       // gravity
+      D.p[j] += D.v[j] * dt; D.p[j + 1] += D.v[j + 1] * dt; D.p[j + 2] += D.v[j + 2] * dt;
+      D.r[j] += D.w[j] * dt; D.r[j + 1] += D.w[j + 1] * dt; D.r[j + 2] += D.w[j + 2] * dt;
+      if (D.p[j + 1] < s / 2) {                                   // hits the ground: bounce a little, slide, stop
+        D.p[j + 1] = s / 2;
+        D.v[j] *= 0.45; D.v[j + 2] *= 0.45; D.v[j + 1] = Math.abs(D.v[j + 1]) * 0.2;
+        for (let a = 0; a < 3; a++) D.w[j + a] *= 0.4;
+        if (Math.hypot(D.v[j], D.v[j + 1], D.v[j + 2]) < 0.05) D.rest[k] = 1;
+      }
+      T.e.set(D.r[j], D.r[j + 1], D.r[j + 2]);
+      T.q.setFromEuler(T.e);
+      T.m.compose(T.v.set(D.p[j], D.p[j + 1], D.p[j + 2]), T.q, T.s.set(s, s, s));
+      debris.setMatrixAt(k, T.m);
+      if (D.rest[k] === 1) D.rest[k] = 2;                         // final position written: done
+      moved = true;
+    }
+    debris.count = dN;
+    if (moved) debris.instanceMatrix.needsUpdate = true;
+  }
+
+  // ---------- mushroom cloud ----------
+  let cloud = null, cloudMat = null, fireball = null, shell = null, dust = null, disc = null;
+  const puffs = [];
+  const SMOKE = ['#5d5550', '#6e6660', '#7d7570', '#4c4643', '#8a827b', '#6a5a4e'];
+  function makeCloud() {
+    for (let i = 0; i < CLOUD_PUFFS; i++) {
+      const u = i / CLOUD_PUFFS;
+      const kind = u < 0.5 ? 'cap' : u < 0.62 ? 'top' : u < 0.86 ? 'stem' : 'skirt';
+      puffs.push({ kind, phi: i * 2.39996, theta: rnd(0, Math.PI * 2), r: Math.random(), y0: Math.random(), sp: rnd(0.6, 1.4), sz: rnd(0.75, 1.25), smoke: new K.Color(SMOKE[i % SMOKE.length]) });
+    }
+  }
+  const FIRE_HOT = () => new K.Color('#fff1b8'), FIRE = () => new K.Color('#ff8a2a'), FIRE_DEEP = () => new K.Color('#c2361a');
+  let fc = null;
+  function stepCloud(t) {
+    // after CLOUD_LINGER: the whole cloud lifts off, drifts away with the wind, spreads and thins out
+    const H = nuke.H, L = Math.max(0, t - CLOUD_LINGER);
+    const lift = H * (0.05 * L + 0.004 * L * L), cx = nuke.cx + H * 0.06 * L, cz = nuke.cz + H * 0.02 * L;
+    const g = smooth(t / 9), wide = smooth((t - 0.5) / 10);
+    const Hc = 0.12 * H + 0.88 * H * g, Rc = 0.06 * H + 0.3 * H * wide, rt = 0.08 * H + 0.12 * H * wide, stemR = 0.04 * H + 0.05 * g * H;
+    const gather = smooth(t / 1.6);                               // at first everything is the fireball
+    const fade = 1 - clamp01((L - 8) / 30), stemFade = 1 - clamp01(L / 8), spread = 1 + 0.035 * L;
+    if (!fc) fc = { hot: FIRE_HOT(), fire: FIRE(), deep: FIRE_DEEP(), c: new K.Color() };
+    puffs.forEach((p, i) => {
+      let x, y, z, s;
+      if (p.kind === 'cap') {
+        const th = p.theta - t * 0.55 * p.sp;                     // rolling outward over the top
+        const rr = Rc + rt * Math.cos(th);
+        x = rr * Math.cos(p.phi); z = rr * Math.sin(p.phi); y = Hc + rt * Math.sin(th) * 0.75; s = rt * 0.62 * p.sz;
+      } else if (p.kind === 'top') {
+        const rr = Rc * 0.85 * Math.sqrt(p.r);
+        x = rr * Math.cos(p.phi); z = rr * Math.sin(p.phi); y = Hc + rt * 0.55; s = rt * 0.7 * p.sz;
+      } else if (p.kind === 'stem') {
+        const f = (p.y0 + t * 0.04 * p.sp) % 1;                   // smoke rising up the stem
+        const rr = stemR * (1 + 1.6 * Math.pow(1 - f, 3)) * (0.3 + 0.7 * p.r);
+        x = rr * Math.cos(p.phi); z = rr * Math.sin(p.phi); y = f * Math.max(0, Hc - rt * 0.4); s = stemR * (0.9 + 0.8 * (1 - f)) * p.sz;
+      } else {
+        // dust skirt: keeps rolling outward and swirling, drifts with the wind, slowly settles
+        const rr = (0.1 * H + 0.45 * H * smooth(t / 6) + 0.012 * H * t) * (0.75 + 0.5 * p.r);
+        const ph = p.phi + t * 0.04 * p.sp;
+        const wind = H * 0.012 * Math.max(0, t - 3);
+        x = rr * Math.cos(ph) + wind; z = rr * Math.sin(ph) + wind * 0.3;
+        y = 0.04 * H * p.r + 0.012 * H * Math.sin(t * 0.6 * p.sp + p.phi * 3) + 0.004 * H * t;
+        s = 0.06 * H * (0.7 + 0.6 * p.r) * smooth(t / 1.2) * (1 + 0.02 * t) * (1 - smooth((t - 12) / 30));
+      }
+      // gather into the fireball at the start
+      x *= gather; z *= gather; y = 0.1 * H + (y - 0.1 * H) * gather;
+      s *= fade * (0.35 + 0.65 * gather) * spread * (p.kind === 'stem' ? stemFade : 1);
+      x *= spread; z *= spread;
+      if (p.kind !== 'skirt') y += lift * (p.kind === 'stem' ? 0.6 : 1);
+      T.m.compose(T.v.set(cx + x, y, cz + z), T.q.set(0, 0, 0, 1), T.s.set(s, s * 0.85, s));
+      cloud.setMatrixAt(i, T.m);
+      // colour: white-hot → orange → deep red → smoke; the cap's underside and the stem stay hot longest
+      const heat = clamp01(1 - t / (p.kind === 'skirt' ? 3 : 8) + (p.kind === 'cap' && y < Hc ? 0.15 : 0) - p.r * 0.15);
+      const c = fc.c.copy(p.smoke);
+      if (heat > 0) {
+        const fire = heat > 0.66 ? fc.c.clone().copy(fc.fire).lerp(fc.hot, (heat - 0.66) / 0.34) : heat > 0.33 ? fc.c.clone().copy(fc.deep).lerp(fc.fire, (heat - 0.33) / 0.33) : fc.deep.clone();
+        c.copy(p.smoke).lerp(fire, smooth(heat * 1.5));
+      }
+      cloud.setColorAt(i, c);
+    });
+    cloud.instanceMatrix.needsUpdate = true;
+    cloud.instanceColor.needsUpdate = true;
+    cloudMat.emissiveIntensity = 1.4 * Math.exp(-t / 3.5);
+    cloud.visible = fade > 0;
+
+    // fireball: white core that swells, rises and fades into the cap
+    const fb = smooth(t / 0.8) * (1 - smooth((t - 2) / 3));
+    fireball.visible = fb > 0.01;
+    fireball.scale.setScalar(0.2 * H * fb + 0.001);
+    fireball.position.set(nuke.cx, 0.1 * H + (Hc - 0.1 * H) * smooth((t - 1) / 6), nuke.cz);
+    fireball.material.emissive.copy(fc.hot).lerp(fc.fire, clamp01(t / 3));
+  }
+
+  // ---------- shockwave visuals ----------
+  function stepWave(t) {
+    const f = front(t), done = f >= nuke.edge * 0.999;
+    const k = clamp01(f / nuke.edge);
+    shell.visible = !done; dust.visible = t < WAVE_SECONDS + 4;
+    shell.scale.set(f + 0.01, (f + 0.01) * 0.55, f + 0.01);
+    shell.material.opacity = 0.16 * (1 - k);
+    dust.scale.set(f + 0.01, 1, f + 0.01);
+    dust.material.opacity = 0.7 * (1 - clamp01((t - WAVE_SECONDS) / 4));
+    disc.scale.set(Math.min(f, nuke.edge * 0.95) + 0.01, 1, Math.min(f, nuke.edge * 0.95) + 0.01);
+  }
+
+  // ---------- flash, light and shake ----------
+  let lights = [], flashEl = null, countEl = null;
+  function stepLight(t) {
+    const boost = 1 + (LIGHT_BOOST - 1) * Math.exp(-t / 0.18) + 0.25 * Math.exp(-t / 3);
+    for (const L of lights) L.o.intensity = L.i * boost;
+    if (flashEl) flashEl.style.opacity = String(t < 0.08 ? 1 : Math.max(0, 1 - (t - 0.08) / FLASH_SECONDS) ** 2);
+  }
+  function stepShake(t) {
+    const el = renderer && renderer.domElement; if (!el) return;
+    const arrive = Math.exp(-Math.pow((t - WAVE_DELAY - 1.2) / 0.6, 2));   // the wave rolling under the camera
+    const a = SHAKE * (Math.exp(-t / 1.1) + 0.8 * arrive + 0.25 * Math.exp(-t / 6));
+    if (a < 0.2) { el.style.transform = ''; return; }
+    const x = (Math.random() * 2 - 1) * a, y = (Math.random() * 2 - 1) * a, r = (Math.random() * 2 - 1) * a * 0.02;
+    el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) rotate(${r.toFixed(2)}deg)`;
+  }
+
+  // ---------- residents and cars ----------
+  const carsDone = new Set();
+  function stepPeople(t, f) {
+    const res = window.scResidents;
+    if (!res) return;
+    if (!nuke.alarmed && typeof res.alarm === 'function') { res.alarm(nuke.cx, nuke.cz, 1e9, 30); nuke.alarmed = true; }
+    if (typeof res.blast === 'function') res.blast(nuke.cx, nuke.cz, f, 0, 0);
+    if (typeof res.killInside === 'function') res.killInside(nuke.cx, nuke.cz, Math.min(f, nuke.edge));   // indoors isn't safe either
+  }
+  function stepCars(f, maintain) {
+    if (!trafficCars) return;
+    const proxies = new Map(), batches = [];
+    if (maintain) scene.traverse((o) => {
+      if (o.userData && o.userData.car && typeof o.userData.car.index === 'number') proxies.set(o.userData.car.index, o);
+      if (o.isInstancedMesh && Array.isArray(o.userData.cars)) batches.push(o);
+    });
+    trafficCars.forEach((car, i) => {
+      const d = Math.hypot(car.x - nuke.cx, car.z - nuke.cz);
+      if (d > f || d > nuke.edge) return;
+      car.parked = Infinity; car.speed = 0;
+      if (!carsDone.has(car)) {
+        carsDone.add(car);
+        window.dispatchEvent(new CustomEvent('sc:car-exploded', { detail: { x: car.x, z: car.z, cause: 'nuke' } }));
+        if (d <= nuke.total && debris) for (let n = 0; n < 6 && dN < MAX_DEBRIS; n++) {   // a few car parts flying off
+          const k = dN++, dx = (car.x - nuke.cx) / (d || 1), dz = (car.z - nuke.cz) / (d || 1);
+          D.p.set([car.x, 0.07, car.z], k * 3); D.v.set([dx * rnd(1, 3), rnd(0.5, 1.8), dz * rnd(1, 3)], k * 3);
+          D.r.set([0, 0, 0], k * 3); D.w.set([rnd(-9, 9), rnd(-9, 9), rnd(-9, 9)], k * 3); D.s[k] = rnd(0.02, 0.045); D.rest[k] = 0;
+          debris.setColorAt(k, new K.Color(n % 2 ? '#2a2a2e' : '#59606b')); debris.instanceColor.needsUpdate = true;
+        }
+      }
+      if (!maintain) return;
+      const proxy = proxies.get(i);
+      if (d <= nuke.total) { if (proxy) proxy.scale.setScalar(0.0001); }      // vaporised
+      else for (const b of batches) {                                       // burnt out
+        const slot = b.userData.cars.indexOf(i);
+        if (slot >= 0) { b.setColorAt(slot, new K.Color('#24201e')); b.instanceColor.needsUpdate = true; }
+      }
+    });
+  }
+
+  // ---------- sound ----------
+  let audio = null;
+  function tone(freq, dur, vol) {
+    if (!SOUND) return;
+    try {
+      audio = audio || new AudioContext();
+      const a = audio, t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+      o.frequency.value = freq; o.connect(g); g.connect(a.destination);
+      g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      o.start(t); o.stop(t + dur);
+    } catch {}
+  }
+  function boom() {
+    if (!SOUND) return;
+    try {
+      audio = audio || new AudioContext();
+      const a = audio, t = a.currentTime, len = 9;
+      const buf = a.createBuffer(1, Math.floor(a.sampleRate * len), a.sampleRate), ch = buf.getChannelData(0);
+      let last = 0;
+      for (let i = 0; i < ch.length; i++) { last = last * 0.96 + (Math.random() * 2 - 1) * 0.04; ch[i] = last * 6 * Math.pow(1 - i / ch.length, 1.6); }
+      const src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+      f.type = 'lowpass'; f.frequency.setValueAtTime(1200, t); f.frequency.exponentialRampToValueAtTime(70, t + 4);
+      src.buffer = buf; src.connect(f); f.connect(g); g.connect(a.destination);
+      g.gain.setValueAtTime(1.2, t);
+      src.start(t);
+      const sub = a.createOscillator(), sg = a.createGain();
+      sub.type = 'sine'; sub.frequency.setValueAtTime(55, t); sub.frequency.exponentialRampToValueAtTime(22, t + 5);
+      sg.gain.setValueAtTime(0.8, t); sg.gain.exponentialRampToValueAtTime(0.001, t + 6);
+      sub.connect(sg); sg.connect(a.destination); sub.start(t); sub.stop(t + 6);
+    } catch {}
+  }
+
+  // ---------- go ----------
+  // Preparation runs in small slices during the countdown, so the page keeps running smoothly:
+  // finding everything that can break, sorting it by distance and cutting it into plates.
+  let ready = false, preparing = false, fired = false, onReady = null;
+  function* preparation() {
+    const c = cityShape();
+    nuke = { t0: 0, cx: c.cx, cz: c.cz, R: c.R, total: c.R * TOTAL_FRACTION, edge: c.R * EDGE_FRACTION + 1, H: Math.max(6, c.R * 0.9) };
+    const root = new K.Object3D(); root.userData.scNuke = true; root.name = 'sc-nuke'; scene.add(root);
+    nukeRoot = root;
+    // everything that can break, sorted by distance from ground zero
+    const uses = new Map(), list = [];
+    scene.traverse((o) => { if (o.geometry) uses.set(o.geometry, (uses.get(o.geometry) || 0) + 1); if (eligible(o) && !prepared.has(o.geometry)) list.push(o); });
+    for (const o of list) {
+      if (prepared.has(o.geometry)) continue;
+      try { prepare(o, uses, false); } catch (e) { prepared.add(o.geometry); console.warn('[nuke] skipped', o.name || o.type, e); }
+      yield;
+    }
+    // buildings as solids: boxes → ruin columns + chunks; their original triangles are swapped at the flash
+    try { yield* planSolids(); yield* flagSolidTriangles(); yield; buildSolids(); }
+    catch (e) { console.warn('[nuke] solid buildings failed: buildings will only be cut off', e); solid.pieces = []; solid.pool = null; for (const j of jobs) j.solid = null; }
+    const toBreak = jobs.reduce((x, j) => x + j.breakable, 0);
+    debrisChance = Math.min(1 / GRAVEL, (MAX_DEBRIS * 0.9) / Math.max(1, toBreak * GRAVEL));
+    console.info('[nuke] ready · ground zero', nuke.cx.toFixed(1), nuke.cz.toFixed(1), '· city radius', nuke.R.toFixed(1),
+      '· meshes', jobs.length, '· other pieces that will break', toBreak,
+      '· building boxes', solid.boxes.length, '· chunk size', (solid.size || 0).toFixed(2), '· pieces', solid.pieces.length, '(' + (solid.verts / 3 | 0) + ' triangles)');
+    window.scNukeDebug = { nuke, jobs, solid, debrisCount: () => dN };
+  }
+
+  function prepareInBackground(done) {
+    if (ready) { done(); return; }
+    onReady = done;
+    if (preparing) return;
+    preparing = true;
+    const gen = preparation();
+    const slice = () => {
+      const t = performance.now();
+      try {
+        while (performance.now() - t < 10) {
+          if (gen.next().done) { ready = true; preparing = false; if (onReady) onReady(); return; }
+        }
+      } catch (e) { console.warn('[nuke] preparation failed', e); ready = true; preparing = false; if (onReady) onReady(); return; }
+      setTimeout(slice, 0);
+    };
+    slice();
+  }
+
+  function detonate() {
+    if (fired) return;
+    fired = true;
+    nuke.t0 = performance.now();
+    scan(false);                                                 // anything the app rebuilt during the countdown
+    const root = nukeRoot;
+    const lam = (o) => new K.Lambert(o);
+    cloudMat = lam({ color: '#ffffff', emissive: '#ff7a2a', emissiveIntensity: 1.4 });
+    cloud = new K.Instanced(icosa(), cloudMat, CLOUD_PUFFS);
+    cloud.frustumCulled = false; cloud.castShadow = true;
+    for (let i = 0; i < CLOUD_PUFFS; i++) cloud.setColorAt(i, new K.Color('#ffffff'));
+    fireball = new K.Mesh(icosa(), lam({ color: '#000000', emissive: '#fff1b8', emissiveIntensity: 1.6 }));
+    shell = new K.Mesh(dome(), lam({ color: '#ffffff', emissive: '#fff4e0', emissiveIntensity: 0.6, transparent: true, opacity: 0.3, depthWrite: false, side: 2 }));
+    shell.position.set(nuke.cx, 0, nuke.cz);
+    dust = new K.Mesh(ring(0.82), lam({ color: '#a38f78', transparent: true, opacity: 0.7, depthWrite: false, side: 2 }));
+    dust.position.set(nuke.cx, 0.06, nuke.cz);
+    disc = new K.Mesh(scorchDisc(), lam({ vertexColors: true }));
+    disc.position.set(nuke.cx, 0.003, nuke.cz); disc.receiveShadow = true;
+    debris = new K.Instanced(cube(), lam({ color: '#ffffff' }), MAX_DEBRIS);
+    debris.frustumCulled = false; debris.castShadow = true; debris.receiveShadow = true; debris.count = 0;
+    debris.setColorAt(0, new K.Color('#ffffff'));
+    for (const m of [cloud, fireball, shell, dust, disc, debris]) { m.frustumCulled = false; root.add(m); }
+    makeCloud();
+    T = tmpM();
+
+    lights = [];
+    scene.traverse((o) => { if (o.isLight && !mine(o)) lights.push({ o, i: o.intensity }); });
+
+    flashEl = document.createElement('div');
+    flashEl.style.cssText = 'position:fixed;inset:0;background:#fffdf4;pointer-events:none;z-index:10000;opacity:1';
+    document.body.appendChild(flashEl);
+    try { showSolids(); } catch (e) { console.warn('[nuke] swap to solid buildings failed', e); }
+    boom();
+    updateButton();
+    requestAnimationFrame(loop);
+  }
+
+  let last = 0, lastScan = 0;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const t = elapsed(), dt = Math.min(0.05, last ? (now - last) / 1000 : 0); last = now;
+    const f = front(t);
+    // every part on its own, so one failing part can't stop the rest
+    const safe = (name, fn) => { try { fn(); } catch (e) { if (!loop.warned) loop.warned = {}; if (!loop.warned[name]) { loop.warned[name] = 1; console.warn('[nuke] ' + name, e); } } };
+    for (const j of jobs) safe('destroy', () => advance(j, f, true));
+    safe('solids', () => advanceSolids(f));
+    safe('chunks', () => stepFragments(dt));
+    safe('debris', () => stepDebris(dt));
+    safe('cloud', () => stepCloud(t));
+    safe('wave', () => stepWave(t));
+    safe('light', () => stepLight(t));
+    safe('shake', () => stepShake(t));
+    safe('people', () => stepPeople(t, f));
+    const maintain = performance.now() - lastScan > 1000;
+    safe('cars', () => stepCars(f, maintain));
+    if (maintain) { lastScan = performance.now(); safe('rescan', () => scan(true)); }   // the app rebuilt something: break it again
+    // the wave has passed: let walk mode rebuild its walls (you can walk through the ruins)
+    if (!nuke.settled && t > WAVE_SECONDS + 0.5) { nuke.settled = true; safe('notify', () => window.dispatchEvent(new Event('sc:geometry-changed'))); }
+  }
+
+  // ---------- countdown + button ----------
+  let counting = null;
+  function startCountdown() {
+    if (fired) return;
+    if (!scene || !classes()) { alert('De 3D-stad is nog niet geladen.'); return; }
+    try { audio = audio || new AudioContext(); } catch {}
+    if (counting) { clearInterval(counting.timer); countEl.remove(); counting = null; onReady = null; updateButton(); return; }   // click again: cancel
+    prepareInBackground(() => {});                               // start working out the destruction right away
+    countEl = document.createElement('div');
+    countEl.style.cssText = 'position:fixed;left:50%;top:18%;transform:translateX(-50%);z-index:10001;pointer-events:none;font:800 64px/1 system-ui,sans-serif;color:#ffd23f;text-shadow:0 0 12px #000,0 2px 0 #000;letter-spacing:2px';
+    document.body.appendChild(countEl);
+    let n = COUNTDOWN;
+    const go = () => { countEl.remove(); counting = null; detonate(); };
+    const tick = () => {
+      if (n <= 0) {
+        clearInterval(counting.timer);
+        if (ready) go();
+        else { countEl.textContent = '☢ …'; prepareInBackground(go); }   // still working out the destruction
+        return;
+      }
+      countEl.textContent = '☢ ' + n;
+      tone(n <= 3 ? 1320 : 880, 0.18, 0.25);
+      n--;
+    };
+    counting = { timer: setInterval(tick, 1000) };
+    tick();
+    updateButton();
+  }
+
+  const SVG = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="g-ico" aria-hidden="true"';
+  // Lucide "radiation"
+  const ICON = `<svg ${SVG}><path d="M12 12h.01"/><path d="M14 15.4641a4 4 0 0 1-4 0L7.52786 19.74597 A 1 1 0 0 0 7.99303 21.16211 10 10 0 0 0 16.00697 21.16211 1 1 0 0 0 16.47214 19.74597z"/><path d="M16 12a4 4 0 0 0-2-3.464l2.472-4.282a1 1 0 0 1 1.46-.305 10 10 0 0 1 4.006 6.94A1 1 0 0 1 21 12z"/><path d="M8 12a4 4 0 0 1 2-3.464L7.528 4.254a1 1 0 0 0-1.46-.305 10 10 0 0 0-4.006 6.94A1 1 0 0 0 3 12z"/></svg>`;
+  function updateButton() {
+    const b = document.getElementById('sc-nuke'); if (!b) return;
+    const label = fired ? 'Herlaad de pagina om de stad te herstellen' : counting ? 'Aftellen stoppen' : 'Nuke (na 10 seconden)';
+    b.title = label; b.setAttribute('aria-label', label);
+    b.style.opacity = fired ? '0.45' : '';
+    b.style.color = counting ? '#e33b3b' : '';
+  }
+  function ensureButton() {
+    if (document.getElementById('sc-nuke')) return;
+    const row = document.querySelector('.hz-tr .menu-mini'); if (!row) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-nuke';
+    b.innerHTML = '<b class="s-bg"></b>' + ICON;
+    b.addEventListener('click', startCountdown);
+    row.appendChild(b);
+    updateButton();
+  }
+  const start = () => { ensureButton(); new MutationObserver(ensureButton).observe(document.body, { childList: true, subtree: true }); };
+  if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
