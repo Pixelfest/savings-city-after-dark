@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.29
+// @version      1.30
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -674,7 +674,7 @@
     const res = window.scResidents;
     if (res && typeof res.gibAround === 'function') res.gibAround(x, z, CAR_BLAST_GIB_RADIUS, 1.1);
     if (res && typeof res.blast === 'function') {
-      const r = res.blast(x, z, CAR_BLAST_KNOCK_RADIUS, CAR_BLAST_PANIC_RADIUS, PANIC_SECONDS);
+      const r = res.blast(x, z, CAR_BLAST_KNOCK_RADIUS, CAR_BLAST_PANIC_RADIUS, PANIC_SECONDS, CAR_BLAST_GIB_RADIUS);   // (+ some catch fire)
       if (r && r.down) setTimeout(() => sound('hit'), 250);
     }
     blastEvent(x, z, CAR_BLAST_GIB_RADIUS, CAR_BLAST_KNOCK_RADIUS, CAR_BLAST_PANIC_RADIUS);
@@ -1057,7 +1057,8 @@
 
   // ---- weapons from other scripts ----
   // window.scWalkWeapons.push({ id, name, key: 'Digit3', at, aim, roll, muzzle, kick, interval,
-  //   build(tools) → { root, flash? }, fire({ o, d, start }) })   – see the rocket launcher script.
+  //   auto, build(tools) → { root, flash? }, fire({ o, d, start }) })   – see the rocket launcher script.
+  //   auto: true → fire() is called every `interval` seconds while the button is held (flamethrower).
   function addWeapon(def) {
     if (!def || !def.id || WEAPONS[def.id]) return;
     WEAPONS[def.id] = { name: def.name || def.id, at: def.at || [0.13, -0.13, -0.32], aim: def.aim || 1, roll: def.roll || 0,
@@ -1134,7 +1135,7 @@
     spawn: (kind, x, y, z, o) => spawn(kind, x, y, z, o),
     startEffects: () => startEffects(),
     sound: (kind) => sound(kind),
-    blastResidents(x, z, gib = 0, y) { blastEvent(x, z, gib, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, y); const r = window.scResidents; if (r && r.blast) return r.blast(x, z, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, PANIC_SECONDS); },
+    blastResidents(x, z, gib = 0, y) { blastEvent(x, z, gib, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, y); const r = window.scResidents; if (r && r.blast) return r.blast(x, z, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, PANIC_SECONDS, gib); },
   };
   { const queued = Array.isArray(window.scWalkWeapons) ? window.scWalkWeapons : []; window.scWalkWeapons = { push: (d) => addWeapon(d) }; queued.forEach(addWeapon); }
 
@@ -1329,6 +1330,9 @@
 
   // Called every frame from stepWalk: spins the minigun and fires it while the button is held.
   function stepWeapons(dt) {
+    // plugin weapons with `auto: true` (the flamethrower) keep firing while the button is held
+    const pw = WEAPONS[weapon] && WEAPONS[weapon].plugin;
+    if (trigger && pw && pw.auto && shown === weapon && !driver) firePlugin(weapon);
     const held = trigger && weapon === 'minigun' && shown === 'minigun' && swap < 0.3;
     spin = held ? Math.min(1, spin + dt / MINIGUN_SPINUP) : Math.max(0, spin - dt / MINIGUN_SPINDOWN);
     spinAngle += spin * MINIGUN_SPIN_SPEED * dt;
@@ -1830,7 +1834,7 @@
           #sc-walk-ui.touch .pad{display:block}#sc-walk-ui.touch .help{display:none}
         </style>
         <div class="cross"></div>
-        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun: ingedrukt houden) · scrollwiel / Q / 0–3: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
+        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–4: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
         <button class="stop" type="button">Stoppen met lopen</button>
         <div class="sc-note"></div>
         <div class="pad"><i></i></div>`;

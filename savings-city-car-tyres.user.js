@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – car tyres (wider, optionally round)
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  Makes car tyres stick out slightly from the car body (no more flicker) and optionally round.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -32,6 +32,7 @@
   const TYRE_OUT = 0.005;      // how far tyres stick out from the body (car is 0.105 wide)
   const ROUND_TYRES = true;    // true = round tyres (cylinders), false = the original square blocks
   const TYRE_SEGMENTS = 12;    // roundness: more = smoother circle, 8 = chunky low-poly look
+  const REPAIR_EVERY = 10;     // seconds between checks for car models built without the fix (only until route 1 has fixed one)
 
   const TYRE = { w: 0.044, h: 0.04, d: 0.016 };
   const TYRE_Z = 0.0445;       // centre of a tyre box: ±(0.105/2 − 0.016/2)
@@ -43,6 +44,7 @@
       const p = this.parameters;
       if (p && near(p.width, TYRE.w) && near(p.height, TYRE.h) && near(p.depth, TYRE.d) && near(Math.abs(z), TYRE_Z) && !this.userData.scTyre) {
         this.userData.scTyre = true;
+        fixedByRoute1++;
         if (ROUND_TYRES) makeRound(this, TYRE.h / 2, TYRE.d + TYRE_OUT);
         else this.scale(1, 1, (TYRE.d + TYRE_OUT) / TYRE.d);   // still centred: grows equally both ways…
         z += Math.sign(z) * TYRE_OUT / 2;                       // …then shift so only the outer side grows
@@ -85,10 +87,13 @@
   // script, a changed load order), the cars are built with flat tyres. Every two seconds the car
   // models in the scene are checked; the dark tyre blocks of any unfixed model are replaced by
   // wider (round) tyres in place. All cars of that model share the geometry, so they all change.
+  // Only a fallback: as soon as route 1 has fixed a tyre it stops (every model is fixed as it's
+  // built), and until then it looks only every REPAIR_EVERY seconds (a walk through the scene).
   const TYRE_RGB = (() => { const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }; return [lin(0x2a), lin(0x2a), lin(0x2e)]; })();
-  let repaired = 0;
+  let repaired = 0, fixedByRoute1 = 0;
   const checked = new WeakSet();
-  setInterval(() => {
+  const repairTimer = setInterval(() => {
+    if (fixedByRoute1 > 0) { clearInterval(repairTimer); return; }   // route 1 works: nothing to repair, ever
     const scene = window.scCore && window.scCore.scene;
     if (!scene) return;
     scene.traverse((o) => {
@@ -97,7 +102,7 @@
       checked.add(o.geometry);
       try { if (repair(o.geometry)) { repaired++; console.info('[car tyres] repaired car model', repaired, '(built without the fix)'); } } catch (e) { console.warn('[car tyres] repair failed', e); }
     });
-  }, 2000);
+  }, REPAIR_EVERY * 1000);
 
   function repair(geo) {
     const pos = geo.attributes.position, col = geo.attributes.color;

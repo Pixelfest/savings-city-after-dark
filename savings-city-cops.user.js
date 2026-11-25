@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -343,7 +343,7 @@
     c.mesh.userData.lights = null;
     const res = window.scResidents;
     if (res && res.gibAround) res.gibAround(x, z, 0.3, 1.1);
-    if (res && res.blast) res.blast(x, z, 1.3, 5, 12);
+    if (res && res.blast) res.blast(x, z, 1.3, 5, 12, 0.3);    // (+ some catch fire)
     window.dispatchEvent(new CustomEvent('sc:car-exploded', { detail: { x, z, police: true } }));
     if (!c.cops.length) for (let k = 0; k < COPS_PER_CAR; k++) window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x, z, cause: 'car', who: 'cop' } }));   // still inside
     c.exitAt = Infinity;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.18
+// @version      1.19
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -104,6 +104,16 @@
   const SCREAM_VOLUME = 0.45;
   const SCREAM_HEARING = 9;       // walk mode: tiles; further away you don't hear them
   const CRUSH_MARGIN = 0.3;       // a building coming down kills people outside this close to its walls
+  // On fire (flamethrower, explosions): run screaming, fall and writhe on the ground, get up, run on.
+  const BURN_RUN = [1, 5];        // seconds someone on fire runs screaming…
+  const BURN_WRITHE = 5;          // …then lies on the ground shaking this long…
+  const BURN_AFTER = 10;          // …then gets up and runs again; the fire goes out this many seconds later
+  const BURN_TOUCH = 0.035;       // tiles: someone on fire sets people this close alight
+  const BURN_IMMUNE = 6;          // seconds after their fire went out before someone can catch fire again
+  const BURN_CORPSE = 8;          // seconds a dead body keeps burning
+  const BLAST_FIRE_BAND = 0.25;   // tiles (≈ 5 m) just outside where an explosion blows people apart…
+  const BLAST_FIRE_CHANCE = 0.5;  // …this chance to be set on fire (instead of knocked down)
+  const MAX_FLAMES = 1500;        // flames drawn on burning people (3 each)
   // ---------------------------------------------------------------------------------------
 
   // ---------- the scene, city data, traffic and the app's helpers: from the core ----------
@@ -190,6 +200,48 @@
     if (p.dir[0] * (x - p.x) + p.dir[1] * (z - p.z) > 0 && !onAsphalt(...edgePoint(p.a, p.dir, p.side, p.s))) {
       // turn round on the spot: same sidewalk, other direction
       placeOnEdge(p, p.b, p.a, 1 - p.s, -p.side);
+    }
+  }
+
+  // ---------- on fire ----------
+  // p.burn = { phase: 'run' | 'writhe' | 'up', t, run, from }. Running: panicking, screaming, away
+  // from where the fire came from. Writhing: lying on the ground (p.lie 0…1), shaking. Up: standing
+  // up and running on until the fire goes out. Dead bodies burn on for a while.
+  let burning = 0;
+  function ignite(p, fx, fz) {
+    if (!p || p.burn || !V || p.state === 'inside' || p.state === 'gone' || p.state === 'enter') return false;
+    if (p.burnSafe && performance.now() < p.burnSafe) return false;
+    fx = fx ?? p.x + rnd(-1, 1); fz = fz ?? p.z + rnd(-1, 1);
+    if (p.state !== 'down') {
+      if (p.parent) orphan(p);                                    // a child on fire runs on its own…
+      if (p.child) orphan(p.child);                               // …and so does the child of a parent on fire
+    }
+    p.burn = { phase: 'run', t: 0, run: rnd(...BURN_RUN), from: [fx, fz] };
+    if (p.state !== 'down') { panic(p, fx, fz, 30); scream(p, rnd(0, 0.15)); }
+    return true;
+  }
+  function burnStep(p, dt) {
+    const b = p.burn; b.t += dt;
+    if (p.state === 'inside' || p.state === 'gone') { p.burn = null; return; }
+    if (p.state === 'down') { if ((b.dead = (b.dead || 0) + dt) > BURN_CORPSE) p.burn = null; return; }
+    if (b.phase === 'run') {
+      if (!(p.panic > 1)) p.panic = 2;
+      p.fleeFrom = b.from;
+      if (Math.random() < 1.3 * dt) scream(p, 0);
+      if (b.t >= b.run && p.state === 'walk') {                   // falls over and writhes
+        b.phase = 'writhe'; b.t = 0;
+        const a = rnd(0, Math.PI * 2); p.axis = new V(Math.sin(a), 0, -Math.cos(a));
+        scream(p, 0);
+      }
+    } else if (b.phase === 'writhe') {
+      p.lie = Math.min(1, (p.lie || 0) + dt / FALL_SECONDS);
+      if (Math.random() < 0.8 * dt) scream(p, 0, true);
+      if (b.t >= BURN_WRITHE) { b.phase = 'up'; b.t = 0; panic(p, b.from[0], b.from[1], BURN_AFTER); }
+    } else {
+      p.lie = Math.max(0, (p.lie || 0) - dt / 0.6);              // gets up…
+      if (!(p.panic > 1)) p.panic = 2;                            // …and runs on, burning
+      if (Math.random() < 0.5 * dt) scream(p, 0);
+      if (b.t >= BURN_AFTER) { p.burn = null; p.lie = 0; p.burnSafe = performance.now() + BURN_IMMUNE * 1000; }
     }
   }
 
@@ -290,6 +342,7 @@
 
   function step(p, dt) {
     if (p.state === 'gone') return;
+    if (p.burn) { burnStep(p, dt); if (p.state !== 'down' && p.lie > 0) return; }   // writhing / getting up: stays put
     if (p.state === 'down') { p.fall = Math.min(1, p.fall + dt / FALL_SECONDS); return; }   // lies still
     if (p.parent) { follow(p, dt); return; }
     if (p.panic > 0) p.panic -= dt;                              // calms down, indoors too
@@ -331,7 +384,7 @@
     if (before < 0.5 && p.s >= 0.5 && net.doorList.length) {
       const k = edgeKeyOf(p.a, p.b), n = net.doors.get(k);
       const r = sideOffset(p);   // the side of the street we're on; panicking people like to hide indoors
-      if (n && r[0] * -n[0] + r[1] * -n[1] > 0 && Math.random() < (panicking ? PANIC_ENTER_CHANCE : ENTER_CHANCE) && !zoneAt(...midOf(k))) { place(p, dt); startEnter(p, k); return; }
+      if (n && !p.burn && r[0] * -n[0] + r[1] * -n[1] > 0 && Math.random() < (panicking ? PANIC_ENTER_CHANCE : ENTER_CHANCE) && !zoneAt(...midOf(k))) { place(p, dt); startEnter(p, k); return; }
     }
     plan(p);
     while (p.s >= p.s1) {                                        // round the corner, onto the next street
@@ -579,7 +632,7 @@
   }
 
   // ---------- 3D figures ----------
-  let legs = null, torsos = null, heads = null, hairs = null, parts = [], bald = null, M = null, V = null, group = null;
+  let legs = null, torsos = null, heads = null, hairs = null, parts = [], bald = null, M = null, V = null, group = null, flames = null;
 
   // ---------- blood ----------
   // Knocked down → a spray of drops (mostly away from the shot, some back towards it) that fall
@@ -894,6 +947,13 @@
       for (let i = 0; i < MAX_BLOOD_DROPS; i++) dropMesh.setColorAt(i, c.set(['#8a0d0d', '#6d0909', '#a31414', '#5a0606'][i % 4]));
       group.add(pools, dropMesh);
     }
+    // flames on burning people: unlit blocks (no light or shade: they glow), yellow, orange, red
+    const K = window.scCore && window.scCore.classes && window.scCore.classes();
+    const flameMat = K && K.Basic ? new K.Basic({ vertexColors: true }) : new Material({ vertexColors: true, emissive: '#ff8a1e' });
+    flames = new InstancedMesh(geo((pp, nn, cc) => box(pp, nn, cc, -0.5, -0.5, -0.5, 1, 1, 1, W)), flameMat, MAX_FLAMES);
+    flames.frustumCulled = false; flames.count = 0; flames.name = 'sc-resident-flames';
+    for (let i = 0; i < MAX_FLAMES; i++) flames.setColorAt(i, c.set(['#ffd24a', '#ff8a1e', '#f0531f'][i % 3]));
+    group.add(flames);
     scene.add(group);
     return true;
   }
@@ -920,6 +980,7 @@
     }
     const m = new M();
     const n = Math.min(people.length, MAX_PEOPLE);
+    burners.length = 0;
     const carsByTile = CAR_COLLISIONS ? movingCars() : null;
     const crowd = dt > 0 ? crowdCells() : null;
     for (let i = 0; i < n; i++) {
@@ -930,13 +991,20 @@
       if (p.state === 'inside' || p.state === 'gone') { for (const part of parts) part.setMatrixAt(i, hidden); continue; }
       m.makeRotationY(p.h);
       let y = SIDEWALK_HEIGHT;
-      if (p.state === 'down') {
+      const lie = p.state === 'down' ? p.fall : p.lie || 0;
+      if (lie > 0) {
         // tip over around the feet, away from the shot, speeding up like a real fall
-        const f = p.fall * p.fall;
-        tip.makeRotationAxis(p.axis, (Math.PI / 2) * f);
+        const f = lie * lie;
+        let ang = (Math.PI / 2) * f;
+        if (p.burn && p.state !== 'down' && p.burn.phase === 'writhe') {   // on fire on the ground: shaking
+          ang += Math.sin(t * 0.031 + i) * 0.14 * f;
+          m.makeRotationY(p.h + Math.sin(t * 0.019 + i * 1.7) * 0.35 * f);
+        }
+        tip.makeRotationAxis(p.axis, ang);
         m.premultiply(tip);
         y += 0.011 * SCALE * f;                                 // lying on its back, not half in the sidewalk
       }
+      if (p.burn) burners.push(i);
       m.setPosition(p.x, y, p.z);
       if (p.k) {                                                // a child: smaller body, the same head on top of it
         bodyM.multiplyMatrices(m, childBody); headM.multiplyMatrices(m, childHead);
@@ -949,10 +1017,59 @@
       if (p.squirt > 0 && dt > 0) squirt(p, m, dt, t);
     }
     for (const part of parts) { part.count = n; part.instanceMatrix.needsUpdate = true; }
+    stepFire(dt, t, crowd);
     if (HEADSHOTS) stepHeads(dt);
     if (BLOOD) stepBlood(dt, n, m);
   }
   let tip = null, bodyM = null, headM = null, childBody = null, childHead = null;
+  // Flames on everyone burning (3 flickering blocks each, one instanced mesh), a bit of smoke, and
+  // the fire spreading to whoever touches them.
+  const burners = [];
+  let smokeAcc = 0;
+  function stepFire(dt, t, crowd) {
+    burning = burners.length;
+    if (!flames) return;
+    const e = flames.instanceMatrix.array, core = window.scCore;
+    let k = 0;
+    for (const i of burners) {
+      const p = people[i];
+      const lie = p.state === 'down' ? p.fall : p.lie || 0, ang = (Math.PI / 2) * lie * lie, sa = Math.sin(ang), ca = Math.cos(ang);
+      const dx = p.axis ? -p.axis.z : 0, dz = p.axis ? p.axis.x : 0, kk = p.k || 1, y0 = SIDEWALK_HEIGHT + 0.004;
+      const fade = p.burn.phase === 'up' ? Math.min(1, (BURN_AFTER - p.burn.t) / 2) : p.state === 'down' ? Math.min(1, (BURN_CORPSE - (p.burn.dead || 0)) / 2) : 1;
+      for (let j = 0; j < 3 && k < MAX_FLAMES; j++, k++) {
+        const h = (0.025 + j * 0.04) * kk * SCALE, fl = 0.75 + 0.5 * Math.random();
+        const w = (0.03 - j * 0.004) * SCALE * fl * fade, hh = w * (1.6 + Math.random()), a = Math.random() * 6.28, c = Math.cos(a), s = Math.sin(a);
+        const o = k * 16;
+        e[o] = w * c; e[o + 1] = 0; e[o + 2] = -w * s; e[o + 3] = 0;
+        e[o + 4] = 0; e[o + 5] = hh; e[o + 6] = 0; e[o + 7] = 0;
+        e[o + 8] = w * s; e[o + 9] = 0; e[o + 10] = w * c; e[o + 11] = 0;
+        e[o + 12] = p.x + dx * h * sa + rnd(-0.004, 0.004); e[o + 13] = y0 + h * ca + hh * 0.3; e[o + 14] = p.z + dz * h * sa + rnd(-0.004, 0.004); e[o + 15] = 1;
+      }
+    }
+    flames.count = k;
+    if (k) { if (flames.instanceMatrix.addUpdateRange) flames.instanceMatrix.addUpdateRange(0, k * 16); flames.instanceMatrix.needsUpdate = true; }
+    if (!burners.length || !(dt > 0)) return;
+    // smoke: about 3 puffs a second per person on fire (the core's solid puffs)
+    if (core && core.smoke) {
+      smokeAcc += burners.length * 3 * dt;
+      while (smokeAcc >= 1) {
+        smokeAcc -= 1;
+        const p = people[burners[(Math.random() * burners.length) | 0]];
+        core.smoke('smoke', p.x + rnd(-0.01, 0.01), SIDEWALK_HEIGHT + (p.lie > 0.5 || p.state === 'down' ? 0.04 : 0.13), p.z + rnd(-0.01, 0.01),
+          { vy: rnd(0.15, 0.3), rise: rnd(0.2, 0.35), size: rnd(0.02, 0.035), grow: 3, life: rnd(1.5, 2.5), drag: 1 });
+      }
+    }
+    // touching someone on fire: alight too
+    if (!crowd) return;
+    for (const i of burners) {
+      const p = people[i];
+      const cx = Math.floor(p.x / PASS_CELL), cz = Math.floor(p.z / PASS_CELL);
+      for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+        const list = crowd.get((cx + a) + ',' + (cz + b)); if (!list) continue;
+        for (const q of list) if (q !== p && !q.burn && Math.abs(q.x - p.x) < BURN_TOUCH && Math.abs(q.z - p.z) < BURN_TOUCH && Math.hypot(q.x - p.x, q.z - p.z) < BURN_TOUCH) ignite(q, p.x, p.z);
+      }
+    }
+  }
   whenCore((c) => {
     c.onFrame(frame);
     if (c.settings) {
@@ -1090,16 +1207,29 @@
       });
       return fled;
     },
-    blast(x, z, knockRadius, panicRadius, panicSeconds) {
-      let down = 0, fled = 0;
+    // fireFrom (an explosion; not the monster's stamping): people from there to BLAST_FIRE_BAND
+    // further out (about 5 m outside where people are blown apart) catch fire half of the time.
+    blast(x, z, knockRadius, panicRadius, panicSeconds, fireFrom) {
+      let down = 0, fled = 0, burned = 0;
       people.forEach((p, i) => {
         if (i >= MAX_PEOPLE || p.state === 'inside' || p.state === 'down' || p.state === 'gone') return;
         const dx = p.x - x, dz = p.z - z, dist = Math.hypot(dx, dz);
-        if (dist <= knockRadius) { if (this.knockDown(i, { x: dx || 1e-3, y: 0, z: dz }, 'blast')) down++; }
+        if (fireFrom !== undefined && dist >= fireFrom && dist <= fireFrom + BLAST_FIRE_BAND && Math.random() < BLAST_FIRE_CHANCE && ignite(p, x, z)) burned++;
+        else if (dist <= knockRadius) { if (this.knockDown(i, { x: dx || 1e-3, y: 0, z: dz }, 'blast')) down++; }
         else if (dist <= panicRadius) { panic(p, x, z, panicSeconds); fled++; }
       });
-      return { down, fled };
+      return { down, fled, burned };
     },
+    // set resident i on fire (the fire came from fromX, fromZ: they run away from it); false when
+    // they can't burn now (indoors, already burning, just put out)
+    ignite(i, fromX, fromZ) { return ignite(people[i], fromX, fromZ); },
+    // everyone outside within r of (x, z) catches fire with this chance; returns how many
+    igniteAround(x, z, r, chance = 1) {
+      let n = 0;
+      people.forEach((p, i) => { if (i < MAX_PEOPLE && Math.hypot(p.x - x, p.z - z) <= r && Math.random() < chance && ignite(p, x, z)) n++; });
+      return n;
+    },
+    get burning() { return burning; },
     // people indoors within radius of (x, z) die (the nuke); returns how many
     killInside(x, z, radius) {
       let n = 0;
@@ -1168,7 +1298,8 @@
       const p = people[i];
       if (!p || p.state === 'down' || p.state === 'gone' || !V) return false;
       const l = Math.hypot(d.x, d.z) || 1;
-      p.state = 'down'; p.fall = 0;
+      if (p.lie > 0.5 && p.axis) { p.state = 'down'; p.fall = p.lie; p.lie = 0; died(p, cause || 'shot'); return true; }   // already on the ground (on fire)
+      p.state = 'down'; p.fall = 0; p.lie = 0;
       p.axis = new V(d.z / l, 0, -d.x / l);                    // horizontal axis ⟂ to the shot
       died(p, cause || 'shot');
       if (Math.random() < 0.3) scream(p, 0, true);
