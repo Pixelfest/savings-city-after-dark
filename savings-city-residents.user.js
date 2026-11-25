@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.12
+// @version      1.13
 // @description  Simple, static little figures that slowly walk the sidewalks and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -28,6 +28,28 @@
  */
 (function () {
   'use strict';
+
+  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
+  // Everything this script plays goes through one gain node that copies the app's setting, also
+  // while a sound is playing (checked twice a second).
+  const appSoundLevel = () => {
+    try {
+      if (localStorage.getItem('citysaver:muted') === '1') return 0;
+      const v = parseFloat(localStorage.getItem('citysaver:volume'));
+      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
+    } catch { return 1; }
+  };
+  let soundOut = null;
+  function out(ctx) {
+    if (!soundOut || soundOut.context !== ctx) {
+      soundOut = ctx.createGain();
+      soundOut.gain.value = appSoundLevel();
+      soundOut.connect(ctx.destination);
+      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
+    }
+    return soundOut;
+  }
+
 
   // ---- settings -------------------------------------------------------------------------
   const PER_ROAD = 2;             // residents per road tile
@@ -870,7 +892,7 @@
       env.gain.setValueAtTime(vol, t + len * 0.6);
       env.gain.exponentialRampToValueAtTime(0.0001, t + len);
       out.connect(env);
-      if (pn) { pn.pan.value = pan; env.connect(pn); pn.connect(a.destination); } else env.connect(a.destination);
+      if (pn) { pn.pan.value = pan; env.connect(pn); pn.connect(out(a)); } else env.connect(out(a));
       screaming++;
       osc.onended = () => { screaming--; };
       for (const s of [osc, lfo, noise]) { s.start(t); s.stop(t + len + 0.05); }

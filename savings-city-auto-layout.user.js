@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – auto layout (tall in the centre)
 // @namespace    savings-city-tweaks
-// @version      2.2
+// @version      2.3
 // @description  Shows the city rearranged: tallest buildings in the centre, smaller ones outward, with organically grown streets. View only – nothing is saved to the server.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -53,7 +53,7 @@
   const TURN_COST = 0.6;    // higher = straighter roads with fewer bends
   const CANDIDATES = 14;    // best spots per building that get a road check
   const SIGN_MARGIN = 5;    // tiles to keep free around the welcome sign (app rule)
-  const RING_ROAD = true;   // road around the whole city, with the loose ends connected to it
+  const RING_ROAD = false;  // road around the whole city, with the loose ends connected to it
   const RING_MARGIN = 2;    // tiles between the outermost buildings and the ring road
   const CONNECT_MAX = 12;   // longest new road (tiles) used to connect a dead end
   const MIN_LOOP = 8;       // a dead end only connects to road at least this far away along the roads

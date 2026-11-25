@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – giant monster
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  A 👾 button releases a giant green monster with round glasses that walks into the city and smashes buildings into solid chunks. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -27,6 +27,28 @@
  */
 (function () {
   'use strict';
+
+  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
+  // Everything this script plays goes through one gain node that copies the app's setting, also
+  // while a sound is playing (checked twice a second).
+  const appSoundLevel = () => {
+    try {
+      if (localStorage.getItem('citysaver:muted') === '1') return 0;
+      const v = parseFloat(localStorage.getItem('citysaver:volume'));
+      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
+    } catch { return 1; }
+  };
+  let soundOut = null;
+  function out(ctx) {
+    if (!soundOut || soundOut.context !== ctx) {
+      soundOut = ctx.createGain();
+      soundOut.gain.value = appSoundLevel();
+      soundOut.connect(ctx.destination);
+      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
+    }
+    return soundOut;
+  }
+
 
   // ---- settings (tiles; 1 tile ≈ 20 m) ----
   const MONSTER_HEIGHT = 2.6;      // top of the head (≈ 50 m); the tallest buildings are ~3
@@ -831,7 +853,7 @@
     if (!SOUND) return;
     try {
       audio = audio || new AudioContext();
-      const a = audio, t = a.currentTime, g = a.createGain(); g.connect(a.destination);
+      const a = audio, t = a.currentTime, g = a.createGain(); g.connect(out(a));
       if (kind === 'stomp') {
         const o = a.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(30, t + 0.35);
         g.gain.setValueAtTime(0.7, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.4); o.connect(g); o.start(t); o.stop(t + 0.45);

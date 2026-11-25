@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.23
+// @version      1.24
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -25,6 +25,28 @@
  */
 (function () {
   'use strict';
+
+  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
+  // Everything this script plays goes through one gain node that copies the app's setting, also
+  // while a sound is playing (checked twice a second).
+  const appSoundLevel = () => {
+    try {
+      if (localStorage.getItem('citysaver:muted') === '1') return 0;
+      const v = parseFloat(localStorage.getItem('citysaver:volume'));
+      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
+    } catch { return 1; }
+  };
+  let soundOut = null;
+  function out(ctx) {
+    if (!soundOut || soundOut.context !== ctx) {
+      soundOut = ctx.createGain();
+      soundOut.gain.value = appSoundLevel();
+      soundOut.connect(ctx.destination);
+      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
+    }
+    return soundOut;
+  }
+
 
   // ---- settings (all in tiles; one tile = 1 unit) --------------------------------------------
   const FOV = 70;                 // field of view in degrees
@@ -1419,7 +1441,7 @@
       if (!whirNodes) {
         const osc = audio.createOscillator(), f = audio.createBiquadFilter(), g = audio.createGain();
         osc.type = 'sawtooth'; f.type = 'lowpass'; f.frequency.value = 900; g.gain.value = 0;
-        osc.connect(f); f.connect(g); g.connect(audio.destination); osc.start();
+        osc.connect(f); f.connect(g); g.connect(out(audio)); osc.start();
         whirNodes = { osc, g };
       }
       const t = audio.currentTime;
@@ -1746,7 +1768,7 @@
     try {
       audio = audio || new AudioContext();
       const a = audio, t = a.currentTime, g = a.createGain();
-      g.connect(a.destination);
+      g.connect(out(a));
       if (kind === 'mg') {
         // shorter, deeper crack; quieter, as there are twenty a second
         const buf = a.createBuffer(1, Math.floor(a.sampleRate * 0.06), a.sampleRate), ch = buf.getChannelData(0);

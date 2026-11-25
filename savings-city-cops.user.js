@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -30,6 +30,28 @@
  */
 (function () {
   'use strict';
+
+  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
+  // Everything this script plays goes through one gain node that copies the app's setting, also
+  // while a sound is playing (checked twice a second).
+  const appSoundLevel = () => {
+    try {
+      if (localStorage.getItem('citysaver:muted') === '1') return 0;
+      const v = parseFloat(localStorage.getItem('citysaver:volume'));
+      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
+    } catch { return 1; }
+  };
+  let soundOut = null;
+  function out(ctx) {
+    if (!soundOut || soundOut.context !== ctx) {
+      soundOut = ctx.createGain();
+      soundOut.gain.value = appSoundLevel();
+      soundOut.connect(ctx.destination);
+      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
+    }
+    return soundOut;
+  }
+
 
   // ---- settings (tiles; 1 tile ≈ 20 m) ----
   const HEARTS = 10;
@@ -292,7 +314,7 @@
         sirenOsc.type = 'square'; sirenOsc.frequency.value = 800; lfo.frequency.value = 0.6; lg.gain.value = 260;
         lfo.connect(lg); lg.connect(sirenOsc.frequency);
         const f = a.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 1800;
-        sirenOsc.connect(f); f.connect(sirenGain); sirenGain.connect(a.destination); sirenGain.gain.value = 0;
+        sirenOsc.connect(f); f.connect(sirenGain); sirenGain.connect(out(a)); sirenGain.gain.value = 0;
         sirenOsc.start(); lfo.start();
       }
       const pl = W().player, d = Math.hypot(c.car.x - pl.x, c.car.z - pl.z);
@@ -659,7 +681,7 @@
       o.type = 'sawtooth'; o.frequency.setValueAtTime(220, t); o.frequency.exponentialRampToValueAtTime(130, t + 0.25);
       f.type = 'bandpass'; f.frequency.value = 700; f.Q.value = 3;
       g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
-      o.connect(f); f.connect(g); g.connect(a.destination); o.start(t); o.stop(t + 0.32);
+      o.connect(f); f.connect(g); g.connect(out(a)); o.start(t); o.stop(t + 0.32);
     } catch {}
   }
   function whizz() {
@@ -667,7 +689,7 @@
       const a = ctx(), t = a.currentTime, o = a.createOscillator(), g = a.createGain();
       o.type = 'sine'; o.frequency.setValueAtTime(2400, t + 0.05); o.frequency.exponentialRampToValueAtTime(900, t + 0.2);
       g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.06, t + 0.08); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
-      o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + 0.22);
+      o.connect(g); g.connect(out(a)); o.start(t); o.stop(t + 0.22);
     } catch {}
   }
   function sad() {
@@ -677,7 +699,7 @@
         const o = a.createOscillator(), g = a.createGain(), s = t + i * 0.45;
         o.type = 'triangle'; o.frequency.value = fq;
         g.gain.setValueAtTime(0.0001, s); g.gain.exponentialRampToValueAtTime(0.25, s + 0.03); g.gain.exponentialRampToValueAtTime(0.0001, s + (i === 3 ? 1.4 : 0.42));
-        o.connect(g); g.connect(a.destination); o.start(s); o.stop(s + 1.5);
+        o.connect(g); g.connect(out(a)); o.start(s); o.stop(s + 1.5);
       });
     } catch {}
   }

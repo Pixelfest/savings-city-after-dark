@@ -33,21 +33,21 @@ newer loader versions from GitHub; the scripts it loads still update.
 Add each `.user.js` file separately (Dashboard → `+` → paste, or drag the file in) and set the
 `@match` address in every one. They don't update by themselves.
 
-Settings are constants at the top of each script.
+Settings are constants at the top of each script. All sounds follow the app's own sound button (mute and volume).
 
 | Script | Version | What it does |
 |---|---|---|
 | `savings-city-season-toggle.user.js` | 1.0 | Button to switch between winter (snow, Christmas trees) and the normal season. |
-| `savings-city-auto-layout.user.js` | 2.2 | Organic city layout: tall buildings in the centre, smaller ones outside, roads between them and a ring road connecting loose ends. |
+| `savings-city-auto-layout.user.js` | 2.3 | Organic city layout: tall buildings in the centre, smaller ones outside, roads between them; optionally (`RING_ROAD`, off by default) a ring road connecting loose ends. |
 | `savings-city-car-tyres.user.js` | 1.3 | Wider, optionally round tyres (no more flickering). |
-| `savings-city-walk-mode.user.js` | 1.23 | First-person walk mode (WASD + mouse, Esc to stop), start from a building's door. Weapons: pistol (1), minigun (2), plus plugin weapons. Bullet holes; shot cars flee, or stop while the driver jumps out and runs; they explode (big blast, chain reactions, 1–2 dead inside, a column of black smoke rising and fading). Destructible trees, street lamps, benches and fountains. |
-| `savings-city-residents.user.js` | 1.12 | Residents walking the sidewalks, entering and leaving buildings, looking before they cross. They panic and scream, fall over, bleed, lose their heads on head shots and can be blown apart. People inside a building die when it comes down (or is nuked). |
+| `savings-city-walk-mode.user.js` | 1.24 | First-person walk mode (WASD + mouse, Esc to stop), start from a building's door. Weapons: pistol (1), minigun (2), plus plugin weapons. Bullet holes; shot cars flee, or stop while the driver jumps out and runs; they explode (big blast, chain reactions, 1–2 dead inside, a column of black smoke rising and fading). Destructible trees, street lamps, benches and fountains. |
+| `savings-city-residents.user.js` | 1.13 | Residents walking the sidewalks, entering and leaving buildings, looking before they cross. They panic and scream, fall over, bleed, lose their heads on head shots and can be blown apart. People inside a building die when it comes down (or is nuked). |
 | `savings-city-rocket-launcher.user.js` | 1.5 | Rocket launcher for walk mode (key 3; needs walk mode 1.22+). Craters of solid chunks in buildings; after 7 hits the building comes down, starting at the last impact, with dust rolling out over the ground; cars and residents burst into parts. |
-| `savings-city-cops.user.js` | 1.1 | Walk mode: shoot and the nearest police car stops, two officers get out and shoot back; now and then a police car comes along the roads from out of sight. Officers can be shot (head shots knock the head off), blown up and buried. 10 hearts; when they're gone: "You died". |
+| `savings-city-cops.user.js` | 1.2 | Walk mode: shoot and the nearest police car stops, two officers get out and shoot back; now and then a police car comes along the roads from out of sight. Officers can be shot (head shots knock the head off), blown up and buried. 10 hearts; when they're gone: "You died". |
 | `savings-city-heli-crane.user.js` | 1.0 | Walk mode: the helicopter and the construction cranes go down after 2 shots or a rocket – the helicopter explodes, spins down and burns, a crane topples over. |
 | `savings-city-bodycount.user.js` | 1.0 | Counter (top right) of the dead – residents, officers, people in exploding cars, the helicopter pilot; shot, run over, blown up, buried – and exploded cars. Click to reset. |
-| `savings-city-nuke.user.js` | 2.6 | ☢ button: countdown while a B-2 bomber flies over and drops the bomb, which lands on ground zero as it goes off; flash, shockwave, buildings breaking into solid chunks that fly outward, ruins, mushroom cloud, camera shake. |
-| `savings-city-monster.user.js` | 1.2 | Button that releases a giant green monster with round glasses: it walks into the city, punches and tramples buildings, which collapse into solid chunks. |
+| `savings-city-nuke.user.js` | 2.7 | ☢ button: a popup to pick the yield in tonnes of TNT (hand grenade … Tsar Bomba; blast radius, force and mushroom cloud follow it), then a countdown while a B-2 bomber flies over and drops the bomb, which lands on ground zero as it goes off; flash, shockwave, buildings breaking into solid chunks that fly outward, ruins, mushroom cloud, camera shake. |
+| `savings-city-monster.user.js` | 1.3 | Button that releases a giant green monster with round glasses: it walks into the city, punches and tramples buildings, which collapse into solid chunks. |
 
 The scripts work on their own; some work together (walk mode + residents + rocket launcher + cops + helicopter/cranes;
 the monster and the rocket launcher share damaged buildings; the bodycount counts what the others

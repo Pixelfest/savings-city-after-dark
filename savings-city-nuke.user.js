@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      2.6
+// @version      2.7
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -32,6 +32,10 @@
  * - Camera shake = shaking the canvas element, so it also works in walk mode.
  * - Residents (residents script) all run, and fall as the wave reaches them. Cars are vaporised
  *   near the centre and burnt out further away; all of them stop.
+ * - Yield: clicking ☢ opens a popup to pick the yield in tonnes of TNT (presets from a hand grenade
+ *   to the Tsar Bomba). Blast radii follow the cube root of the yield (TOTAL_PER_KT, EDGE_PER_KT
+ *   per kiloton), the shockwave takes as long as it needs to get there, chunks fly harder, the
+ *   mushroom cloud grows with yield^0.25 (kept within what the view can show), flash and shake too.
  * - B-2 bomber: during the countdown a flying wing crosses the city at BOMBER_ALTITUDE, from a
  *   random direction, straight over ground zero. It releases the bomb BOMB_FALL seconds before
  *   the end of the countdown; the bomb keeps the plane's speed and falls (gravity chosen so it
@@ -43,17 +47,43 @@
 (function () {
   'use strict';
 
+  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
+  // Everything this script plays goes through one gain node that copies the app's setting, also
+  // while a sound is playing (checked twice a second).
+  const appSoundLevel = () => {
+    try {
+      if (localStorage.getItem('citysaver:muted') === '1') return 0;
+      const v = parseFloat(localStorage.getItem('citysaver:volume'));
+      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
+    } catch { return 1; }
+  };
+  let soundOut = null;
+  function out(ctx) {
+    if (!soundOut || soundOut.context !== ctx) {
+      soundOut = ctx.createGain();
+      soundOut.gain.value = appSoundLevel();
+      soundOut.connect(ctx.destination);
+      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
+    }
+    return soundOut;
+  }
+
+
   // ---- settings (distances in tiles; 1 tile ≈ 20 m) --------------------------------------
   const COUNTDOWN = 10;            // seconds between the click and the blast (0 = immediately)
-  const WAVE_SECONDS = 6;          // time for the shockwave to reach the edge
+  const DEFAULT_YIELD = 15000;     // tonnes of TNT offered in the popup the first time (Hiroshima: 15 000 t)
+  // Yield → effects (1 tile ≈ 20 m). Blast radii scale with the cube root of the yield (the usual
+  // scaling law); per kiloton: flattened completely within TOTAL_PER_KT, damage up to EDGE_PER_KT.
+  const TOTAL_PER_KT = 10;         // tiles (≈ 200 m: the 20 psi ring of a 1 kt air burst)
+  const EDGE_PER_KT = 37;          // tiles (≈ 740 m: ~2 psi, windows and light damage)
+  const WAVE_TILES_PER_SECOND = 13;// how fast the shockwave travels outward (sets how long it takes)
+  const CLOUD_PER_KT = 25;         // mushroom cloud height in tiles for 1 kt; grows with yield^0.25 (kept within view)
   const WAVE_DELAY = 0.2;          // the wave leaves after the flash, so you can see the buildings break
   const FLASH_SECONDS = 0.6;       // white flash: short, so it doesn't hide the destruction
   const LIGHT_BOOST = 3.5;         // how much brighter the scene gets for a moment (was 7)
-  const TOTAL_FRACTION = 0.10;     // share of the city radius that is flattened completely
-  const EDGE_FRACTION = 1.15;      // how far (× city radius) the wave still does damage
   const FOUNDATION_HEIGHT = 0.03;  // things lower than this survive even at ground zero
   const MAX_DEBRIS = 8000;        // pieces of rubble (small instanced cubes)
-  const BLAST_SPEED = 10;          // how hard chunks and rubble are flung (tiles per second near the centre)
+  const BLAST_SPEED = 10;          // how hard chunks and rubble are flung near the centre, for 15 kt (scales with the yield)
   const CHUNK_SIZE = 0.2;          // buildings break into solid chunks about this big (tiles); smaller = more chunks
   const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide
   const RUIN_SHARE = 0.75;         // at the edge of the blast this share of a building still stands (less towards the centre, none in the middle)
@@ -66,10 +96,10 @@
   const SHAKE = 22;                // camera shake strength (pixels)
   const SOUND = true;
   const BOMBER = true;             // a B-2 flies over during the countdown and drops the bomb
-  const BOMBER_ALTITUDE = 4.5;     // tiles (≈ 90 m – low, so you see it from above too)
+  const BOMBER_ALTITUDE = 7;       // tiles (≈ 140 m – low, so you see it from above too)
   const BOMBER_SPEED = 4;          // tiles per second
   const BOMB_FALL = 3;             // seconds from release to impact (= the blast)
-  const BOMBER_SPAN = 2.6;         // wingspan in tiles (a real B-2: 52 m)
+  const BOMBER_SPAN = 6.5;         // wingspan in tiles (a real B-2: 52 m = 2.6 tiles; bigger reads better)
   // -----------------------------------------------------------------------------------------
 
   // ---------- catch the scene ----------
@@ -210,7 +240,7 @@
   // ---------- state ----------
   let nuke = null;   // { t0, cx, cz, R, total, edge, H, ... }
   const elapsed = () => (performance.now() - nuke.t0) / 1000;
-  const front = (t) => { t = Math.max(0, t - WAVE_DELAY); return nuke.edge * clamp01((1 - Math.exp(-t / (WAVE_SECONDS / 3.5))) / (1 - Math.exp(-3.5))); };
+  const front = (t) => { t = Math.max(0, t - WAVE_DELAY); return nuke.edge * clamp01((1 - Math.exp(-t / (nuke.wave / 3.5))) / (1 - Math.exp(-3.5))); };
   // How high things may still stand at distance d once the wave has passed.
   function keepHeight(d) {
     if (d <= nuke.total) return FOUNDATION_HEIGHT;
@@ -349,7 +379,7 @@
     const turn = rnd(-1, 1) * SCATTER_DEGREES * Math.PI / 180, bx = (cx - nuke.cx) / d, bz = (cz - nuke.cz) / d;
     const dx = bx * Math.cos(turn) - bz * Math.sin(turn), dz = bx * Math.sin(turn) + bz * Math.cos(turn);
     const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
-    const out = BLAST_SPEED * power * rnd(0.3, 1.3) + 0.3;
+    const out = nuke.speed * power * rnd(0.3, 1.3) + 0.3;
     let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
     Object.assign(fr, {
       R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0],
@@ -800,7 +830,7 @@
     const k = dN++;
     const dx = (x - nuke.cx) / (d || 1), dz = (z - nuke.cz) / (d || 1);
     const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
-    const out = BLAST_SPEED * power * rnd(0.4, 1.2) + 0.2;
+    const out = nuke.speed * power * rnd(0.4, 1.2) + 0.2;
     D.p.set([x, cy, z], k * 3);
     D.v.set([dx * out + rnd(-0.3, 0.3), rnd(0.3, 2.2) * power + cy * 0.3, dz * out + rnd(-0.3, 0.3)], k * 3);
     D.r.set([rnd(0, 6), rnd(0, 6), rnd(0, 6)], k * 3);
@@ -918,25 +948,25 @@
   function stepWave(t) {
     const f = front(t), done = f >= nuke.edge * 0.999;
     const k = clamp01(f / nuke.edge);
-    shell.visible = !done; dust.visible = t < WAVE_SECONDS + 4;
+    shell.visible = !done; dust.visible = t < nuke.wave + 4;
     shell.scale.set(f + 0.01, (f + 0.01) * 0.55, f + 0.01);
     shell.material.opacity = 0.16 * (1 - k);
     dust.scale.set(f + 0.01, 1, f + 0.01);
-    dust.material.opacity = 0.7 * (1 - clamp01((t - WAVE_SECONDS) / 4));
+    dust.material.opacity = 0.7 * (1 - clamp01((t - nuke.wave) / 4));
     disc.scale.set(Math.min(f, nuke.edge * 0.95) + 0.01, 1, Math.min(f, nuke.edge * 0.95) + 0.01);
   }
 
   // ---------- flash, light and shake ----------
   let lights = [], flashEl = null, countEl = null;
   function stepLight(t) {
-    const boost = 1 + (LIGHT_BOOST - 1) * Math.exp(-t / 0.18) + 0.25 * Math.exp(-t / 3);
+    const boost = 1 + (nuke.light - 1) * Math.exp(-t / 0.18) + 0.25 * Math.exp(-t / 3);
     for (const L of lights) L.o.intensity = L.i * boost;
     if (flashEl) flashEl.style.opacity = String(t < 0.08 ? 1 : Math.max(0, 1 - (t - 0.08) / FLASH_SECONDS) ** 2);
   }
   function stepShake(t) {
     const el = renderer && renderer.domElement; if (!el) return;
     const arrive = Math.exp(-Math.pow((t - WAVE_DELAY - 1.2) / 0.6, 2));   // the wave rolling under the camera
-    const a = SHAKE * (Math.exp(-t / 1.1) + 0.8 * arrive + 0.25 * Math.exp(-t / 6));
+    const a = nuke.shake * (Math.exp(-t / 1.1) + 0.8 * arrive + 0.25 * Math.exp(-t / 6));
     if (a < 0.2) { el.style.transform = ''; return; }
     const x = (Math.random() * 2 - 1) * a, y = (Math.random() * 2 - 1) * a, r = (Math.random() * 2 - 1) * a * 0.02;
     el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) rotate(${r.toFixed(2)}deg)`;
@@ -990,7 +1020,7 @@
     try {
       audio = audio || new AudioContext();
       const a = audio, t = a.currentTime, o = a.createOscillator(), g = a.createGain();
-      o.frequency.value = freq; o.connect(g); g.connect(a.destination);
+      o.frequency.value = freq; o.connect(g); g.connect(out(a));
       g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
       o.start(t); o.stop(t + dur);
     } catch {}
@@ -1005,14 +1035,108 @@
       for (let i = 0; i < ch.length; i++) { last = last * 0.96 + (Math.random() * 2 - 1) * 0.04; ch[i] = last * 6 * Math.pow(1 - i / ch.length, 1.6); }
       const src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
       f.type = 'lowpass'; f.frequency.setValueAtTime(1200, t); f.frequency.exponentialRampToValueAtTime(70, t + 4);
-      src.buffer = buf; src.connect(f); f.connect(g); g.connect(a.destination);
+      src.buffer = buf; src.connect(f); f.connect(g); g.connect(out(a));
       g.gain.setValueAtTime(1.2, t);
       src.start(t);
       const sub = a.createOscillator(), sg = a.createGain();
       sub.type = 'sine'; sub.frequency.setValueAtTime(55, t); sub.frequency.exponentialRampToValueAtTime(22, t + 5);
       sg.gain.setValueAtTime(0.8, t); sg.gain.exponentialRampToValueAtTime(0.001, t + 6);
-      sub.connect(sg); sg.connect(a.destination); sub.start(t); sub.stop(t + 6);
+      sub.connect(sg); sg.connect(out(a)); sub.start(t); sub.stop(t + 6);
     } catch {}
+  }
+
+  // ---------- yield ----------
+  // Everything the blast does follows from the yield (tonnes of TNT).
+  let yieldTons = DEFAULT_YIELD;
+  function effects(tons) {
+    const kt = Math.max(1e-6, tons / 1000), k3 = Math.cbrt(kt);
+    const total = TOTAL_PER_KT * k3, edge = EDGE_PER_KT * k3;
+    return {
+      yield: tons, total, edge,
+      wave: Math.min(16, Math.max(0.8, edge / WAVE_TILES_PER_SECOND)),                // seconds for the wave to reach the edge
+      speed: Math.min(30, Math.max(2, BLAST_SPEED * Math.sqrt(total / (TOTAL_PER_KT * Math.cbrt(15))))),
+      H: Math.min(150, Math.max(1.2, CLOUD_PER_KT * Math.pow(kt, 0.25))),             // mushroom cloud height
+      shake: SHAKE * Math.min(2, Math.max(0.15, Math.sqrt(edge / (EDGE_PER_KT * Math.cbrt(15))))),
+      light: 1 + (LIGHT_BOOST - 1) * Math.min(1.4, Math.max(0.25, Math.pow(kt / 15, 0.15))),
+    };
+  }
+  const fmtTons = (t) => t < 1 ? (t * 1000).toLocaleString('nl-NL', { maximumFractionDigits: 2 }) + ' kg' : t >= 1e6 ? (t / 1e6).toLocaleString('nl-NL', { maximumFractionDigits: 2 }) + ' Mt' : t >= 1000 ? (t / 1000).toLocaleString('nl-NL', { maximumFractionDigits: 2 }) + ' kt' : t.toLocaleString('nl-NL', { maximumFractionDigits: 2 }) + ' t';
+  const fmtM = (tiles) => { const m = tiles * 20; return m >= 1000 ? (m / 1000).toLocaleString('nl-NL', { maximumFractionDigits: 1 }) + ' km' : Math.round(m) + ' m'; };
+
+  // the popup: pick the yield, see what it does
+  let popup = null;
+  const PRESETS = [['Granaat', 0.0002], ['MOAB', 11], ['Davy Crockett', 20], ['Hiroshima', 15000], ['Nagasaki', 21000], ['W88', 475000], ['Castle Bravo', 15e6], ['Tsar Bomba', 50e6]];
+  const LOG_MIN = Math.log10(0.0001), LOG_MAX = Math.log10(1e8);
+  function openPopup() {
+    if (popup) return;
+    try { const v = parseFloat(localStorage.getItem('sc-nuke:yield')); if (v > 0) yieldTons = v; } catch {}
+    const locked = preparing || ready;                         // the destruction is already worked out for this yield
+    popup = document.createElement('div');
+    popup.id = 'sc-nuke-popup';
+    popup.innerHTML = `
+      <style>
+        #sc-nuke-popup{position:fixed;inset:0;z-index:10050;display:flex;align-items:center;justify-content:center;background:rgba(10,12,20,.45);font:500 15px/1.4 system-ui,sans-serif}
+        #sc-nuke-popup .box{width:min(440px,calc(100vw - 32px));background:#1d2233;color:#fff;border-radius:16px;padding:20px 22px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+        #sc-nuke-popup h2{margin:0 0 4px;font:800 22px/1.2 system-ui,sans-serif;color:#ffd23f}
+        #sc-nuke-popup .sub{opacity:.75;font-size:13px;margin-bottom:14px}
+        #sc-nuke-popup label{display:block;font-weight:700;margin:10px 0 6px}
+        #sc-nuke-popup .row{display:flex;gap:8px;align-items:center}
+        #sc-nuke-popup input[type=number]{flex:1;min-width:0;font:700 18px system-ui,sans-serif;padding:8px 10px;border-radius:10px;border:0;background:#fff;color:#223}
+        #sc-nuke-popup input[type=range]{width:100%;margin:12px 0 4px;accent-color:#ffd23f}
+        #sc-nuke-popup .presets{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px}
+        #sc-nuke-popup .presets button{border:0;border-radius:8px;padding:5px 9px;background:#2f3650;color:#fff;font:600 13px system-ui,sans-serif;cursor:pointer}
+        #sc-nuke-popup .presets button:hover{background:#414a6b}
+        #sc-nuke-popup .fx{background:#151927;border-radius:10px;padding:10px 12px;font-size:14px;display:grid;grid-template-columns:1fr auto;gap:3px 12px}
+        #sc-nuke-popup .fx b{text-align:right;font-variant-numeric:tabular-nums}
+        #sc-nuke-popup .note{font-size:12px;opacity:.7;margin-top:8px}
+        #sc-nuke-popup .buttons{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+        #sc-nuke-popup .buttons button{border:0;border-radius:10px;padding:10px 18px;font:800 15px system-ui,sans-serif;cursor:pointer}
+        #sc-nuke-popup .fire{background:#e8313f;color:#fff}
+        #sc-nuke-popup .cancel{background:#3a4160;color:#fff}
+      </style>
+      <div class="box" role="dialog" aria-label="Kernbom">
+        <h2>☢ Kernbom</h2>
+        <div class="sub">Hoe zwaar? In ton TNT.</div>
+        <label for="sc-nuke-yield">Kracht (ton TNT)</label>
+        <div class="row"><input id="sc-nuke-yield" type="number" min="0.0001" max="100000000" step="any"><span class="unit"></span></div>
+        <input type="range" min="0" max="1000" step="1" aria-label="Kracht">
+        <div class="presets">${PRESETS.map(([n, t]) => `<button type="button" data-t="${t}">${n}<br><small>${fmtTons(t)}</small></button>`).join('')}</div>
+        <div class="fx">
+          <span>Alles plat binnen</span><b class="r-total"></b>
+          <span>Schade tot</span><b class="r-edge"></b>
+          <span>Paddenstoelwolk</span><b class="r-cloud"></b>
+          <span>Drukgolf</span><b class="r-wave"></b>
+        </div>
+        ${locked ? '<div class="note">De verwoesting is al uitgerekend voor deze kracht. Herlaad de pagina om een andere te kiezen.</div>' : ''}
+        <div class="buttons"><button type="button" class="cancel">Annuleren</button><button type="button" class="fire">Afvuren</button></div>
+      </div>`;
+    document.body.appendChild(popup);
+    const num = popup.querySelector('input[type=number]'), range = popup.querySelector('input[type=range]'), unit = popup.querySelector('.unit');
+    const show = (tons, from) => {
+      tons = Math.min(1e8, Math.max(0.0001, tons || 0.0001));
+      yieldTons = tons;
+      if (from !== 'num') num.value = String(+tons.toPrecision(4));
+      if (from !== 'range') range.value = String(Math.round((Math.log10(tons) - LOG_MIN) / (LOG_MAX - LOG_MIN) * 1000));
+      unit.textContent = '= ' + fmtTons(tons);
+      const fx = effects(tons);
+      popup.querySelector('.r-total').textContent = fmtM(fx.total);
+      popup.querySelector('.r-edge').textContent = fmtM(fx.edge);
+      popup.querySelector('.r-cloud').textContent = fmtM(fx.H) + ' hoog';
+      popup.querySelector('.r-wave').textContent = fx.wave.toFixed(1).replace('.', ',') + ' s tot de rand';
+    };
+    show(yieldTons);
+    if (locked) { num.disabled = range.disabled = true; popup.querySelectorAll('.presets button').forEach((b) => { b.disabled = true; b.style.opacity = 0.4; }); }
+    num.addEventListener('input', () => show(parseFloat(num.value), 'num'));
+    range.addEventListener('input', () => show(Math.pow(10, LOG_MIN + (LOG_MAX - LOG_MIN) * range.value / 1000), 'range'));
+    popup.querySelectorAll('.presets button').forEach((b) => b.addEventListener('click', () => show(parseFloat(b.dataset.t))));
+    const close = () => { popup.remove(); popup = null; document.removeEventListener('keydown', key, true); };
+    const fire = () => { try { localStorage.setItem('sc-nuke:yield', String(yieldTons)); } catch {} close(); startCountdown(); };
+    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } else if (e.key === 'Enter') { e.stopPropagation(); fire(); } };
+    document.addEventListener('keydown', key, true);
+    popup.querySelector('.cancel').addEventListener('click', close);
+    popup.querySelector('.fire').addEventListener('click', fire);
+    popup.addEventListener('click', (e) => { if (e.target === popup) close(); });
+    setTimeout(() => num.focus(), 0);
   }
 
   // ---------- go ----------
@@ -1021,7 +1145,7 @@
   let ready = false, preparing = false, fired = false, onReady = null;
   function* preparation() {
     const c = cityShape();
-    nuke = { t0: 0, cx: c.cx, cz: c.cz, R: c.R, total: c.R * TOTAL_FRACTION, edge: c.R * EDGE_FRACTION + 1, H: Math.max(6, c.R * 0.9) };
+    nuke = { t0: 0, cx: c.cx, cz: c.cz, R: c.R, ...effects(yieldTons) };
     const root = new K.Object3D(); root.userData.scNuke = true; root.name = 'sc-nuke'; scene.add(root);
     nukeRoot = root;
     // everything that can break, sorted by distance from ground zero
@@ -1119,7 +1243,7 @@
     safe('cars', () => stepCars(f, maintain));
     if (maintain) { lastScan = performance.now(); safe('rescan', () => scan(true)); }   // the app rebuilt something: break it again
     // the wave has passed: let walk mode rebuild its walls (you can walk through the ruins)
-    if (!nuke.settled && t > WAVE_SECONDS + 0.5) { nuke.settled = true; safe('notify', () => window.dispatchEvent(new Event('sc:geometry-changed'))); }
+    if (!nuke.settled && t > nuke.wave + 0.5) { nuke.settled = true; safe('notify', () => window.dispatchEvent(new Event('sc:geometry-changed'))); }
   }
 
   // ---------- B-2 bomber ----------
@@ -1190,7 +1314,8 @@
     plane.userData.scNuke = true; bomb.userData.scNuke = true;
     plane.rotation.y = Math.atan2(u[0], u[1]);                                                    // nose (+z) along the course
     plane.visible = false;
-    plane.add(bomb); bomb.position.set(0, -0.02, 0.05);                                         // in the bomb bay
+    const bs = BOMBER_SPAN / 2.6; bomb.scale.setScalar(bs);
+    plane.add(bomb); bomb.position.set(0, -0.02 * bs, 0.05 * bs);                               // in the bomb bay
     scene.add(plane);
     bomber = { plane, bomb, u, R, H, v, g, tRel, tDet, released: false, rumbled: false };
     requestAnimationFrame(stepBomber);
@@ -1210,7 +1335,7 @@
     }
     if (b.released && b.bomb.parent) {
       const tf = Math.min(t, BOMB_FALL), x = b.R[0] + b.u[0] * b.v * tf, z = b.R[1] + b.u[1] * b.v * tf;
-      const y = Math.max(0.06, b.H - 0.02 - 0.5 * b.g * tf * tf), vy = -b.g * tf;
+      const y = Math.max(0.06 * BOMBER_SPAN / 2.6, b.H - 0.02 - 0.5 * b.g * tf * tf), vy = -b.g * tf;
       b.bomb.position.set(x, y, z);
       b.bomb.lookAt(x + b.u[0] * b.v, y + vy, z + b.u[1] * b.v);                                // nose along its flight
     }
@@ -1229,7 +1354,7 @@
       const src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
       f.type = 'lowpass'; f.frequency.setValueAtTime(300, t); f.frequency.linearRampToValueAtTime(900, t + 4); f.frequency.linearRampToValueAtTime(250, t + len);
       g.gain.setValueAtTime(0.001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 4); g.gain.exponentialRampToValueAtTime(0.001, t + len);
-      src.buffer = buf; src.connect(f); f.connect(g); g.connect(a.destination); src.start(t);
+      src.buffer = buf; src.connect(f); f.connect(g); g.connect(out(a)); src.start(t);
     } catch {}
   }
   function whistle() {
@@ -1239,7 +1364,7 @@
       const a = audio, t = a.currentTime, o = a.createOscillator(), g = a.createGain();
       o.type = 'sine'; o.frequency.setValueAtTime(1700, t); o.frequency.exponentialRampToValueAtTime(380, t + BOMB_FALL);
       g.gain.setValueAtTime(0.001, t); g.gain.exponentialRampToValueAtTime(0.12, t + 0.4); g.gain.setValueAtTime(0.12, t + BOMB_FALL - 0.2); g.gain.exponentialRampToValueAtTime(0.001, t + BOMB_FALL);
-      o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + BOMB_FALL + 0.05);
+      o.connect(g); g.connect(out(a)); o.start(t); o.stop(t + BOMB_FALL + 0.05);
     } catch {}
   }
 
@@ -1294,7 +1419,7 @@
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-nuke';
     b.innerHTML = '<b class="s-bg"></b>' + ICON;
-    b.addEventListener('click', startCountdown);
+    b.addEventListener('click', () => { if (counting || fired) startCountdown(); else openPopup(); });   // during the countdown: cancel
     row.appendChild(b);
     updateButton();
   }
