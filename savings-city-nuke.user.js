@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.3
+// @version      3.4
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -634,8 +634,13 @@
         const rr = Rc + rt * Math.cos(th);
         x = rr * Math.cos(p.phi); z = rr * Math.sin(p.phi); y = Hc + rt * Math.sin(th) * 0.75; s = rt * 0.62 * p.sz;
       } else if (p.kind === 'top') {
-        const rr = Rc * 0.85 * Math.sqrt(p.r);
-        x = rr * Math.cos(p.phi); z = rr * Math.sin(p.phi); y = Hc + rt * 0.55; s = rt * 0.7 * p.sz;
+        // the middle of the cap boils: each puff drifts from the centre out into the rolling ring
+        // (and starts again in the middle), swirls slowly round, bobs and swells on its own beat
+        const f = (p.r + t * 0.035 * p.sp) % 1, ph = p.phi + t * 0.06 * p.sp, beat = t * 0.9 * p.sp + p.phi * 3;
+        const rr = Rc * 0.9 * Math.sqrt(f);
+        x = rr * Math.cos(ph); z = rr * Math.sin(ph);
+        y = Hc + rt * (0.55 + 0.12 * Math.sin(beat) - 0.25 * f * f);   // sinks a little towards the edge, where the roll takes over
+        s = rt * 0.7 * p.sz * (1 + 0.12 * Math.sin(beat * 1.3 + 1)) * (f < 0.1 ? 0.6 + 4 * f : 1);   // (swells up again in the middle)
       } else if (p.kind === 'stem') {
         const f = (p.y0 + t * 0.04 * p.sp) % 1;                   // smoke rising up the stem
         const rr = stemR * (1 + 1.6 * Math.pow(1 - f, 3)) * (0.3 + 0.7 * p.r);

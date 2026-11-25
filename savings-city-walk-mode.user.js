@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.30
+// @version      1.31
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -73,6 +73,7 @@
   const CAR_BLAST_PANIC_RADIUS = 5;   // ≈ 100 m: …this close they run away screaming
   const CAR_BLAST_PROP_RADIUS = 0.6;  // trees and lamps this close fall over
   const CAR_BLAST_CAR_RADIUS = 0.5;   // other cars this close take a hit (enough of them: a chain reaction)
+  const CAR_FIRE_FUSE = [4, 7];   // a car set on fire (flamethrower) burns this many seconds before it explodes
   const BLACK_SMOKE = 1;          // amount of black smoke from burning wrecks (0 = the old grey puffs)
   const SMOKE_HEIGHT = 1.5;       // tiles: about how high the black smoke column rises before it's gone (the core's puffs are gone by 1.5)
   // Distances in tiles. A car is 0.22 long (≈ 4.5 m), so 1 tile ≈ 20 m.
@@ -648,7 +649,28 @@
     return best;
   }
 
-  const damage = new Map();   // car object → { hits, fleeUntil, prevBoost, wreck, t0, fireAt, smokeAt }
+  const damage = new Map();   // car object → { hits, fleeUntil, prevBoost, wreck, t0, fireAt, smokeAt, burnUntil }
+  // A car on fire (the flamethrower): it stops, whoever drives jumps out burning, flames and black
+  // smoke pour out, and after CAR_FIRE_FUSE seconds it explodes (and burns out as a wreck).
+  function igniteCar(car) {
+    let st = damage.get(car);
+    if (!st) damage.set(car, (st = { hits: 0 }));
+    if (st.wreck || st.burnUntil) return false;
+    st.burnUntil = performance.now() + (CAR_FIRE_FUSE[0] + Math.random() * (CAR_FIRE_FUSE[1] - CAR_FIRE_FUSE[0])) * 1000;
+    st.fireAt = st.smokeAt = 0;
+    if (!st.fleeUntil) st.prevBoost = car.boost;
+    st.fleeUntil = 0;
+    car.parked = Infinity; car.speed = 0; car.boost = 1;
+    const res = window.scResidents;
+    if (!car.isStatic && !car.scAbandoned && res && typeof res.addRunner === 'function') {
+      car.scAbandoned = true;                                      // the driver gets out – on fire
+      const fx = Math.cos(car.heading), fz = Math.sin(car.heading), side = Math.random() < 0.5 ? 1 : -1;
+      setTimeout(() => { const i = res.addRunner(car.x - fz * 0.07 * side, car.z + fx * 0.07 * side, car.x, car.z); if (i >= 0 && res.ignite) res.ignite(i, car.x, car.z); }, 300);
+    }
+    sound('thud');
+    startEffects();
+    return true;
+  }
   function damageCar(car) {
     let st = damage.get(car);
     if (!st) damage.set(car, (st = { hits: 0 }));
@@ -833,6 +855,20 @@
     let busy = particles.length > 0;
     const trafficCars = traffic(), index = trafficCars ? new Map(trafficCars.map((c, i) => [c, i])) : new Map();
     for (const [car, st] of damage) {
+      if (!st.wreck && st.burnUntil) {
+        // on fire, not exploded yet: flames out of the bonnet, black smoke, then the blast
+        busy = true;
+        car.parked = Infinity; car.speed = 0;
+        if (now >= st.burnUntil) { explode(car, st); continue; }
+        if (dt > 0) {
+          const c = Math.cos(-car.heading), s = Math.sin(-car.heading);
+          const at = () => { const lx = (Math.random() - 0.3) * 0.16, lz = (Math.random() - 0.5) * 0.08; return [car.x + lx * c + lz * s, car.z - lx * s + lz * c]; };
+          st.fireAt -= dt; st.smokeAt -= dt;
+          while (st.fireAt <= 0) { st.fireAt += 0.06; const [x, z] = at(); spawn('fire', x, 0.1 + Math.random() * 0.03, z, { vy: 0.2 + Math.random() * 0.25, vx: (Math.random() - 0.5) * 0.06, vz: (Math.random() - 0.5) * 0.06, size: 0.02 + Math.random() * 0.025, life: 0.4 + Math.random() * 0.4 }); }
+          while (st.smokeAt <= 0) { st.smokeAt += 0.14; const [x, z] = at(); blackSmoke(x, 0.13, z, { vy: 0.3 + Math.random() * 0.2, rise: 0.35 + Math.random() * 0.2, vx: (Math.random() - 0.5) * 0.06, vz: (Math.random() - 0.5) * 0.06, size: 0.04 + Math.random() * 0.03, life: 3 + Math.random() * 1.5, alpha: 0.7 }); }
+        }
+        continue;
+      }
       if (!st.wreck) {
         if (st.fleeUntil && now > st.fleeUntil) {             // calmed down
           if (car.boost === CAR_FLEE_BOOST) car.boost = st.prevBoost;
@@ -1008,6 +1044,7 @@
   function stepBullets(dt) {
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
+      if (!b) continue;                                            // (an arrival before this one cleared the list)
       b.t = Math.min(b.len, b.t + BULLET_SPEED * dt);
       b.mesh.position.set(b.start.x + b.dir.x * b.t, b.start.y + b.dir.y * b.t, b.start.z + b.dir.z * b.t);
       if (b.t >= b.len) { b.mesh.removeFromParent(); bullets.splice(i, 1); b.onArrive(); }
@@ -1129,6 +1166,8 @@
     hitProp: (o, d, max) => (DESTRUCTIBLE_PROPS ? hitProp(o, d, max) : null),
     carObjects: () => carObjects(),
     trafficCars: () => traffic(),
+    igniteCar: (car) => igniteCar(car),                            // a car catches fire, then explodes (flamethrower)
+    carBurning(car) { const st = damage.get(car); return !!(st && (st.wreck || st.burnUntil)); },
     wreck(car) { let st = damage.get(car); if (!st) damage.set(car, (st = { hits: 0 })); if (!st.wreck) carExploded(car, car.x, car.z); st.wreck = true; st.t0 = performance.now() - CAR_BURN_SECONDS * 1000; car.parked = Infinity; car.speed = 0; },
     propsNear(x, z, r) { return [...props.values()].filter((p) => p.state === 'up' && Math.hypot(p.x - x, p.z - z) - (p.radius || 0) <= r); },
     knockProp(p, d) { if (p.state !== 'up') return; p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, d, { x: p.x, y: p.y0 + 0.05, z: p.z }); },

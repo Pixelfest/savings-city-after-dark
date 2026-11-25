@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – flamethrower (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.0
+// @version      1.1
 // @description  Adds a flamethrower to walk mode (key 4, hold the mouse button): a roaring stream of fire that sets residents alight – they run screaming, fall and writhe, get up and run on, and set others on fire.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /*
- * Needs walk mode (1.30 or newer: weapons with `auto` keep firing while the button is held), the
+ * Needs walk mode (1.31 or newer for burning cars; 1.30: weapons with `auto` keep firing while the button is held), the
  * core (classes, frame loop, sound output, smoke) and residents (1.19 or newer: ignite).
  *
  * - The stream: blobs of fire (one InstancedMesh of unlit low-poly balls, a ring buffer in typed
@@ -18,7 +18,9 @@
  *   and spread out. Black smoke rises from the end of the stream (the core's solid puffs).
  * - Every shot (20 a second while held) checks the residents in a cone along the stream, up to the
  *   wall or ground it hits: whoever is in it catches fire (residents' ignite: run, writhe, get up,
- *   the fire goes out after a while; touching others sets them alight too).
+ *   the fire goes out after a while; touching others sets them alight too). Cars in the stream heat
+ *   up; after CAR_HEAT seconds of flame they catch fire (walk mode 1.31: igniteCar) and explode a few
+ *   seconds later.
  * - Sound: a roar of filtered noise while the button is held, through the core's output (follows
  *   the app's sound button).
  */
@@ -36,6 +38,7 @@
   const SPREAD = 0.06;             // how wide the stream fans out (radians, roughly)
   const CONE = [0.03, 0.12];       // radius of the cone that sets people alight: at the nozzle, at full range
   const IGNITE_CHANCE = 0.6;       // per shot, for someone in the cone
+  const CAR_HEAT = 0.5;            // seconds of flame on a car before it catches fire (it explodes a few seconds later)
   const MAX_BLOBS = 600;
   const SMOKE = true;              // black smoke from the end of the stream
   const VOLUME = 0.5;
@@ -119,6 +122,7 @@
     }
     roar();
     igniteCone(start, d, reach);
+    heatCars(start, d, reach);
     if (SMOKE && Math.random() < 0.35) {
       const c = C(), t = Math.min(reach, RANGE * 0.9);
       if (c && c.smoke) c.smoke('blacksmoke', start.x + d.x * t, Math.max(0.08, start.y + d.y * t), start.z + d.z * t,
@@ -173,6 +177,26 @@
       const py = vy - d.y * t;
       if (Math.abs(py) > 0.09 + r) continue;                      // over their heads / below
       if (Math.random() < IGNITE_CHANCE) res.ignite(i, s.x, s.z);
+    }
+  }
+
+  // Cars in the stream (traffic and parked ones) heat up; after CAR_HEAT seconds of flame they
+  // catch fire (walk mode: igniteCar – they stop, the driver runs off burning, then the car explodes).
+  const heat = new WeakMap();
+  function heatCars(s, d, reach) {
+    const w = W(); if (!w || !w.igniteCar) return;
+    const cars = (w.trafficCars() || []).concat(w.parkedCars ? w.parkedCars() : []);
+    for (const car of cars) {
+      if (w.carBurning && w.carBurning(car)) continue;
+      const vx = car.x - s.x, vy = 0.07 - s.y, vz = car.z - s.z;
+      const t = vx * d.x + vy * d.y + vz * d.z;
+      if (t < 0 || t > reach + 0.12) continue;
+      const r = CONE[0] + (CONE[1] - CONE[0]) * Math.min(1, t / RANGE) + 0.08;   // + about half a car
+      const px = vx - d.x * t, py = vy - d.y * t, pz = vz - d.z * t;
+      if (px * px + pz * pz > r * r || Math.abs(py) > 0.07 + r) continue;
+      const h = (heat.get(car) || 0) + INTERVAL;
+      heat.set(car, h);
+      if (h >= CAR_HEAT) w.igniteCar(car);
     }
   }
 
