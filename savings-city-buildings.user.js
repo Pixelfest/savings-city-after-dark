@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.0
+// @version      1.1
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -17,8 +17,10 @@
  * - Every building is a group with userData.projectId holding one indexed facade mesh: boxes
  *   ("masses", one per tier: four walls and a flat top). readMasses() reads them back, with the
  *   facade's texture mapping (windows) and colours per wall.
- * - prepare(building) cuts every box into convex chunks about CHUNK_SIZE big (random, slightly
- *   tilted planes; in slabs, in time slices of a few ms, so nothing stutters). Outside faces keep
+ * - prepare(building) cuts every box into convex chunks about CHUNK_SIZE big, bigger for big
+ *   buildings so there are never many more than MAX_CHUNKS (random, slightly tilted planes; in
+ *   slabs, in time slices of a few ms, so nothing stutters). A hit or collapse that arrives before
+ *   the cutting is done waits for it (the building stays as it is until then). Outside faces keep
  *   the facade, inside faces are broken concrete in the wall's colour. All chunks go into one mesh
  *   with the facade material; every chunk keeps its own range of vertices.
  * - swapIn: the chunks are shown and the building's own triangles are hidden (collapsed to a point
@@ -44,7 +46,10 @@
   'use strict';
 
   // ---- settings (tiles; 1 tile ≈ 20 m) ----
-  const CHUNK_SIZE = 0.2;          // buildings are cut into chunks about this big (smaller = finer holes, but much heavier)
+  const CHUNK_SIZE = 0.2;          // buildings are cut into chunks about this big (smaller = finer holes, but much heavier)…
+  const MAX_CHUNKS = 800;          // …but never into more than about this many: big buildings get bigger chunks
+  const CUT_SLICE_MS = 8;          // cutting runs in slices this long, between frames (nothing stutters)
+  const RUBBLE_AVOID_SECONDS = 120;// residents stay away from a collapsed building this long
   const HITS_TO_COLLAPSE = 7;      // blasts (rockets) a building takes before it comes down
   const HOLE_RADIUS = 0.16;        // default crater radius
   const STUMP = 0.12;              // a jagged stump up to this high stays
@@ -221,18 +226,24 @@
   }
 
   // ---- cutting a building into chunks, in time slices ----
+  // Chunk size for a building: CHUNK_SIZE, or bigger so there are about MAX_CHUNKS at most
+  // (measured: shatter makes about 7.7 × volume / size³ pieces – it cuts until every side is short).
+  function chunkSizeFor(bd) {
+    const volume = bd.boxes.reduce((v, b) => v + (b.x1 - b.x0) * (b.y1 - b.y0) * (b.z1 - b.z0), 0);
+    return Math.max(CHUNK_SIZE, Math.cbrt((7.7 * volume) / MAX_CHUNKS));
+  }
   function* cutBuilding(bd, st) {
-    const pieces = [];
+    const pieces = [], size = st.size = chunkSizeFor(bd);
     for (const b of bd.boxes) {
       const wall = b.wallColor, concrete0 = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
       const tags = { '+x': { side: '+x', ext: true }, '-x': { side: '-x', ext: true }, '+z': { side: '+z', ext: true }, '-z': { side: '-z', ext: true }, '+y': { side: '+y', ext: true }, '-y': { side: '-y', ext: false } };
       // in slabs of about two chunk heights, so one cut never has to deal with a whole tower
-      const layers = Math.max(1, Math.round((b.y1 - b.y0) / (CHUNK_SIZE * 2)));
+      const layers = Math.max(1, Math.round((b.y1 - b.y0) / (size * 2)));
       for (let l = 0; l < layers; l++) {
         const ya = b.y0 + (b.y1 - b.y0) * l / layers, yb = b.y0 + (b.y1 - b.y0) * (l + 1) / layers;
         const t = { ...tags, '+y': { side: '+y', ext: l === layers - 1 }, '-y': { side: '-y', ext: false } };
         const chunks = [];
-        shatter(boxPoly(b.x0, ya, b.z0, b.x1, yb, b.z1, t), CHUNK_SIZE, chunks);
+        shatter(boxPoly(b.x0, ya, b.z0, b.x1, yb, b.z1, t), size, chunks);
         for (const ch of chunks) {
           const s2 = rnd(0.88, 1.1);
           let big = null, area = -1;
@@ -245,19 +256,26 @@
     const mat = Array.isArray(bd.mesh.material) ? bd.mesh.material[0] : bd.mesh.material;
     st.set = yield* buildSet(pieces, mat, { hidden: true, dusty: true, center: [bd.cx, bd.cz] });
     st.ready = true;
+    // what arrived while we were cutting (a rocket that was faster, a monster's punch) – right after
+    // this generator has finished (not from inside it)
+    setTimeout(() => {
+      st.gen = null;
+      const todo = st.pending; st.pending = [];
+      for (const fn of todo) { try { fn(); } catch (e) { console.warn('[buildings] pending', e); } }
+    }, 0);
   }
   // start cutting a building (in the background); returns its state
   function prepare(x) {
     const bd = byId(x);
     if (!bd || !classes()) return null;
     if (solids.has(bd.id)) return solids.get(bd.id);
-    const st = { bd, hits: 0, ready: false, gen: null, set: null, shown: false, down: false, wave: null };
+    const st = { bd, hits: 0, ready: false, gen: null, set: null, shown: false, down: false, wave: null, pending: [] };
     st.gen = cutBuilding(bd, st);
     solids.set(bd.id, st);
     const slice = () => {
       if (st.ready || !st.gen) return;
       const t0 = performance.now();
-      while (performance.now() - t0 < 6) { if (st.gen.next().done) { st.gen = null; return; } }
+      while (performance.now() - t0 < CUT_SLICE_MS) { if (st.gen.next().done) { st.gen = null; return; } }
       setTimeout(slice, 0);
     };
     slice();
@@ -314,8 +332,10 @@
   // chunks within `radius` of p fly out (n: out of the surface there); returns how many
   function crater(x, p, n, radius = HOLE_RADIUS) {
     const st = prepare(x); if (!st || st.claimed) return 0;
+    if (!st.ready) { st.pending.push(() => crater(st.bd, p, n, radius)); return 0; }
     swapIn(st);
-    const R = radius * rnd(0.85, 1.15), out = n || { x: 0, y: 0, z: 0 };
+    // with big chunks (a big building) the crater is at least the chunk the blast hit
+    const R = Math.max(radius, st.size * 0.8) * rnd(0.85, 1.15), out = n || { x: 0, y: 0, z: 0 };
     let count = 0;
     for (const fr of st.set.frs) {
       if (fr.state !== 'still') continue;
@@ -330,6 +350,7 @@
   // a crater that counts: after HITS_TO_COLLAPSE of them the building comes down from this impact
   function hit(x, p, n, opts = {}) {
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
+    if (!st.ready) { st.hits += opts.count ?? 1; st.pending.push(() => { st.hits -= opts.count ?? 1; hit(st.bd, p, n, opts); }); return true; }
     crater(st.bd, p, n, opts.radius || HOLE_RADIUS);
     st.hits += opts.count ?? 1;
     if (st.hits >= (opts.collapseAt || HITS_TO_COLLAPSE)) collapse(st.bd, { at: p, out: n });
@@ -338,8 +359,20 @@
   // the building comes down; opts: { at: {x,y,z} | [x,y,z], out: {x,z} } or { at, push: [x,0,z] | {x,z}, force, spread }
   function collapse(x, opts = {}) {
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
+    st.down = true;                                                // down from now on (also while the cutting finishes)
+    avoidRubble(st.bd);
+    if (!st.ready) { st.pending.push(() => fall(st, opts)); return true; }
+    fall(st, opts);
+    return true;
+  }
+  // people keep away from the rubble for a while (residents)
+  function avoidRubble(bd) {
+    const res = window.scResidents;
+    if (res && res.avoid) res.avoid(bd.cx, bd.cz, Math.hypot(bd.x1 - bd.x0, bd.z1 - bd.z0) / 2 + 0.4, RUBBLE_AVOID_SECONDS);
+  }
+  function fall(st, opts) {
     swapIn(st);
-    st.down = true; st.set.down = true;
+    st.set.down = true;
     const bd = st.bd, cx = bd.cx, cz = bd.cz;
     const P = (v) => (Array.isArray(v) ? { x: v[0], y: v[1], z: v[2] } : v);
     const p = P(opts.at) || { x: cx, y: bd.top / 2, z: cz };
@@ -392,7 +425,6 @@
     }
     st.wave = { t: 0, until: 1.5 + last, at: 0.3 };               // the dust wave rolling out over the ground
     goneAfter(st, 600, 1500 + last * 1000);
-    return true;
   }
   // casualties (everyone inside and right next to it) after `ms`; walk mode's walls go
   function goneAfter(st, ms, wallsMs) {
@@ -488,6 +520,7 @@
     geometry: { readMasses, boxPoly, shatter, pieceTriangles, newell, bounds, isFacade, JF },
     chunkSet, buildSet, launch,
     get chunkSize() { return CHUNK_SIZE; },
+    chunkSizeFor: (x) => { const bd = byId(x); return bd ? chunkSizeFor(bd) : CHUNK_SIZE; },
   };
 
   // ---------- geometry (the app's facade boxes, convex pieces, rotations) ----------

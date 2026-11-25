@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.0
+// @version      3.1
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -69,15 +69,16 @@
   const FLASH_SECONDS = 0.6;       // white flash: short, so it doesn't hide the destruction
   const LIGHT_BOOST = 3.5;         // how much brighter the scene gets for a moment (was 7)
   const FOUNDATION_HEIGHT = 0.03;  // things lower than this survive even at ground zero
-  const MAX_DEBRIS = 8000;        // pieces of rubble (small instanced cubes)
+  const MAX_DEBRIS = 1500;        // pieces of rubble (instanced cubes; each moves every frame until it lies still)
   const BLAST_SPEED = 10;          // how hard chunks and rubble are flung near the centre, for 15 kt (scales with the yield)
   const CHUNK_SIZE = 0.2;          // buildings break into solid chunks about this big (tiles); smaller = more chunks
-  const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide
+  const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide (wider when the chunks are bigger)
   const RUIN_SHARE = 0.75;         // at the edge of the blast this share of a building still stands (less towards the centre, none in the middle)
   const RUIN_JAGGED = 0.12;        // how much the broken tops of neighbouring columns differ (tiles; 0 = one flat cut)
-  const MAX_CHUNK_VERTICES = 150000;   // for a big city the chunk size is raised so they stay below this (performance)
+  const MAX_CHUNK_VERTICES = 60000;    // for a big city the chunk size is raised so they stay below about this (every moving chunk's
+                                       // vertices are recomputed and uploaded each frame: this is what the blast costs)
   const SCATTER_DEGREES = 35;      // pieces fly away from ground zero ± this much, so debris mixes
-  const GRAVEL = 0.35;             // other things (roof details, trees …) blown away: chance per triangle of a rubble cube
+  const GRAVEL = 0.12;             // other things (roof details, trees …) blown away: chance per triangle of a rubble cube
   const CLOUD_PUFFS = 500;
   const CLOUD_LINGER = 20;         // after this many seconds the cloud rises and drifts away
   const SHAKE = 22;                // camera shake strength (pixels)
@@ -401,14 +402,15 @@
     solid.boxes.sort((a, b) => a.dMin - b.dMin);
     // One chunk size for the whole city, raised for a big city so the pieces stay within budget.
     // (A chunk is cut until it is no longer than the size in any direction: never a long stick.)
-    // Measured: about 220 vertices per (volume ÷ size³).
+    // Measured: about 140 vertices per (volume ÷ size³), ruins included (their columns grow with the size).
     let volume = 0;
     for (const b of solid.boxes) volume += (b.x1 - b.x0) * (b.z1 - b.z0) * (b.y1 - b.y0);
-    const size = Math.max(CHUNK_SIZE, Math.cbrt((volume * 220) / MAX_CHUNK_VERTICES));
+    const size = Math.max(CHUNK_SIZE, Math.cbrt((volume * 140) / MAX_CHUNK_VERTICES));
     solid.size = size;
     // per box: columns with their own break height; below it a static ruin, above it chunks
     for (const b of solid.boxes) {
-      const nx = Math.max(1, Math.round((b.x1 - b.x0) / RUIN_COLUMN)), nz = Math.max(1, Math.round((b.z1 - b.z0) / RUIN_COLUMN));
+      const col = Math.max(RUIN_COLUMN, size * 0.8);                // with big chunks, wider ruin columns too
+      const nx = Math.max(1, Math.round((b.x1 - b.x0) / col)), nz = Math.max(1, Math.round((b.z1 - b.z0) / col));
       const xs = [b.x0], zs = [b.z0];
       for (let i = 1; i < nx; i++) xs.push(b.x0 + (b.x1 - b.x0) * (i + rnd(-0.25, 0.25)) / nx); xs.push(b.x1);
       for (let i = 1; i < nz; i++) zs.push(b.z0 + (b.z1 - b.z0) * (i + rnd(-0.25, 0.25)) / nz); zs.push(b.z1);
@@ -525,7 +527,7 @@
         for (let k = fr.start; k < fr.start + fr.count; k++) C.setXYZ(k, C.getX(k) * dk, C.getY(k) * dk, C.getZ(k) * dk);
         scorched = true;
         launch(fr);
-        if (debris && Math.random() < 0.5 * debrisChance) spawnDebrisAt(fr.pivot[0], fr.pivot[1], fr.pivot[2], fr.d, [C.getX(fr.start), C.getY(fr.start), C.getZ(fr.start)], 0.03);
+        if (debris && Math.random() < 0.08 * debrisChance) spawnDebrisAt(fr.pivot[0], fr.pivot[1], fr.pivot[2], fr.d, [C.getX(fr.start), C.getY(fr.start), C.getZ(fr.start)], 0.03);
       }
     }
     if (scorched) {
@@ -545,7 +547,7 @@
     const ax = job.wx(i + 1) - job.wx(i), ay = job.wy(i + 1) - job.wy(i), az = job.wz(i + 1) - job.wz(i);
     const bx = job.wx(i + 2) - job.wx(i), by = job.wy(i + 2) - job.wy(i), bz = job.wz(i + 2) - job.wz(i);
     const area = Math.hypot(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx) / 2;
-    const size = Math.max(0.02, Math.min(0.1, Math.sqrt(area) * 0.6));     // gravel between the big chunks
+    const size = Math.max(0.05, Math.min(0.12, Math.sqrt(area) * 0.8));    // rubble between the big chunks (no dust-sized bits)
     const color = job.col ? [job.col.getX(i), job.col.getY(i), job.col.getZ(i)] : job.matColor ? [job.matColor.r, job.matColor.g, job.matColor.b] : null;
     spawnDebrisAt(x, cy, z, d, color, size);
   }
@@ -698,14 +700,21 @@
 
   // ---------- residents and cars ----------
   const carsDone = new Set();
+  // People are hit while the shockwave passes – once. After that the area is a place to stay away
+  // from (residents walk round it and out of it), so nobody walks to their death in the ruins.
+  const waving = (t) => t <= WAVE_DELAY + nuke.wave + 0.3;
   function stepPeople(t, f) {
     const res = window.scResidents;
     if (!res) return;
-    if (!nuke.alarmed && typeof res.alarm === 'function') { res.alarm(nuke.cx, nuke.cz, 1e9, 30); nuke.alarmed = true; }
+    if (!nuke.alarmed && typeof res.alarm === 'function') {
+      res.alarm(nuke.cx, nuke.cz, nuke.edge * 2, 20); nuke.alarmed = true;   // who saw and heard it runs
+      if (typeof res.avoid === 'function') res.avoid(nuke.cx, nuke.cz, nuke.edge, Infinity);
+    }
+    if (!waving(t)) return;
     if (typeof res.blast === 'function') res.blast(nuke.cx, nuke.cz, f, 0, 0);
     if (typeof res.killInside === 'function') res.killInside(nuke.cx, nuke.cz, Math.min(f, nuke.edge));   // indoors isn't safe either
   }
-  function stepCars(f, maintain) {
+  function stepCars(f, maintain, wave) {
     if (!trafficCars) return;
     const proxies = new Map(), batches = [];
     if (maintain) scene.traverse((o) => {
@@ -715,6 +724,7 @@
     trafficCars.forEach((car, i) => {
       const d = Math.hypot(car.x - nuke.cx, car.z - nuke.cz);
       if (d > f || d > nuke.edge) return;
+      if (!carsDone.has(car) && !wave) return;                   // the wave has passed: cars driving in now are fine
       car.parked = Infinity; car.speed = 0;
       if (!carsDone.has(car)) {
         carsDone.add(car);
@@ -1020,7 +1030,7 @@
     const safe = (name, fn) => { try { fn(); } catch (e) { if (!loop.warned) loop.warned = {}; if (!loop.warned[name]) { loop.warned[name] = 1; console.warn('[nuke] ' + name, e); } } };
     for (const j of jobs) safe('destroy', () => advance(j, f, true));
     safe('solids', () => advanceSolids(f));
-    safe('chunks', () => waveOverSolids(f));
+    if (waving(t)) safe('chunks', () => waveOverSolids(f));      // (buildings broken after the blast are left alone)
     safe('debris', () => stepDebris(dt));
     safe('cloud', () => stepCloud(t));
     safe('wave', () => stepWave(t));
@@ -1028,7 +1038,7 @@
     safe('shake', () => stepShake(t));
     safe('people', () => stepPeople(t, f));
     const maintain = performance.now() - lastScan > 1000;
-    safe('cars', () => stepCars(f, maintain));
+    safe('cars', () => stepCars(f, maintain, waving(t)));
     if (maintain) { lastScan = performance.now(); safe('rescan', () => scan(true)); }   // the app rebuilt something: break it again
     // the wave has passed: let walk mode rebuild its walls (you can walk through the ruins)
     if (!nuke.settled && t > nuke.wave + 0.5) { nuke.settled = true; safe('notify', () => window.dispatchEvent(new Event('sc:geometry-changed'))); }

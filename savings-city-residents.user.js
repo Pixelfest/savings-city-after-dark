@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.15
+// @version      1.16
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -24,6 +24,9 @@
  *   the other one: they cross. Decided once, in advance, so nobody turns back halfway.
  * - Someone in front of you on the sidewalk: oncoming people both step to their right, someone
  *   slower (or lying there) is passed on the free side.
+ * - Places to stay away from (avoid(x, z, r, seconds): ground zero, a collapsed building's rubble):
+ *   nobody walks into them (at junctions they take another way, or turn back), whoever is in one
+ *   walks out, away from its middle, and nobody goes in or out of a building through a door there.
  * - Children: smaller bodies with the same head; each walks right next to a parent and follows
  *   them everywhere (in and out of buildings too); if the parent dies, the child runs off.
  * - Front doors come from the app's own code (exact door position per building). Walking past
@@ -81,6 +84,7 @@
   const FALL_SECONDS = 0.45;      // how long falling over takes when shot (walk mode)
   const PANIC_SPEED = 2.8;        // running away: this many times faster than walking
   const PANIC_ENTER_CHANCE = 0.7; // while running away, chance to dive into a building passing its door
+  const RECKLESS = 0.2;           // share of people in a panic who run across the road without looking (the rest glance first)
   const CAR_COLLISIONS = true;    // a moving car that touches a resident knocks them over
   const BLOOD = true;             // blood spatters when someone is knocked down, and a pool grows under them
   const BLOOD_DROPS = 22;         // drops per person knocked down
@@ -178,6 +182,7 @@
   // on to the other side first); faster and away at junctions for a while.
   function panic(p, x, z, seconds) {
     if (!(p.panic > 0) && p.state !== 'inside' && Math.random() < SCREAM_CHANCE) scream(p, rnd(0, 0.5));
+    if (!(p.panic > 0)) p.reckless = Math.random() < RECKLESS;
     p.panic = seconds * (0.8 + Math.random() * 0.4);
     p.fleeFrom = [x, z];
     if (p.state !== 'walk' || p.parent) return;
@@ -234,7 +239,11 @@
 
   // Come out of a random door, onto the sidewalk on the building's side, then walk on.
   function startExit(p) {
-    const k = pick(net.doorList), n = net.doors.get(k), mid = midOf(k);
+    // a door that isn't in a place to stay away from; none (yet): stay in a while longer
+    let k = null;
+    for (let tries = 0; tries < 8 && !k; tries++) { const c = pick(net.doorList); if (!zoneAt(...midOf(c))) k = c; }
+    if (!k) { p.timer = rnd(5, 15); return; }
+    const n = net.doors.get(k), mid = midOf(k);
     const [x, y, t] = k.split(',').map((v, i) => (i < 2 ? +v : v));
     let a = tk(x, y), b = t === 'h' ? tk(x + 1, y) : tk(x, y + 1);
     // walk the direction that keeps the building on our right
@@ -257,11 +266,33 @@
     return t === 'h' ? [+x + 0.5, +y] : [+x, +y + 0.5];
   }
 
+  // ---------- places to stay away from (ground zero, rubble) ----------
+  const zones = [];                                              // { x, z, r, until }
+  function zoneAt(x, z) {
+    if (!zones.length) return null;
+    const now = performance.now();
+    for (let i = zones.length - 1; i >= 0; i--) {
+      const zn = zones[i];
+      if (zn.until < now) { zones.splice(i, 1); continue; }
+      if (Math.hypot(x - zn.x, z - zn.z) < zn.r) return zn;
+    }
+    return null;
+  }
+  const nodeZone = (n) => { const q = net.xy.get(n); return q ? zoneAt(q[0], q[1]) : null; };
+  // walk (not run) away from (x, z) for a while: at junctions the way that leads furthest from it
+  function walkAway(p, x, z, seconds) {
+    p.away = seconds; p.fleeFrom = [x, z]; p.planFor = null;
+    if (p.state === 'walk' && !p.parent && p.dir[0] * (x - p.x) + p.dir[1] * (z - p.z) > 0 && !onAsphalt(...edgePoint(p.a, p.dir, p.side, p.s))) {
+      placeOnEdge(p, p.b, p.a, 1 - p.s, -p.side);                // turn round: same sidewalk, other way
+    }
+  }
+
   function step(p, dt) {
     if (p.state === 'gone') return;
     if (p.state === 'down') { p.fall = Math.min(1, p.fall + dt / FALL_SECONDS); return; }   // lies still
     if (p.parent) { follow(p, dt); return; }
     if (p.panic > 0) p.panic -= dt;                              // calms down, indoors too
+    if (p.away > 0) p.away -= dt;
     if (p.state === 'inside') {
       p.timer -= dt;
       if (p.timer <= 0 && net.doorList.length) startExit(p);
@@ -280,11 +311,18 @@
       return;
     }
     // walking along a sidewalk
+    if (zones.length && (p.zoneT = (p.zoneT || 0) - dt) <= 0) {
+      p.zoneT = rnd(0.4, 0.8);
+      const zn = zoneAt(p.x, p.z);
+      if (zn) { if (!(p.away > 0)) walkAway(p, zn.x, zn.z, 4); }  // in it: out, away from its middle
+      else { const zb = nodeZone(p.b); if (zb && !nodeZone(p.a)) walkAway(p, zb.x, zb.z, 2); }   // heading in: turn back
+    }
     const before = p.s;
     const panicking = p.panic > 0;
     if (panicking && Math.random() < SCREAM_REPEAT * dt) scream(p, 0);
-    // about to step onto the road? look left and right first (people in a panic don't)
-    if (!panicking && LOOK_BEFORE_CROSSING && trafficCars && mustWait(p, p.speed * dt)) { p.waiting = (p.waiting || 0) + dt; place(p, dt); return; }
+    // about to step onto the road? look left and right first (most people in a panic too – at a run)
+    const pace = p.speed * (panicking ? PANIC_SPEED : 1);
+    if (!(panicking && p.reckless) && LOOK_BEFORE_CROSSING && trafficCars && mustWait(p, pace * dt, pace)) { p.waiting = (p.waiting || 0) + dt; place(p, dt); return; }
     p.waiting = 0;
     if (p.queue && !panicking) { place(p, dt); return; }          // someone right in front: wait a moment
     p.s += p.speed * (panicking ? PANIC_SPEED : 1) * dt;
@@ -292,7 +330,7 @@
     if (before < 0.5 && p.s >= 0.5 && net.doorList.length) {
       const k = edgeKeyOf(p.a, p.b), n = net.doors.get(k);
       const r = sideOffset(p);   // the side of the street we're on; panicking people like to hide indoors
-      if (n && r[0] * -n[0] + r[1] * -n[1] > 0 && Math.random() < (panicking ? PANIC_ENTER_CHANCE : ENTER_CHANCE)) { place(p, dt); startEnter(p, k); return; }
+      if (n && r[0] * -n[0] + r[1] * -n[1] > 0 && Math.random() < (panicking ? PANIC_ENTER_CHANCE : ENTER_CHANCE) && !zoneAt(...midOf(k))) { place(p, dt); startEnter(p, k); return; }
     }
     plan(p);
     while (p.s >= p.s1) {                                        // round the corner, onto the next street
@@ -416,10 +454,17 @@
     const key = p.a + '>' + p.b + '/' + p.side;
     if (p.planFor === key) return;
     p.planFor = key;
-    const options = (net.adj.get(p.b) || []).filter((c) => c !== p.a);
+    let options = (net.adj.get(p.b) || []).filter((c) => c !== p.a);
+    if (zones.length && options.length) {
+      // not into a place to stay away from: another way, or back the way we came; already in one: out
+      const safe = options.filter((n) => !nodeZone(n));
+      if (safe.length) options = safe;
+      else if (!nodeZone(p.a)) options = [];
+      else { const zn = nodeZone(p.b); if (zn) { p.fleeFrom = [zn.x, zn.z]; p.away = Math.max(p.away || 0, 2); } }
+    }
     let next;
     if (!options.length) next = p.a;                             // dead end: turn around
-    else if (p.panic > 0 && p.fleeFrom) {
+    else if ((p.panic > 0 || p.away > 0) && p.fleeFrom) {
       // fleeing: the way that leads furthest from the danger (now and then the second best)
       const far = (n) => { const [x, y] = net.xy.get(n); return Math.hypot(x - p.fleeFrom[0], y - p.fleeFrom[1]); };
       const sorted = options.slice().sort((u, v) => far(v) - far(u));
@@ -455,15 +500,15 @@
 
   // Standing on the sidewalk with the next step on the asphalt: wait if a moving car would come
   // near any point of the crossing while we're there (with CROSSING_MARGIN to spare).
-  function mustWait(p, stepLen) {
+  function mustWait(p, stepLen, pace = p.speed) {
     if (onAsphalt(...positionAhead(p, 0))) return false;        // already crossing: keep going
     const first = positionAhead(p, Math.max(stepLen, 0.01) + 0.01);
     if (!onAsphalt(first[0], first[1])) return false;          // not about to cross
     const path = [];
     for (let d = 0.02; d < 1.2; d += 0.04) {
       const q = positionAhead(p, d), on = onAsphalt(q[0], q[1]);
-      if (on) path.push([q[0], q[1], d / p.speed]);
-      else if (path.length) { path.push([q[0], q[1], d / p.speed]); break; }   // back on the kerb
+      if (on) path.push([q[0], q[1], d / pace]);
+      else if (path.length) { path.push([q[0], q[1], d / pace]); break; }   // back on the kerb
     }
     for (const c of trafficCars) {
       if (!(c.speed > 0.08) || !Number.isFinite(c.x)) continue;
@@ -1021,6 +1066,13 @@
     // An explosion at (x, z): everyone within knockRadius falls over (away from it), everyone
     // within panicRadius runs away for about panicSeconds. People indoors notice nothing.
     // Something scary (a gunshot) at (x, z): everyone outside within radius runs away from it.
+    // a place to stay away from: (x, z), radius r, for `seconds` (Infinity: for good)
+    avoid(x, z, r, seconds = 60) {
+      zones.push({ x, z, r, until: performance.now() + seconds * 1000 });
+      for (const p of people) if (p.state === 'walk' && !p.parent) { p.planFor = null; p.zoneT = rnd(0, 0.3); }
+      return zones.length;
+    },
+    get zones() { return zones.map((z) => ({ x: z.x, z: z.z, r: z.r })); },
     alarm(x, z, radius, seconds) {
       let fled = 0;
       people.forEach((p, i) => {
