@@ -8,12 +8,30 @@ page and the city is back as it was.
 
 ## Installing
 
+### All scripts at once (recommended)
+
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
-2. Add each script (Dashboard → `+` → paste, or drag the `.user.js` file in).
-3. **Set the app's address:** every script has a placeholder
-   `// @match        https://your-savings-city-host.example/*`. Replace it with the address of
-   your Savings City app (keep the `/*` at the end), or add the address under the script's
-   *Settings → Includes/Excludes → User matches* in Tampermonkey.
+2. Install the loader: open
+   [`savings-city-after-dark.user.js`](https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-after-dark.user.js)
+   and Tampermonkey offers to install it.
+3. **Set the app's address once:** in the loader, replace
+   `// @match        https://your-savings-city-host.example/*` with the address of your Savings City
+   app (keep the `/*` at the end), or add the address under the loader's *Settings →
+   Includes/Excludes → User matches* in Tampermonkey.
+4. **Get updates automatically:** Tampermonkey Dashboard → *Settings* → *Config mode: Advanced* →
+   *Externals* → *Update Interval*: **Always**. The loader pulls every script straight from this
+   repository (`@require`), so each page load then picks up the latest versions.
+
+The loader contains every script below. To leave one out, delete its `@require` line in the loader.
+Keep the order: walk mode comes before residents, rocket launcher and cops, which build on it.
+
+If you edit the loader (address, removed scripts), Tampermonkey will no longer replace it with
+newer loader versions from GitHub; the scripts it loads still update.
+
+### Scripts one by one
+
+Add each `.user.js` file separately (Dashboard → `+` → paste, or drag the file in) and set the
+`@match` address in every one. They don't update by themselves.
 
 Settings are constants at the top of each script.
 
