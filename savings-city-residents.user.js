@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.11
+// @version      1.12
 // @description  Simple, static little figures that slowly walk the sidewalks and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -283,7 +283,7 @@
       p.z = p.from[1] + (p.to[1] - p.from[1]) * f;
       if (f >= 1) {
         if (p.state === 'enter') { p.state = 'inside'; p.timer = rnd(...INSIDE_SECONDS); }
-        else { p.state = 'walk'; placeOnEdge(p, p.next[0], p.next[1], 0.5); }
+        else { p.state = 'walk'; placeOnEdge(p, p.next[0], p.next[1], p.nextS ?? 0.5); p.nextS = undefined; }
       }
       return;
     }
@@ -964,6 +964,40 @@
       return n;
     },
     get deaths() { return deaths; },
+    // someone jumps out of a car at (x, z) and runs away from (fromX, fromZ), screaming; returns their index
+    addRunner(x, z, fromX, fromZ, seconds = 15) {
+      if (!net || !net.edges.length || !V) return -1;
+      // the nearest road line
+      let best = null;
+      for (const [a, b] of net.edges) {
+        const [ax, ay] = net.xy.get(a), [bx, by] = net.xy.get(b), ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey || 1;
+        const s0 = Math.max(0, Math.min(1, ((x - ax) * ex + (z - ay) * ey) / l2)), d = Math.hypot(ax + ex * s0 - x, ay + ey * s0 - z);
+        if (!best || d < best.d) best = { a, b, s: s0, d };
+      }
+      if (!best) return -1;
+      // run the way that leads away from the danger
+      const [ax, ay] = net.xy.get(best.a), [bx, by] = net.xy.get(best.b);
+      const away = Math.hypot(bx - fromX, by - fromZ) > Math.hypot(ax - fromX, ay - fromZ);
+      const p = { speed: SPEED * (1 + rnd(-SPEED_VARIATION, SPEED_VARIATION)), state: 'walk', x, z, h: 0, side: 1 };
+      if (away) placeOnEdge(p, best.a, best.b, best.s); else placeOnEdge(p, best.b, best.a, 1 - best.s);
+      // on the sidewalk on the car's side of the road
+      const r = rightOf(p.dir[0], p.dir[1]), lx = ax + (bx - ax) * best.s, lz = ay + (by - ay) * best.s;
+      p.side = r[0] * (x - lx) + r[1] * (z - lz) >= 0 ? 1 : -1;
+      p.prevOff = sideOffset(p);
+      const off = sideOffset(p);
+      p.state = 'exit'; p.from = [x, z]; p.to = [lx + off[0] * SIDEWALK_OFFSET, lz + off[1] * SIDEWALK_OFFSET];
+      p.t = 0; p.dur = Math.hypot(p.to[0] - x, p.to[1] - z) / (p.speed * PANIC_SPEED) + 0.05;
+      p.h = Math.atan2(p.to[0] - x, p.to[1] - z);
+      p.next = [p.a, p.b]; p.nextS = p.s;
+      p.panic = seconds; p.fleeFrom = [fromX, fromZ];
+      // a free figure: a new one, or one that's gone
+      let i = people.length < MAX_PEOPLE ? people.length : people.findIndex((q) => q.state === 'gone');
+      if (i < 0) i = people.findIndex((q) => q.state === 'inside');
+      if (i < 0) return -1;
+      people[i] = p;
+      scream(p, 0.1);
+      return i;
+    },
     behead(i, d) { return HEADSHOTS ? behead(i, d) : this.knockDown(i, d); },
     gib(i, x, z, power) { return gib(i, x, z, power); },
     // everyone within radius of (x, z) blown apart; returns how many

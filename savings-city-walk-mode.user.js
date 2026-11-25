@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.21
+// @version      1.23
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -53,6 +53,8 @@
   const CAR_FLEE_BOOST = 2.2;     // a hit car drives this many times its normal speed…
   const CAR_FLEE_SECONDS = 8;     // …for this long, to get away from you
   const CAR_HITS_TO_EXPLODE = 3;  // on this hit it explodes, burns out and stays put as a wreck
+  const CAR_ABANDON_CHANCE = 0.5; // first hit: chance the car stops and the driver jumps out and runs (else it flees)
+  const CAR_OCCUPANTS = [1, 2];   // people inside a car that explodes (none in parked or abandoned cars)
   const CAR_BURN_SECONDS = 25;    // how long the wreck keeps burning
   const CAR_BLAST_GIB_RADIUS = 0.3;   // ≈ 6 m: residents this close to an exploding car are blown apart
   const CAR_BLAST_KNOCK_RADIUS = 1.3; // ≈ 26 m: …this close they're knocked down (dead)
@@ -643,7 +645,8 @@
     if (st.wreck) return;
     st.hits++;
     if (st.hits >= CAR_HITS_TO_EXPLODE) { explode(car, st); return; }
-    if (car.isStatic) return;                                   // nobody inside: it just takes the hits
+    if (car.isStatic || car.scAbandoned) return;                // nobody inside: it just takes the hits
+    if (st.hits === 1 && Math.random() < CAR_ABANDON_CHANCE && !isPolice(car)) { abandon(car); return; }
     // flee: drive off much faster for a while
     if (!st.fleeUntil) st.prevBoost = car.boost;
     car.boost = CAR_FLEE_BOOST;
@@ -668,7 +671,7 @@
     if (DESTRUCTIBLE_PROPS) for (const p of props.values()) {
       if (p.state !== 'up') continue;
       const dx = p.x - x, dz = p.z - z, l = Math.hypot(dx, dz);
-      if (l <= CAR_BLAST_PROP_RADIUS) { p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, { x: dx / (l || 1), y: 0, z: dz / (l || 1) }, { x: p.x, y: p.y0 + 0.05, z: p.z }); }
+      if (l - (p.radius || 0) <= CAR_BLAST_PROP_RADIUS) { p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, { x: dx / (l || 1), y: 0, z: dz / (l || 1) }, { x: p.x, y: p.y0 + 0.05, z: p.z }); }
     }
     // other cars close by take a hit, a moment later (a row of parked cars can go up one by one)
     const near = [...(trafficCars || []), ...parkedCars.values()].filter((c) => c !== car && Math.hypot(c.x - x, c.z - z) <= CAR_BLAST_CAR_RADIUS);
@@ -693,6 +696,22 @@
   }
   function carExploded(car, x, z) {
     window.dispatchEvent(new CustomEvent('sc:car-exploded', { detail: { x, z, police: isPolice(car) } }));
+    // whoever was still inside
+    if (car.isStatic || car.scAbandoned) return;
+    const n = CAR_OCCUPANTS[0] + Math.floor(Math.random() * (CAR_OCCUPANTS[1] - CAR_OCCUPANTS[0] + 1));
+    for (let i = 0; i < n; i++) window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x, z, cause: 'car', who: 'occupant' } }));
+  }
+  // the driver stops, jumps out and runs away from you (residents 1.12+); the car stays where it is
+  function abandon(car) {
+    car.scAbandoned = true;
+    car.parked = Infinity; car.speed = 0; car.boost = 1;
+    const res = window.scResidents;
+    if (res && typeof res.addRunner === 'function') {
+      const fx = Math.cos(car.heading), fz = Math.sin(car.heading), dx = pos.x - car.x, dz = pos.z - car.z;
+      const side = (-fz * dx + fx * dz) > 0 ? -1 : 1;           // the door away from you
+      setTimeout(() => res.addRunner(car.x - fz * 0.07 * side, car.z + fx * 0.07 * side, pos.x, pos.z), 350);
+    }
+    sound('thud');
   }
   function isPolice(car) {
     if (!trafficCars || !appScene) return false;
@@ -701,8 +720,8 @@
     return !!(m && m.userData.car && m.userData.car.kind === 'police');
   }
   // tells other scripts (cops, …) about an explosion: gib / knock / panic radius
-  function blastEvent(x, z, gib, knock, panic) {
-    window.dispatchEvent(new CustomEvent('sc:blast', { detail: { x, z, gib, knock, panic } }));
+  function blastEvent(x, z, gib, knock, panic, y = 0.08) {
+    window.dispatchEvent(new CustomEvent('sc:blast', { detail: { x, y, z, gib, knock, panic } }));
   }
   // black smoke: rises (slowing to `rise`), drifts with the wind, grows big and fades as it goes up
   function blackSmoke(x, y, z, o) {
@@ -1104,7 +1123,7 @@
     hitTargets: (o, d, max) => hitTargets(o, d, max),
     tracer: (start, end, onArrive) => fire(start, end, onArrive || (() => {})),
     blackSmoke: (x, y, z, o) => blackSmoke(x, y, z, o || {}),
-    blastEvent: (x, z, gib, knock, panic) => blastEvent(x, z, gib, knock, panic),
+    blastEvent: (x, z, gib, knock, panic, y) => blastEvent(x, z, gib, knock, panic, y),
     get walking() { return walking; },
     get scene() { return appScene; },
     classes() {
@@ -1117,12 +1136,12 @@
     carObjects: () => carObjects(),
     trafficCars: () => trafficCars,
     wreck(car) { let st = damage.get(car); if (!st) damage.set(car, (st = { hits: 0 })); if (!st.wreck) carExploded(car, car.x, car.z); st.wreck = true; st.t0 = performance.now() - CAR_BURN_SECONDS * 1000; car.parked = Infinity; car.speed = 0; },
-    propsNear(x, z, r) { return [...props.values()].filter((p) => p.state === 'up' && Math.hypot(p.x - x, p.z - z) <= r); },
+    propsNear(x, z, r) { return [...props.values()].filter((p) => p.state === 'up' && Math.hypot(p.x - x, p.z - z) - (p.radius || 0) <= r); },
     knockProp(p, d) { if (p.state !== 'up') return; p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, d, { x: p.x, y: p.y0 + 0.05, z: p.z }); },
     spawn: (kind, x, y, z, o) => spawn(kind, x, y, z, o),
     startEffects: () => startEffects(),
     sound: (kind) => sound(kind),
-    blastResidents(x, z, gib = 0) { blastEvent(x, z, gib, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS); const r = window.scResidents; if (r && r.blast) return r.blast(x, z, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, PANIC_SECONDS); },
+    blastResidents(x, z, gib = 0, y) { blastEvent(x, z, gib, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, y); const r = window.scResidents; if (r && r.blast) return r.blast(x, z, BLAST_KNOCK_RADIUS, BLAST_PANIC_RADIUS, PANIC_SECONDS); },
   };
   { const queued = Array.isArray(window.scWalkWeapons) ? window.scWalkWeapons : []; window.scWalkWeapons = { push: (d) => addWeapon(d) }; queued.forEach(addWeapon); }
 
@@ -1415,9 +1434,12 @@
   // - trees on open land: separate instanced trunks + crowns (one instance per tree);
   // - trees on lots and squares: a brown trunk block with two green crown balls, merged into a
   //   bigger mesh (a city block, a square) – and again in the building's own hidden copy;
-  // - street lamps: a grey post with a light-yellow lamp head, merged into the squares' mesh.
+  // - street lamps: a grey post with a light-yellow lamp head, merged into the squares' mesh;
+  // - benches (wooden seat and back on two grey legs) and fountains (stone basin with water),
+  //   also merged into the squares' mesh.
   // First hit: the prop shakes. PROP_HITS hits: it snaps at the foot and falls over, away from you,
   // and stays down. Merged props are cut out of their mesh into a mesh of their own to fall.
+  // Benches and fountains don't fall: they break apart (splinters; stone chunks and a burst of water).
   const props = new Map();          // key → prop
   const fallen = new Map();         // key → { axis, angle } of props that went down (to redo after a rebuild)
   let propSig = '', propsAt = 0;
@@ -1438,7 +1460,7 @@
     propSig = sig;
     const old = props; const next = new Map();
     const lin = (hex) => { const c = new C(hex); return [c.r, c.g, c.b]; };
-    const POLE = lin('#4b5058'), LAMP = lin('#f3e3a6'), TRUNK = lin('#8a5a3b');
+    const POLE = lin('#4b5058'), LAMP = lin('#f3e3a6'), TRUNK = lin('#8a5a3b'), WOOD = lin('#a0703c'), STONE = lin('#cfc6b6'), WATER = lin('#69c3e6');
     const add = (key, make) => { let p = next.get(key); if (!p) { const before = old.get(key); p = make(); if (before) { p.hits = before.hits; p.copy = before.copy; p.state = before.state; p.fall = before.fall; p.wobble = before.wobble; } next.set(key, p); } return p; };
 
     // --- merged trees and lamps ---
@@ -1448,21 +1470,23 @@
       const e = mesh.matrixWorld.elements;
       const W = (i) => [e[0] * pos.getX(i) + e[4] * pos.getY(i) + e[8] * pos.getZ(i) + e[12], e[1] * pos.getX(i) + e[5] * pos.getY(i) + e[9] * pos.getZ(i) + e[13], e[2] * pos.getX(i) + e[6] * pos.getY(i) + e[10] * pos.getZ(i) + e[14]];
       const same = (i, c) => Math.abs(col.getX(i) - c[0]) < 0.003 && Math.abs(col.getY(i) - c[1]) < 0.003 && Math.abs(col.getZ(i) - c[2]) < 0.003;
-      const poles = [], trunks = [], heads = [];
-      const cluster = (list, k) => {
+      const poles = [], trunks = [], heads = [], woods = [], basins = [], lowPoles = [];
+      const cluster = (list, k, near = 0.06) => {
         const i = k * 3, a = W(i), b = W(i + 1), c = W(i + 2), cx = (a[0] + b[0] + c[0]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
-        let cl = list.find((q) => Math.abs(q.cx - cx) < 0.06 && Math.abs(q.cz - cz) < 0.06);   // props stand ≥ 0.3 apart
+        let cl = list.find((q) => Math.abs(q.cx - cx) < near && Math.abs(q.cz - cz) < near);   // props stand ≥ 0.3 apart
         if (!cl) list.push(cl = { cx, cz, tris: [], lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] });
         cl.tris.push(k);
         for (const v of [a, b, c]) for (let j = 0; j < 3; j++) { cl.lo[j] = Math.min(cl.lo[j], v[j]); cl.hi[j] = Math.max(cl.hi[j], v[j]); }
       };
       for (let k = 0; k < n; k++) {
         const i = k * 3;
-        if (same(i, POLE) && same(i + 2, POLE)) cluster(poles, k);
+        if (same(i, POLE) && same(i + 2, POLE)) { cluster(poles, k); lowPoles.push(k); }
         else if (same(i, TRUNK) && same(i + 2, TRUNK)) cluster(trunks, k);
         else if (same(i, LAMP) && same(i + 2, LAMP)) heads.push(k);
+        else if (same(i, WOOD) && same(i + 2, WOOD)) cluster(woods, k, 0.13);
+        else if ((same(i, STONE) && same(i + 2, STONE)) || (same(i, WATER) && same(i + 2, WATER))) cluster(basins, k, 0.5);
       }
-      if (!poles.length && !trunks.length) continue;
+      if (!poles.length && !trunks.length && !woods.length && !basins.length) continue;
       let shown = true; for (let q = mesh; q; q = q.parent) if (!q.visible) shown = false;
       const centroid = (k) => { const a = W(k * 3), b = W(k * 3 + 1), c = W(k * 3 + 2); return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3]; };
       for (const p of poles) {
@@ -1473,6 +1497,25 @@
         const prop = add(propKey('lamp', x, z), () => ({ kind: 'lamp', key: propKey('lamp', x, z), x, z, y0: p.lo[1], sources: [], hits: 0, state: 'up',
           parts: [{ cyl: true, r: 0.018, y0: p.lo[1], y1: top }, { c: [x, top + 0.015, z], r: 0.042 }], hc: top + 0.015 - p.lo[1], rc: 0.03 }));
         prop.sources.push({ mesh, tris: [...p.tris, ...head], shown });
+      }
+      for (const b of woods) {
+        // a bench: the seat + back (0.16 × 0.06), with the grey legs underneath
+        const w = Math.max(b.hi[0] - b.lo[0], b.hi[2] - b.lo[2]);
+        if (w > 0.22 || b.lo[1] < 0.04 || b.hi[1] > 0.14) continue;
+        const x = (b.lo[0] + b.hi[0]) / 2, z = (b.lo[2] + b.hi[2]) / 2;
+        const legs = lowPoles.filter((k) => { const c = centroid(k); return c[1] < 0.065 && Math.abs(c[0] - x) < 0.1 && Math.abs(c[2] - z) < 0.1; });
+        const prop = add(propKey('bench', x, z), () => ({ kind: 'bench', key: propKey('bench', x, z), x, z, y0: 0.03, sources: [], hits: 0, state: 'up', breaks: true,
+          parts: [{ c: [x, 0.075, z], r: 0.085 }], hc: 0.08, rc: 0.08, radius: 0.08, colors: ['#a0703c', '#8a5f33', '#b5834d', '#4b5058'] }));
+        prop.sources.push({ mesh, tris: [...b.tris, ...legs], shown });
+      }
+      for (const b of basins) {
+        // a fountain: stone basin (round or square, up to 0.84 across) with water
+        const w = Math.max(b.hi[0] - b.lo[0], b.hi[2] - b.lo[2]);
+        if (w < 0.2 || w > 1 || b.tris.length < 12) continue;
+        const x = (b.lo[0] + b.hi[0]) / 2, z = (b.lo[2] + b.hi[2]) / 2, R = w / 2;
+        const prop = add(propKey('fountain', x, z), () => ({ kind: 'fountain', key: propKey('fountain', x, z), x, z, y0: 0.03, sources: [], hits: 0, state: 'up', breaks: true,
+          parts: [{ cyl: true, r: R, y0: 0.03, y1: b.hi[1] }], hc: b.hi[1] - 0.03, rc: R, radius: R, reach: R + 0.1, top: b.hi[1], colors: ['#cfc6b6', '#bdb3a2', '#ddd6c9'] }));
+        prop.sources.push({ mesh, tris: b.tris, shown });
       }
       if (trunks.length) {
         // crown candidates: triangles high enough, by cell
@@ -1540,7 +1583,7 @@
     for (const p of props.values()) {
       if (p.state !== 'up') continue;
       const ex = o.x - p.x, ez = o.z - p.z;
-      if (Math.abs(ex * d.z - ez * d.x) / Math.sqrt(a || 1) > 0.25) continue;   // nowhere near
+      if (Math.abs(ex * d.z - ez * d.x) / Math.sqrt(a || 1) > (p.reach || 0.25)) continue;   // nowhere near
       for (const part of p.parts) {
         let t = null;
         if (part.cyl) {
@@ -1565,6 +1608,7 @@
   function damageProp(p, d, at) {
     if (p.state !== 'up') return;
     p.hits++;
+    if (p.breaks) { hitBreakable(p, d, at); return; }
     const l = Math.hypot(d.x, d.z) || 1, axis = [d.z / l, 0, -d.x / l];       // falls away from you
     if (p.kind === 'lamp') for (let k = 0; k < 6; k++) spawn('spark', at.x, at.y, at.z, { vx: rnd(-0.5, 0.5), vy: rnd(0.2, 0.8), vz: rnd(-0.5, 0.5), g: 3, size: 0.004, life: rnd(0.2, 0.5) });
     else for (let k = 0; k < 5; k++) spawn(at.y > p.y0 + p.hc * 0.6 ? 'leaf' : 'wood', at.x, at.y, at.z, { vx: rnd(-0.3, 0.3) - d.x * 0.3, vy: rnd(0, 0.4), vz: rnd(-0.3, 0.3) - d.z * 0.3, g: 1.5, size: rnd(0.005, 0.009), life: rnd(0.8, 1.6), land: true, spin: true });
@@ -1578,6 +1622,34 @@
     for (let k = 0; k < 10; k++) spawn(p.kind === 'lamp' ? 'debris' : 'wood', p.x, p.y0 + 0.01, p.z, { vx: rnd(-0.4, 0.4) + d.x * 0.3, vy: rnd(0.2, 0.7), vz: rnd(-0.4, 0.4) + d.z * 0.3, g: 3, size: rnd(0.004, 0.009), life: rnd(1, 2), land: true, spin: true });
     startEffects();
     propsBusy();
+  }
+
+  // benches and fountains: chips fly on a hit; PROP_HITS hits (or a blast) and they break apart
+  function hitBreakable(p, d, at) {
+    const col = () => p.colors[Math.floor(Math.random() * p.colors.length)];
+    for (let k = 0; k < 6; k++) spawn('debris', at.x, at.y, at.z, { color: col(), vx: rnd(-0.4, 0.4) - d.x * 0.3, vy: rnd(0.1, 0.6), vz: rnd(-0.4, 0.4) - d.z * 0.3, g: 3, size: rnd(0.004, 0.009), life: rnd(1, 2), land: true, spin: true });
+    if (p.kind === 'fountain') for (let k = 0; k < 8; k++) spawn('debris', at.x, at.y, at.z, { color: '#69c3e6', vx: rnd(-0.3, 0.3), vy: rnd(0.3, 0.8), vz: rnd(-0.3, 0.3), g: 3, size: rnd(0.004, 0.008), life: rnd(0.5, 1) });
+    startEffects();
+    if (p.hits < PROP_HITS) { sound(p.kind === 'bench' ? 'thud' : 'glass'); return; }
+    p.state = 'down';
+    fallen.set(p.key, { broken: true });
+    for (const s of p.sources) collapse(s);
+    sound('crack');
+    const R = p.radius || 0.08, n = p.kind === 'fountain' ? 34 : 14;
+    for (let k = 0; k < n; k++) {
+      const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * R;
+      spawn('debris', p.x + Math.cos(a) * r, rnd(0.04, (p.top || 0.1)), p.z + Math.sin(a) * r, { color: col(), vx: Math.cos(a) * rnd(0.2, 0.9) + d.x * 0.4, vy: rnd(0.3, 1.1), vz: Math.sin(a) * rnd(0.2, 0.9) + d.z * 0.4,
+        g: 3, size: p.kind === 'fountain' ? rnd(0.015, 0.045) : rnd(0.008, 0.02), life: rnd(15, 25), land: true, spin: true });
+    }
+    if (p.kind === 'fountain') {
+      sound('glass');
+      for (let k = 0; k < 60; k++) {   // the water bursts out
+        const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * R;
+        spawn('debris', p.x + Math.cos(a) * r * 0.5, 0.1, p.z + Math.sin(a) * r * 0.5, { color: k % 3 ? '#69c3e6' : '#bfe6ff', vx: Math.cos(a) * rnd(0.2, 1), vy: rnd(0.6, 1.8), vz: Math.sin(a) * rnd(0.2, 1), g: 3, size: rnd(0.005, 0.012), life: rnd(0.8, 1.6) });
+      }
+      for (let k = 0; k < 10; k++) spawn('dust', p.x + rnd(-R, R) * 0.6, 0.12, p.z + rnd(-R, R) * 0.6, { fade: true, color: k % 2 ? '#e8f4fa' : '#cfc6b6', vx: rnd(-0.2, 0.2), vy: rnd(0.1, 0.3), vz: rnd(-0.2, 0.2), rise: 0.05, size: rnd(0.08, 0.14), grow: 3, life: rnd(2, 4), alpha: 0.6 });
+    }
+    startEffects();
   }
 
   // cut a merged prop out of its mesh(es) into a mesh of its own, pivoting at its foot

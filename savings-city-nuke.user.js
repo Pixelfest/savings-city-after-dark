@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      2.4
+// @version      2.6
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -32,6 +32,11 @@
  * - Camera shake = shaking the canvas element, so it also works in walk mode.
  * - Residents (residents script) all run, and fall as the wave reaches them. Cars are vaporised
  *   near the centre and burnt out further away; all of them stop.
+ * - B-2 bomber: during the countdown a flying wing crosses the city at BOMBER_ALTITUDE, from a
+ *   random direction, straight over ground zero. It releases the bomb BOMB_FALL seconds before
+ *   the end of the countdown; the bomb keeps the plane's speed and falls (gravity chosen so it
+ *   lands in exactly BOMB_FALL seconds), so it reaches ground zero just as it goes off. If the
+ *   destruction isn't worked out yet at that moment, the bomb lies there until it is.
  * - If the app later rebuilds parts of the city (e.g. after a data refresh), those are destroyed
  *   again straight away. Nothing is sent to the server: reload the page and the city is back.
  */
@@ -60,6 +65,11 @@
   const CLOUD_LINGER = 20;         // after this many seconds the cloud rises and drifts away
   const SHAKE = 22;                // camera shake strength (pixels)
   const SOUND = true;
+  const BOMBER = true;             // a B-2 flies over during the countdown and drops the bomb
+  const BOMBER_ALTITUDE = 4.5;     // tiles (≈ 90 m – low, so you see it from above too)
+  const BOMBER_SPEED = 4;          // tiles per second
+  const BOMB_FALL = 3;             // seconds from release to impact (= the blast)
+  const BOMBER_SPAN = 2.6;         // wingspan in tiles (a real B-2: 52 m)
   // -----------------------------------------------------------------------------------------
 
   // ---------- catch the scene ----------
@@ -955,6 +965,7 @@
       if (!carsDone.has(car)) {
         carsDone.add(car);
         window.dispatchEvent(new CustomEvent('sc:car-exploded', { detail: { x: car.x, z: car.z, cause: 'nuke' } }));
+        if (!car.scAbandoned) for (let n = 1 + (Math.random() < 0.5 ? 1 : 0); n > 0; n--) window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: car.x, z: car.z, cause: 'nuke', who: 'occupant' } }));
         if (d <= nuke.total && debris) for (let n = 0; n < 6 && dN < MAX_DEBRIS; n++) {   // a few car parts flying off
           const k = dN++, dx = (car.x - nuke.cx) / (d || 1), dz = (car.z - nuke.cz) / (d || 1);
           D.p.set([car.x, 0.07, car.z], k * 3); D.v.set([dx * rnd(1, 3), rnd(0.5, 1.8), dz * rnd(1, 3)], k * 3);
@@ -1053,6 +1064,7 @@
   function detonate() {
     if (fired) return;
     fired = true;
+    if (bomber && bomber.bomb) bomber.bomb.removeFromParent();   // the bomb is the blast
     nuke.t0 = performance.now();
     scan(false);                                                 // anything the app rebuilt during the countdown
     const root = nukeRoot;
@@ -1110,31 +1122,158 @@
     if (!nuke.settled && t > WAVE_SECONDS + 0.5) { nuke.settled = true; safe('notify', () => window.dispatchEvent(new Event('sc:geometry-changed'))); }
   }
 
+  // ---------- B-2 bomber ----------
+  let bomber = null;
+  function shapeMesh(tris, colorFor) {
+    // tris: [[a, b, c], …] with points [x, y, z]; flat shaded, vertex colours
+    const P = [], N = [], C = [];
+    for (const [a, b, c] of tris) {
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]], l = Math.hypot(...n) || 1;
+      const col = new K.Color(colorFor(n[1] / l));
+      for (const p of [a, b, c]) { P.push(...p); N.push(n[0] / l, n[1] / l, n[2] / l); C.push(col.r, col.g, col.b); }
+    }
+    const g = new K.Geometry();
+    g.setAttribute('position', new K.Attr(new Float32Array(P), 3));
+    g.setAttribute('normal', new K.Attr(new Float32Array(N), 3));
+    g.setAttribute('color', new K.Attr(new Float32Array(C), 3));
+    const m = new K.Mesh(g, new K.Lambert({ vertexColors: true }));
+    m.castShadow = true; m.frustumCulled = false;
+    return m;
+  }
+  // a flying wing: swept leading edge, saw-tooth trailing edge, a low hump in the middle (+z = nose)
+  function bomberModel() {
+    const s = BOMBER_SPAN / 2.6;
+    const half = [[0, 0.55], [1.3, -0.33], [0.92, -0.06], [0.62, -0.33], [0.32, -0.1], [0, -0.38]];
+    const ring = [...half, ...half.slice(1, -1).reverse().map(([x, z]) => [-x, z])];            // nose → right tip → tail → left tip
+    const thick = (x) => 0.022 * (1 - Math.min(1, Math.abs(x) / 1.3));
+    const outer = ring.map(([x, z]) => [x * s, thick(x) * s, z * s]);
+    const inner = ring.map(([x, z]) => [x * 0.42 * s, (0.055 + thick(x)) * s, (z * 0.5 + 0.03) * s]);
+    const apex = [0, 0.085 * s, 0.1 * s], belly = [0, -0.03 * s, 0.05 * s];
+    const tris = [];
+    const up = (a, b, c) => { const u = [b[0] - a[0], b[2] - a[2]], v = [c[0] - a[0], c[2] - a[2]]; return u[0] * v[1] - u[1] * v[0] < 0 ? [a, b, c] : [a, c, b]; };   // normal +y
+    const dn = (a, b, c) => { const t = up(a, b, c); return [t[0], t[2], t[1]]; };
+    for (let i = 0; i < ring.length; i++) {
+      const j = (i + 1) % ring.length;
+      tris.push(up(outer[i], outer[j], inner[j]), up(outer[i], inner[j], inner[i]), up(inner[i], inner[j], apex));
+      tris.push(dn(outer[i], outer[j], belly));
+    }
+    const plane = shapeMesh(tris, (ny) => (ny > 0 ? '#3d4048' : '#2a2c31'));
+    // cockpit windows and engine intakes
+    const box = (x, y, z, w, h, d, col) => {
+      const c = [[x - w / 2, y, z - d / 2], [x + w / 2, y, z - d / 2], [x + w / 2, y, z + d / 2], [x - w / 2, y, z + d / 2]].map((p) => [p[0] * s, p[1] * s, p[2] * s]);
+      const t = c.map((p) => [p[0], p[1] + h * s, p[2]]);
+      return shapeMesh([up(t[0], t[1], t[2]), up(t[0], t[2], t[3]), [c[0], c[1], t[1]], [c[0], t[1], t[0]], [c[1], c[2], t[2]], [c[1], t[2], t[1]], [c[2], c[3], t[3]], [c[2], t[3], t[2]], [c[3], c[0], t[0]], [c[3], t[0], t[3]]], () => col);
+    };
+    for (const x of [-0.05, 0.05]) plane.add(box(x, 0.07, 0.3, 0.06, 0.012, 0.05, '#101216'));
+    for (const x of [-0.2, 0.2]) plane.add(box(x, 0.045, 0.12, 0.12, 0.03, 0.14, '#33363d'));
+    return plane;
+  }
+  function bombModel() {
+    const tris = [], seg = 8, r = 0.022, len = 0.16, pts = (z, rr) => Array.from({ length: seg }, (_, i) => [Math.cos(i / seg * 6.283) * rr, Math.sin(i / seg * 6.283) * rr, z]);
+    const rings = [pts(-len / 2, r * 0.7), pts(-len / 4, r), pts(len / 4, r), pts(len / 2 - 0.01, r * 0.6)], nose = [0, 0, len / 2 + 0.02], tail = [0, 0, -len / 2];
+    for (let k = 0; k < rings.length - 1; k++) for (let i = 0; i < seg; i++) { const j = (i + 1) % seg, a = rings[k], b = rings[k + 1]; tris.push([a[i], b[i], b[j]], [a[i], b[j], a[j]]); }
+    for (let i = 0; i < seg; i++) { const j = (i + 1) % seg; tris.push([rings[3][i], nose, rings[3][j]], [rings[0][j], tail, rings[0][i]]); }
+    for (const [fx, fy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {   // tail fins
+      const a = [0, 0, -len / 2], b = [fx * 0.045, fy * 0.045, -len / 2], c = [0, 0, -len / 2 + 0.05];
+      tris.push([a, b, c], [a, c, b]);
+    }
+    return shapeMesh(tris, () => '#5a5f52');
+  }
+  function startBomber(tDet) {
+    if (!BOMBER || COUNTDOWN < BOMB_FALL + 1 || !classes()) return;
+    const c = cityShape(), a = Math.random() * Math.PI * 2, u = [Math.cos(a), Math.sin(a)];
+    const H = BOMBER_ALTITUDE, v = BOMBER_SPEED, tRel = tDet - BOMB_FALL * 1000;
+    const R = [c.cx - u[0] * v * BOMB_FALL, c.cz - u[1] * v * BOMB_FALL];                       // where it lets go
+    const g = 2 * (H - 0.08) / (BOMB_FALL * BOMB_FALL);
+    const plane = bomberModel(), bomb = bombModel();
+    plane.userData.scNuke = true; bomb.userData.scNuke = true;
+    plane.rotation.y = Math.atan2(u[0], u[1]);                                                    // nose (+z) along the course
+    plane.visible = false;
+    plane.add(bomb); bomb.position.set(0, -0.02, 0.05);                                         // in the bomb bay
+    scene.add(plane);
+    bomber = { plane, bomb, u, R, H, v, g, tRel, tDet, released: false, rumbled: false };
+    requestAnimationFrame(stepBomber);
+  }
+  function stepBomber() {
+    const b = bomber; if (!b) return;
+    const now = performance.now(), t = (now - b.tRel) / 1000;                                   // seconds since the release
+    // the plane: on its straight course, from far out to far beyond
+    const along = b.v * t;
+    b.plane.position.set(b.R[0] + b.u[0] * along, b.H, b.R[1] + b.u[1] * along);
+    b.plane.visible = t > -7 && t < 9;
+    if (!b.rumbled && t > -4) { b.rumbled = true; rumble(); }
+    if (!b.released && t >= 0) {                                                                // bombs away
+      b.released = true;
+      b.plane.remove(b.bomb); scene.add(b.bomb);
+      whistle();
+    }
+    if (b.released && b.bomb.parent) {
+      const tf = Math.min(t, BOMB_FALL), x = b.R[0] + b.u[0] * b.v * tf, z = b.R[1] + b.u[1] * b.v * tf;
+      const y = Math.max(0.06, b.H - 0.02 - 0.5 * b.g * tf * tf), vy = -b.g * tf;
+      b.bomb.position.set(x, y, z);
+      b.bomb.lookAt(x + b.u[0] * b.v, y + vy, z + b.u[1] * b.v);                                // nose along its flight
+    }
+    if (t > 9 && !b.bomb.parent) { b.plane.removeFromParent(); bomber = null; return; }
+    if (t > 9) b.plane.visible = false;
+    requestAnimationFrame(stepBomber);
+  }
+  function stopBomber() { if (!bomber) return; bomber.plane.removeFromParent(); bomber.bomb.removeFromParent(); bomber = null; }
+  // the plane's roar passing over, and the whistle of the falling bomb
+  function rumble() {
+    if (!SOUND) return;
+    try {
+      audio = audio || new AudioContext();
+      const a = audio, t = a.currentTime, len = 8, buf = a.createBuffer(1, Math.floor(a.sampleRate * len), a.sampleRate), ch = buf.getChannelData(0);
+      let last = 0; for (let i = 0; i < ch.length; i++) { last = last * 0.97 + (Math.random() * 2 - 1) * 0.03; ch[i] = last * 8; }
+      const src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+      f.type = 'lowpass'; f.frequency.setValueAtTime(300, t); f.frequency.linearRampToValueAtTime(900, t + 4); f.frequency.linearRampToValueAtTime(250, t + len);
+      g.gain.setValueAtTime(0.001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 4); g.gain.exponentialRampToValueAtTime(0.001, t + len);
+      src.buffer = buf; src.connect(f); f.connect(g); g.connect(a.destination); src.start(t);
+    } catch {}
+  }
+  function whistle() {
+    if (!SOUND) return;
+    try {
+      audio = audio || new AudioContext();
+      const a = audio, t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(1700, t); o.frequency.exponentialRampToValueAtTime(380, t + BOMB_FALL);
+      g.gain.setValueAtTime(0.001, t); g.gain.exponentialRampToValueAtTime(0.12, t + 0.4); g.gain.setValueAtTime(0.12, t + BOMB_FALL - 0.2); g.gain.exponentialRampToValueAtTime(0.001, t + BOMB_FALL);
+      o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + BOMB_FALL + 0.05);
+    } catch {}
+  }
+
   // ---------- countdown + button ----------
   let counting = null;
   function startCountdown() {
     if (fired) return;
     if (!scene || !classes()) { alert('De 3D-stad is nog niet geladen.'); return; }
     try { audio = audio || new AudioContext(); } catch {}
-    if (counting) { clearInterval(counting.timer); countEl.remove(); counting = null; onReady = null; updateButton(); return; }   // click again: cancel
+    if (counting) { clearInterval(counting.timer); countEl.remove(); counting = null; onReady = null; stopBomber(); updateButton(); return; }   // click again: cancel
     prepareInBackground(() => {});                               // start working out the destruction right away
     countEl = document.createElement('div');
     countEl.style.cssText = 'position:fixed;left:50%;top:18%;transform:translateX(-50%);z-index:10001;pointer-events:none;font:800 64px/1 system-ui,sans-serif;color:#ffd23f;text-shadow:0 0 12px #000,0 2px 0 #000;letter-spacing:2px';
     document.body.appendChild(countEl);
-    let n = COUNTDOWN;
+    // the countdown follows the clock (not the ticks of a timer, which lag when the page is busy),
+    // so the blast comes exactly when the bomber's bomb lands
+    const tDet = performance.now() + COUNTDOWN * 1000;
+    let shown = -1;
     const go = () => { countEl.remove(); counting = null; detonate(); };
     const tick = () => {
+      const n = Math.ceil((tDet - performance.now()) / 1000);
       if (n <= 0) {
         clearInterval(counting.timer);
         if (ready) go();
         else { countEl.textContent = '☢ …'; prepareInBackground(go); }   // still working out the destruction
         return;
       }
+      if (n === shown) return;
+      shown = n;
       countEl.textContent = '☢ ' + n;
       tone(n <= 3 ? 1320 : 880, 0.18, 0.25);
-      n--;
     };
-    counting = { timer: setInterval(tick, 1000) };
+    counting = { timer: setInterval(tick, 50) };
+    try { startBomber(tDet); } catch (e) { console.warn('[nuke] bomber', e); }
     tick();
     updateButton();
   }

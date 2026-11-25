@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – After Dark (loader)
 // @namespace    savings-city-tweaks
-// @version      1.0
+// @version      1.1
 // @description  Loads all Savings City After Dark scripts from GitHub, so you install one script and get every update.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -16,6 +16,7 @@
 // @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-residents.user.js
 // @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-rocket-launcher.user.js
 // @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-cops.user.js
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-heli-crane.user.js
 // @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-nuke.user.js
 // @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-monster.user.js
 // ==/UserScript==

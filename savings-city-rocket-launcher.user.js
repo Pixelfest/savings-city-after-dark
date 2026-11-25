@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – rocket launcher (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  Adds a rocket launcher to walk mode (key 3). Residents and cars are blown apart, walls get holes blown in them.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -206,7 +206,7 @@
     // people
     const res = window.scResidents;
     if (res && res.gibAround) res.gibAround(bx, bz, GIB_RADIUS, 1.3);
-    w.blastResidents(bx, bz, GIB_RADIUS);
+    w.blastResidents(bx, bz, GIB_RADIUS, by);
     // trees and lamps
     for (const p of w.propsNear(bx, bz, PROP_RADIUS)) { const dx = p.x - bx, dz = p.z - bz, l = Math.hypot(dx, dz) || 1; w.knockProp(p, { x: dx / l, y: 0, z: dz / l }); }
     // cars
