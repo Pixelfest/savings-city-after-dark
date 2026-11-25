@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.26
+// @version      1.27
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -9,13 +9,14 @@
 // ==/UserScript==
 
 /*
+ * Needs the core script (savings-city-core): the renderer, scene, city data, traffic, the app's
+ * helpers and sound come from there.
+ *
  * How it works
  * ------------
- * - three.js (the app's 3D library) reports every renderer it creates to window.__THREE_DEVTOOLS__,
- *   if that exists, for its browser devtools. This script creates it at page start, so it gets the
- *   app's renderer without touching the app's code.
- * - The renderer's render() is wrapped: in walk mode the scene is drawn with our own perspective
- *   camera instead of the app's top-down one. The app keeps animating cars, lights and snow.
+ * - Every render call passes walk mode first (scCore.onRender): in walk mode the scene is drawn
+ *   with our own perspective camera instead of the app's top-down one. The app keeps animating
+ *   cars, lights and snow.
  * - The PerspectiveCamera class is taken from the renderer's VR camera (it is a subclass), so we
  *   use the app's own three.js copy and need no download.
  * - Collisions: every building is a group tagged with userData.projectId. The script measures the
@@ -29,26 +30,10 @@
 (function () {
   'use strict';
 
-  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
-  // Everything this script plays goes through one gain node that copies the app's setting, also
-  // while a sound is playing (checked twice a second).
-  const appSoundLevel = () => {
-    try {
-      if (localStorage.getItem('citysaver:muted') === '1') return 0;
-      const v = parseFloat(localStorage.getItem('citysaver:volume'));
-      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
-    } catch { return 1; }
-  };
-  let soundOut = null;
-  function out(ctx) {
-    if (!soundOut || soundOut.context !== ctx) {
-      soundOut = ctx.createGain();
-      soundOut.gain.value = appSoundLevel();
-      soundOut.connect(ctx.destination);
-      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
-    }
-    return soundOut;
-  }
+  // the core script, also when this script loads before it; sound through its output, which
+  // follows the app's own sound button (mute + volume)
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  const out = (ctx) => (window.scCore ? window.scCore.out(ctx) : ctx.destination);
 
 
   // ---- settings (all in tiles; one tile = 1 unit) --------------------------------------------
@@ -116,9 +101,7 @@
   // ---------- 0. parked cars on parking lots ----------
   // Cars standing on parking lots are not traffic: the app copies its car shape into the parking
   // lot's ground mesh (clone → rotateY → translate(x, 0.03, z)). To make them shootable we note
-  // where those copies go. BufferGeometry's prototype is found with a one-time setter on the
-  // "isBufferGeometry" flag three.js sets in its constructor; if another script (car tyres) already
-  // set such a trap, it is chained so both run.
+  // where those copies go, on BufferGeometry's prototype (from the core: scCore.onGeometryProto).
   const parkedCars = new Map();   // "x,z" → { x, z, heading, isStatic: true }
   function looksLikeCar(g) {
     const p = g.attributes && g.attributes.position;
@@ -146,42 +129,12 @@
       return translate.apply(this, arguments);
     };
   }
-  (function trapGeometry() {
-    const KEY = 'isBufferGeometry';
-    const prev = Object.getOwnPropertyDescriptor(Object.prototype, KEY);
-    if (prev && !prev.set) return;
-    Object.defineProperty(Object.prototype, KEY, {
-      configurable: true,
-      set(v) {
-        if (prev) prev.set.call(this, v); else delete Object.prototype[KEY];
-        delete Object.prototype[KEY];
-        if (!Object.prototype.hasOwnProperty.call(this, KEY)) Object.defineProperty(this, KEY, { value: v, writable: true, enumerable: true, configurable: true });
-        let p = Object.getPrototypeOf(this);
-        while (p && !Object.prototype.hasOwnProperty.call(p, 'translate')) p = Object.getPrototypeOf(p);
-        if (p) patchGeometry(p);
-      },
-    });
-  })();
+  whenCore((c) => c.onGeometryProto(patchGeometry));
 
-  // ---------- 1. catch the renderer through three.js' devtools hook ----------
-  const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
-  hook.addEventListener('observe', (e) => {
-    const o = e.detail;
-    if (o && o.isWebGLRenderer && !renderer) patchRenderer(o);
-    if (o && o.isScene && !o.__scWalkAdd) watchSceneAdds(o);
-  });
-
+  // ---------- 1. every render call passes here first (the core's onRender) ----------
   // The app adds all its layers in one call: scene.add(greenery, …, carBatchGroup, overlayGroup).
-  // The last one, the overlay, holds the selection and hover highlights; it's hidden while walking.
-  let overlay = null;
-  function watchSceneAdds(sc) {
-    sc.__scWalkAdd = true;
-    const add = sc.add;
-    sc.add = function () {
-      if (arguments.length >= 6 && !overlay) overlay = arguments[arguments.length - 1];
-      return add.apply(this, arguments);
-    };
-  }
+  // The last one, the overlay (scCore.overlay), holds the selection and hover highlights; it's
+  // hidden while walking.
   // Fallback: a layer holding the selection haze (white, see-through, no depth writing).
   function findOverlay(sc) {
     for (const g of sc.children) {
@@ -192,21 +145,17 @@
     return null;
   }
 
-  function patchRenderer(r) {
-    renderer = r;
-    const orig = r.render.bind(r);
-    r.render = function (scene, camera) {
-      if (scene && scene.isScene && camera && camera.isOrthographicCamera) { appScene = scene; appCamera = camera; }
-      if (walking && scene === appScene && cam) {
-        stepWalk(scene);
-        const ov = overlay || findOverlay(scene);
-        const vis = ov ? ov.visible : null;
-        if (ov) ov.visible = false;                    // no selection/hover highlight while walking
-        try { return orig(scene, cam); } finally { if (ov) ov.visible = vis; drawGun(orig); }
-      }
-      return orig(scene, camera);
-    };
-  }
+  whenCore((c) => c.onRender((scene, camera, orig) => {
+    renderer = c.renderer;
+    if (scene && scene.isScene && camera && camera.isOrthographicCamera) { appScene = scene; appCamera = camera; }
+    if (!(walking && scene === appScene && cam)) return false;
+    stepWalk(scene);
+    const ov = c.overlay || findOverlay(scene);
+    const vis = ov ? ov.visible : null;
+    if (ov) ov.visible = false;                    // no selection/hover highlight while walking
+    try { orig(scene, cam); } finally { if (ov) ov.visible = vis; drawGun(orig); }
+    return true;
+  }));
 
   function makeCamera() {
     // ArrayCamera (used for VR) extends PerspectiveCamera – take its parent class.
@@ -651,15 +600,8 @@
   // traffic.cars.forEach(...). That call reveals the list: car objects with x, z, heading,
   // base (normal speed), boost (speed factor), parked (stands still while set) …
   // Car i of that list is the 3D car whose userData.car.index is i.
-  let trafficCars = null;
-  const origForEach = Array.prototype.forEach;
-  Array.prototype.forEach = function () {
-    if (this !== trafficCars && this.length) {
-      const c = this[0];
-      if (c && typeof c === 'object' && typeof c.base === 'number' && typeof c.heading === 'number' && 'from' in c && 'to' in c) trafficCars = this;
-    }
-    return origForEach.apply(this, arguments);
-  };
+  // (the core finds that list: scCore.traffic())
+  const traffic = () => (window.scCore ? window.scCore.traffic() : null);
 
   function carObjects() {   // index → 3D car
     const out = new Map();
@@ -686,6 +628,7 @@
       }
       if (ok && t0 > 0) best = { t: t0, car };
     }
+    const trafficCars = traffic();
     if (!trafficCars) return best;
     for (const [i, mesh] of carObjects()) {
       const car = trafficCars[i]; if (!car) continue;
@@ -740,7 +683,7 @@
       if (l - (p.radius || 0) <= CAR_BLAST_PROP_RADIUS) { p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, { x: dx / (l || 1), y: 0, z: dz / (l || 1) }, { x: p.x, y: p.y0 + 0.05, z: p.z }); }
     }
     // other cars close by take a hit, a moment later (a row of parked cars can go up one by one)
-    const near = [...(trafficCars || []), ...parkedCars.values()].filter((c) => c !== car && Math.hypot(c.x - x, c.z - z) <= CAR_BLAST_CAR_RADIUS);
+    const near = [...(traffic() || []), ...parkedCars.values()].filter((c) => c !== car && Math.hypot(c.x - x, c.z - z) <= CAR_BLAST_CAR_RADIUS);
     if (near.length) setTimeout(() => near.forEach((c) => damageCar(c)), 300 + Math.random() * 400);
     // fireball: a big flash, a ball of fire rising, burning bits flying out
     spawn('flash', x, y, z, { size: 0.5, life: 0.3, grow: 2.2 });
@@ -780,6 +723,7 @@
     sound('thud');
   }
   function isPolice(car) {
+    const trafficCars = traffic();
     if (!trafficCars || !appScene) return false;
     const i = trafficCars.indexOf(car); if (i < 0) return false;
     const m = carObjects().get(i);
@@ -902,7 +846,7 @@
     const dt = Math.min(0.1, lastFx ? (t - lastFx) / 1000 : 0); lastFx = t;
     const now = performance.now();
     let busy = particles.length > 0;
-    const index = trafficCars ? new Map(trafficCars.map((c, i) => [c, i])) : new Map();
+    const trafficCars = traffic(), index = trafficCars ? new Map(trafficCars.map((c, i) => [c, i])) : new Map();
     for (const [car, st] of damage) {
       if (!st.wreck) {
         if (st.fleeUntil && now > st.fleeUntil) {             // calmed down
@@ -1214,7 +1158,7 @@
     hitCar: (o, d, max) => (SHOOT_CARS ? hitCar(o, d, max) : null),
     hitProp: (o, d, max) => (DESTRUCTIBLE_PROPS ? hitProp(o, d, max) : null),
     carObjects: () => carObjects(),
-    trafficCars: () => trafficCars,
+    trafficCars: () => traffic(),
     wreck(car) { let st = damage.get(car); if (!st) damage.set(car, (st = { hits: 0 })); if (!st.wreck) carExploded(car, car.x, car.z); st.wreck = true; st.t0 = performance.now() - CAR_BURN_SECONDS * 1000; car.parked = Infinity; car.speed = 0; },
     propsNear(x, z, r) { return [...props.values()].filter((p) => p.state === 'up' && Math.hypot(p.x - x, p.z - z) - (p.radius || 0) <= r); },
     knockProp(p, d) { if (p.state !== 'up') return; p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, d, { x: p.x, y: p.y0 + 0.05, z: p.z }); },
@@ -1949,45 +1893,10 @@
   }
 
   // ---------- 7. starting at a building ----------
-  // The city data the app itself reads (also when the auto-layout script changed it): every
-  // Response.json() call is watched for the {projects, roads} payload of /api/city.
-  let city = null;
-  const origJson = Response.prototype.json;
-  Response.prototype.json = async function () {
-    const d = await origJson.call(this);
-    try { if (d && Array.isArray(d.projects) && Array.isArray(d.roads)) { city = d; app().catch(() => {}); } } catch {}
-    return d;
-  };
-
-  // The app's main module, for the exact footprint and front-door position of a building.
-  let appModule = null;
-  async function app() {
-    if (appModule) return appModule;
-    const s = [...document.querySelectorAll('script[type="module"][src]')].find((s) => /\/index-[^/]*\.js/.test(s.src));
-    if (!s) throw new Error('main module not found');
-    const m = findHelpers(await import(s.src));
-    if (typeof m.v !== 'function' || typeof m.a !== 'function') throw new Error('app internals changed');
-    return (appModule = m);
-  }
-  // The app's minified export names change with every build, so its helpers are recognised by
-  // what their code looks like (checked against the builds of 24 and 25 Nov 2026):
-  //   v = placed projects → [{id, fp, gx, gy, facing}]   A = rotate a footprint (fp, facing)
-  //   a = front-door road keys (gx, gy, fp, facing)      w = floors of a project
-  //   S = cells of a footprint                           n = tiles of the welcome sign
-  function findHelpers(m) {
-    const fns = Object.values(m).filter((f) => typeof f === 'function');
-    const code = (f) => { try { return Function.prototype.toString.call(f); } catch { return ''; } };
-    const find = (re) => fns.find((f) => re.test(code(f)));
-    const isSign = (a) => Array.isArray(a) && a.length >= 4 && a.length <= 64 && a.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isInteger));
-    return {
-      v: find(/\.filter\(\w+\)\.map\(\w+=>\(\{id:\w+\.id,fp:/),
-      A: find(/^function\s*\w*\(\w+,\w+\)\{let \w+=\w+\.base\?\?\w+/),
-      a: find(/^function\s*\w*\(\w+,\w+,\w+,\w+\)\{\w+=\w+\(\w+,\w+\);let \w+=\[\];for\(let\[\w+,\w+\]of /),
-      w: find(/^function\s*\w*\(\w+,\w+=\w+\)\{return \w+\(\w+\)\?Math\.min\(/),
-      S: find(/\{let (\w+)=\[\];for\(let (\w+)=0;\2<\w+\.w;\2\+\+\)for\(let (\w+)=0;\3<\w+\.d;\3\+\+\)\w+\(\w+,\2,\3\)&&\1\.push/),
-      n: Object.values(m).find(isSign),
-    };
-  }
+  // The city data the app itself reads (also when the auto-layout script changed it) and the
+  // app's own helpers (exact footprint and front door of a building) – both from the core.
+  let city = null, appModule = null;
+  whenCore((c) => c.onCity((d) => { city = d; c.app().then((m) => { appModule = m; }).catch(() => {}); }));
 
   // World box per building group (for clicking and as a fallback).
   function groupBox(g) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.0
+// @version      1.1
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -10,19 +10,30 @@
 
 /*
  * One place for what every script used to set up for itself. Other scripts use window.scCore
- * (always looked up when needed, never at load time, so the order the scripts load in doesn't
- * matter as long as all run at document-start).
+ * when they need it. A script that has to register something at page start (a render hook, the
+ * geometry trap) and may load before the core puts a function on window.scCoreWaiting:
+ *   const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+ * the core runs those as soon as it's there. So the order the scripts load in doesn't matter, as
+ * long as all run at document-start.
  *
  * - renderer / scene / camera: three.js announces every renderer and scene on
  *   window.__THREE_DEVTOOLS__ (if that exists – it's created here at page start). The renderer's
  *   render() is wrapped once: the scene and camera of the app's own (orthographic) render are kept.
+ *   onRender(fn(scene, camera, render) → true when handled): every render call goes past these
+ *   first; one that returns true has drawn the frame itself with `render` (walk mode: its own camera).
+ * - overlay: the app adds all its layers in one call, scene.add(greenery, …, overlayGroup); the last
+ *   one holds the selection and hover highlights.
+ * - onGeometryProto(fn(proto)): BufferGeometry's prototype, revealed by a one-time setter on the
+ *   "isBufferGeometry" flag three.js sets in its constructor (car tyres and walk mode patch
+ *   translate/rotateY there). Registered after it was found: called right away.
+ * - app(): the app's own helpers (a Promise), found by the shape of their code – see findHelpers.
  * - classes(): three.js constructors borrowed from objects in the scene (there is no global THREE).
  * - city / onCity(fn): the /api/city data the app reads (every Response.json() is watched).
  * - traffic(): the app's list of traffic cars, revealed by its traffic.cars.forEach(...) call.
  * - sound: out(ctx) gives a gain node that follows the app's sound button (mute + volume);
  *   audio() one shared AudioContext.
- * - onFrame(fn): one requestAnimationFrame loop for everyone; fn(dt, now). Errors are caught per
- *   callback (and reported once).
+ * - onFrame(fn): one requestAnimationFrame loop for everyone; fn(dt, now), dt in seconds (at most
+ *   0.1). Errors are caught per callback (and reported once).
  * - puff(x, y, z, opts): a dust puff (grows, drifts, fades) that works without walk mode.
  * - damage(event) / onDamage(fn): the damage bus. Weapons and disasters describe what happens;
  *   whatever can break registers a handler and decides for itself:
@@ -36,19 +47,56 @@
   if (window.scCore) return;                                       // installed twice: the first one wins
 
   // ---------- renderer, scene, camera ----------
-  let renderer = null, scene = null, camera = null;
+  let renderer = null, scene = null, camera = null, overlay = null;
+  const renderFns = [];
   const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
   hook.addEventListener('observe', (e) => {
-    const r = e.detail;
-    if (!r || !r.isWebGLRenderer || r.__scCore) return;
+    const o = e.detail;
+    if (o && o.isScene && !o.__scCoreAdd) {
+      // the app adds its layers in one call; the last one (selection + hover) is the overlay
+      o.__scCoreAdd = true;
+      const add = o.add;
+      o.add = function () { if (arguments.length >= 6 && !overlay) overlay = arguments[arguments.length - 1]; return add.apply(this, arguments); };
+    }
+    if (!o || !o.isWebGLRenderer || o.__scCore) return;
+    const r = o;
     r.__scCore = true;
     renderer = renderer || r;
     const orig = r.render;
+    const render = (s, c) => orig.call(r, s, c);
     r.render = function (s, c) {
       if (s && s.isScene && c && c.isOrthographicCamera && (!scene || s === scene)) { scene = s; camera = c; }
+      for (const fn of renderFns) {
+        let done = false;
+        try { done = fn(s, c, render); } catch (e) { console.warn('[core] render', e); }
+        if (done) return;
+      }
       return orig.apply(this, arguments);
     };
   });
+
+  // ---------- BufferGeometry's prototype (one-time trap) ----------
+  let geoProto = null;
+  const geoFns = [];
+  (function trapGeometry() {
+    const KEY = 'isBufferGeometry';
+    const prev = Object.getOwnPropertyDescriptor(Object.prototype, KEY);
+    if (prev && !prev.set) return;
+    Object.defineProperty(Object.prototype, KEY, {
+      configurable: true,
+      set(v) {
+        if (prev) prev.set.call(this, v); else delete Object.prototype[KEY];   // (an older script's trap: chained)
+        delete Object.prototype[KEY];
+        if (!Object.prototype.hasOwnProperty.call(this, KEY)) Object.defineProperty(this, KEY, { value: v, writable: true, enumerable: true, configurable: true });
+        let p = Object.getPrototypeOf(this);
+        while (p && !Object.prototype.hasOwnProperty.call(p, 'translate')) p = Object.getPrototypeOf(p);
+        if (!p) { console.warn('[core] BufferGeometry.translate not found'); return; }
+        geoProto = p;
+        for (const fn of geoFns) { try { fn(p); } catch (e) { console.warn('[core] geometry', e); } }
+      },
+    });
+  })();
+  function onGeometryProto(fn) { if (typeof fn !== 'function') return; geoFns.push(fn); if (geoProto) try { fn(geoProto); } catch (e) { console.warn('[core] geometry', e); } }
 
   // ---------- three.js classes, borrowed from the scene ----------
   let K = null;
@@ -133,7 +181,7 @@
   let last = 0;
   function frame(t) {
     requestAnimationFrame(frame);
-    const dt = Math.min(0.05, last ? (t - last) / 1000 : 0); last = t;
+    const dt = Math.min(0.1, last ? (t - last) / 1000 : 0); last = t;
     for (const fn of frameFns) {
       try { fn(dt, t); } catch (e) { if (!warned.has(fn)) { warned.add(fn); console.warn('[core] frame', e); } }
     }
@@ -192,16 +240,50 @@
   }
   function onDamage(fn) { if (typeof fn === 'function') damageFns.push(fn); }
 
+  // ---------- the app's own helpers ----------
+  // The main module is imported again (the same URL → the already-loaded instance). Its export
+  // names are minified and change with every build, so the helpers are recognised by what their
+  // code looks like (checked against the builds of 24 and 25 Nov 2026):
+  //   v = placed projects → [{id, fp, gx, gy, facing}]   A = rotate a footprint (fp, facing)
+  //   a = front-door road keys (gx, gy, fp, facing)      w = floors of a project
+  //   S = cells of a footprint                           n = tiles of the welcome sign
+  let appHelpers = null;
+  async function app() {
+    if (appHelpers) return appHelpers;
+    const s = [...document.querySelectorAll('script[type="module"][src]')].find((s) => /\/index-[^/]*\.js/.test(s.src));
+    if (!s) throw new Error('main module not found');
+    const m = findHelpers(await import(s.src));
+    if (typeof m.v !== 'function' || typeof m.a !== 'function') throw new Error('app internals changed (new build?)');
+    return (appHelpers = m);
+  }
+  function findHelpers(m) {
+    const fns = Object.values(m).filter((f) => typeof f === 'function');
+    const code = (f) => { try { return Function.prototype.toString.call(f); } catch { return ''; } };
+    const find = (re) => fns.find((f) => re.test(code(f)));
+    const isSign = (a) => Array.isArray(a) && a.length >= 4 && a.length <= 64 && a.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isInteger));
+    return {
+      v: find(/\.filter\(\w+\)\.map\(\w+=>\(\{id:\w+\.id,fp:/),
+      A: find(/^function\s*\w*\(\w+,\w+\)\{let \w+=\w+\.base\?\?\w+/),
+      a: find(/^function\s*\w*\(\w+,\w+,\w+,\w+\)\{\w+=\w+\(\w+,\w+\);let \w+=\[\];for\(let\[\w+,\w+\]of /),
+      w: find(/^function\s*\w*\(\w+,\w+=\w+\)\{return \w+\(\w+\)\?Math\.min\(/),
+      S: find(/\{let (\w+)=\[\];for\(let (\w+)=0;\2<\w+\.w;\2\+\+\)for\(let (\w+)=0;\3<\w+\.d;\3\+\+\)\w+\(\w+,\2,\3\)&&\1\.push/),
+      n: Object.values(m).find(isSign),
+    };
+  }
+
   // ---------- small shared helpers ----------
   const isFacade = (m) => !!(m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade');
   // the building (group with userData.projectId) an object belongs to, or null
   function projectOf(o) { for (let p = o; p; p = p.parent) if (p.userData && p.userData.projectId !== undefined) return p; return null; }
 
   window.scCore = {
-    version: '1.0',
+    version: '1.1',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
+    get overlay() { return overlay; },
+    onRender(fn) { if (typeof fn === 'function') renderFns.push(fn); },
+    onGeometryProto, app,
     classes,
     get city() { return city; },
     get cityVersion() { return cityVersion; },
@@ -209,4 +291,8 @@
     traffic: () => trafficCars,
     out, audio, onFrame, puff, damage, onDamage, isFacade, projectOf,
   };
+  // scripts that loaded before the core and are waiting for it
+  const waiting = Array.isArray(window.scCoreWaiting) ? window.scCoreWaiting : [];
+  window.scCoreWaiting = { push: (fn) => { try { fn(window.scCore); } catch (e) { console.warn('[core] waiting', e); } } };
+  for (const fn of waiting) window.scCoreWaiting.push(fn);
 })();

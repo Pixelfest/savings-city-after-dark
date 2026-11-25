@@ -449,6 +449,7 @@
 
   // ---------- the frame loop and the damage bus (as soon as the core is there) ----------
   function step(dt) {
+    dt = Math.min(dt, 0.05);                                       // (bigger steps make chunks jump)
     stepSets(dt);
     for (const st of solids.values()) if (st.wave) stepWave(st, dt);
   }

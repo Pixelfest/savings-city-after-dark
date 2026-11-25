@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – drive a car (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Space handbrake, C camera, E to get out). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /*
- * Needs the walk-mode script (1.26 or newer): scWalk.setDriver lets this script move you and the
+ * Needs the core script (city data, sound) and the walk-mode script (1.26 or newer): scWalk.setDriver lets this script move you and the
  * camera, scWalk.onKey gives it E, C and H, and scWalk.blocked / propsNear / trafficCars /
  * parkedCars tell it what's in the way. Works with residents (running people over) and cops
  * (officers can be run over: sc:crush).
@@ -36,24 +36,10 @@
 (function () {
   'use strict';
 
-  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
-  const appSoundLevel = () => {
-    try {
-      if (localStorage.getItem('citysaver:muted') === '1') return 0;
-      const v = parseFloat(localStorage.getItem('citysaver:volume'));
-      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
-    } catch { return 1; }
-  };
-  let soundOut = null;
-  function out(ctx) {
-    if (!soundOut || soundOut.context !== ctx) {
-      soundOut = ctx.createGain();
-      soundOut.gain.value = appSoundLevel();
-      soundOut.connect(ctx.destination);
-      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
-    }
-    return soundOut;
-  }
+  // the core script, also when this script loads before it; sound through its output, which
+  // follows the app's own sound button (mute + volume)
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  const out = (ctx) => (window.scCore ? window.scCore.out(ctx) : ctx.destination);
 
   // ---- settings (tiles, seconds; 1 tile ≈ 20 m, so 1 tile/s ≈ 72 km/h) ----
   const ENTER_DISTANCE = 0.2;      // how close you must be to a car's body to get in (any side, front or back)
@@ -90,12 +76,7 @@
 
   // ---------- roads (ground height) ----------
   let segs = null;                 // per tile: road lines [ax, az, bx, bz]
-  const origJson = Response.prototype.json;
-  Response.prototype.json = async function () {
-    const d = await origJson.apply(this, arguments);
-    try { if (d && Array.isArray(d.roads) && Array.isArray(d.projects)) buildRoads(d.roads); } catch (e) { console.warn('[drive] roads', e); }
-    return d;
-  };
+  whenCore((c) => c.onCity((d) => { try { buildRoads(d.roads); } catch (e) { console.warn('[drive] roads', e); } }));
   function buildRoads(keys) {
     segs = new Map();
     for (const k of keys) {

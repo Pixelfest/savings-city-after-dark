@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – car tyres (wider, optionally round)
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  Makes car tyres stick out slightly from the car body (no more flicker) and optionally round.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -17,14 +17,17 @@
  *
  * The fix
  * -------
- * three.js creates every shape through BufferGeometry. When the first shape is made, this script
- * finds BufferGeometry's prototype (via a one-time setter trap on the "isBufferGeometry" flag that
- * three.js sets in its constructor) and wraps translate(). When a box with the exact tyre size is
+ * three.js creates every shape through BufferGeometry. When the first shape is made, the core
+ * script (savings-city-core, needed) finds BufferGeometry's prototype (scCore.onGeometryProto: a
+ * one-time setter trap on the "isBufferGeometry" flag three.js sets in its constructor) and this
+ * script wraps translate(). When a box with the exact tyre size is
  * moved to a tyre position, it is first made TYRE_OUT wider on its outer side. This happens before
  * the car models are built and cached, so driving and parked cars all get the fix.
  */
 (function () {
   'use strict';
+  // the core script, also when this script loads before it
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
 
   const TYRE_OUT = 0.005;      // how far tyres stick out from the body (car is 0.105 wide)
   const ROUND_TYRES = true;    // true = round tyres (cylinders), false = the original square blocks
@@ -83,17 +86,10 @@
   // models in the scene are checked; the dark tyre blocks of any unfixed model are replaced by
   // wider (round) tyres in place. All cars of that model share the geometry, so they all change.
   const TYRE_RGB = (() => { const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }; return [lin(0x2a), lin(0x2a), lin(0x2e)]; })();
-  let scene = null, repaired = 0;
-  const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
-  hook.addEventListener('observe', (e) => {
-    const r = e.detail;
-    if (!r || !r.isWebGLRenderer || r.__scTyres) return;
-    r.__scTyres = true;
-    const orig = r.render;
-    r.render = function (sc, cam) { if (!scene && sc && sc.isScene) scene = sc; return orig.apply(this, arguments); };
-  });
+  let repaired = 0;
   const checked = new WeakSet();
   setInterval(() => {
+    const scene = window.scCore && window.scCore.scene;
     if (!scene) return;
     scene.traverse((o) => {
       const isCar = (o.isInstancedMesh && Array.isArray(o.userData.cars)) || (o.userData && o.userData.car);
@@ -158,20 +154,7 @@
   }
 
   // ---- Route 1: fix the tyres while the car models are being built ----
-  // One-time trap: the first `this.isBufferGeometry = true` reveals BufferGeometry.prototype.
-  // If another script (walk mode) already set the same trap, chain it so both run.
-  const KEY = 'isBufferGeometry';
-  const prev = Object.getOwnPropertyDescriptor(Object.prototype, KEY);
-  if (prev && !prev.set) return;                        // (route 2 still repairs the cars)
-  Object.defineProperty(Object.prototype, KEY, {
-    configurable: true,
-    set(v) {
-      if (prev) prev.set.call(this, v);
-      delete Object.prototype[KEY];                       // remove the trap straight away
-      if (!Object.prototype.hasOwnProperty.call(this, KEY)) Object.defineProperty(this, KEY, { value: v, writable: true, enumerable: true, configurable: true });
-      let p = Object.getPrototypeOf(this);
-      while (p && !Object.prototype.hasOwnProperty.call(p, 'translate')) p = Object.getPrototypeOf(p);
-      if (p) { patch(p); console.info('[car tyres] fixing tyres while cars are built'); } else console.warn('[car tyres] BufferGeometry.translate not found');
-    },
-  });
+  // BufferGeometry's prototype from the core, as soon as three.js makes its first shape.
+  let route1 = false;
+  whenCore((c) => c.onGeometryProto((p) => { if (route1) return; route1 = true; patch(p); console.info('[car tyres] fixing tyres while cars are built'); }));
 })();

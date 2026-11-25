@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – helicopter and cranes (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.0
+// @version      1.1
 // @description  In walk mode the helicopter and the construction cranes can be destroyed: 2 shots or a rocket. The helicopter explodes and spins down, the crane topples over.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /*
- * Needs the walk-mode script (1.22 or newer): window.scWalk.addTarget makes them shootable,
+ * Needs the core script (frame loop) and the walk-mode script (1.22 or newer): window.scWalk.addTarget makes them shootable,
  * sc:blast events (car explosions, rockets – rocket launcher 1.5+ tells the height) reach them.
  *
  * - The app's helicopter is one object (userData.kind === 'helicopter') that the app moves every
@@ -294,13 +294,13 @@
   }
 
   // ---------- loop: keep the list fresh while walking ----------
-  function frame(t) {
-    requestAnimationFrame(frame);
+  function frame(dt, t) {
     const w = W();
     if (!w || !w.walking || !w.scene) return;
     register();
     if (t - scanAt > 1000) { scanAt = t; before = things.slice(); try { scan(); } catch (e) { console.warn('[heli-crane]', e); } }
   }
-  requestAnimationFrame(frame);
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  whenCore((c) => c.onFrame(frame));
   window.scHeliCrane = { things: () => things.map((t) => ({ kind: t.kind, hits: t.hits, dead: !!t.dead, box: worldBox(t.obj) })) };
 })();

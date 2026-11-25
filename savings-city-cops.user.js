@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /*
- * Needs the walk-mode script (1.20 or newer): it announces your shots (sc:shot), explosions
+ * Needs the core script (city data, sound, frame loop) and the walk-mode script (1.20 or newer): it announces your shots (sc:shot), explosions
  * (sc:blast) and walk mode starting/stopping (sc:walk), and gives this script window.scWalk
  * (your position, wall tests, bullet tracers, effects, and addTarget so the officers can be shot).
  * Collapsing buildings (rocket launcher / monster) announce sc:crush.
@@ -34,26 +34,10 @@
 (function () {
   'use strict';
 
-  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
-  // Everything this script plays goes through one gain node that copies the app's setting, also
-  // while a sound is playing (checked twice a second).
-  const appSoundLevel = () => {
-    try {
-      if (localStorage.getItem('citysaver:muted') === '1') return 0;
-      const v = parseFloat(localStorage.getItem('citysaver:volume'));
-      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
-    } catch { return 1; }
-  };
-  let soundOut = null;
-  function out(ctx) {
-    if (!soundOut || soundOut.context !== ctx) {
-      soundOut = ctx.createGain();
-      soundOut.gain.value = appSoundLevel();
-      soundOut.connect(ctx.destination);
-      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
-    }
-    return soundOut;
-  }
+  // the core script, also when this script loads before it; sound through its output, which
+  // follows the app's own sound button (mute + volume)
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  const out = (ctx) => (window.scCore ? window.scCore.out(ctx) : ctx.destination);
 
 
   // ---- settings (tiles; 1 tile ≈ 20 m) ----
@@ -172,14 +156,9 @@
   const busyUnits = () => cars.filter((c) => !c.done && (c.driving || c.cops.some((p) => p.state !== 'down' && p.state !== 'gone') || !c.cops.length)).length;
 
   // ---------- police cars coming from out of sight ----------
-  // The road network from the city data the app reads (every Response.json() is watched).
+  // The road network from the city data the app reads (from the core).
   let roads = null;
-  const origJson = Response.prototype.json;
-  Response.prototype.json = async function () {
-    const d = await origJson.apply(this, arguments);
-    try { if (d && Array.isArray(d.roads) && Array.isArray(d.projects)) roads = buildRoads(d.roads); } catch (e) { console.warn('[cops] roads', e); }
-    return d;
-  };
+  whenCore((c) => c.onCity((d) => { try { roads = buildRoads(d.roads); } catch (e) { console.warn('[cops] roads', e); } }));
   function buildRoads(keys) {
     const adj = new Map(), add = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); };
     for (const k of keys) {
@@ -763,10 +742,7 @@
   });
 
   // ---------- loop ----------
-  let last = 0;
-  function frame(t) {
-    requestAnimationFrame(frame);
-    const dt = Math.min(0.1, last ? (t - last) / 1000 : 0); last = t;
+  function frame(dt) {
     const w = W();
     if (!w || !w.walking || dead || !geo) return;
     const pl = w.player;
@@ -775,7 +751,7 @@
     try { step(dt, performance.now()); } catch (e) { console.warn('[cops]', e); }
     try { stepBurgers(dt); } catch (e) { console.warn('[cops] burgers', e); }
   }
-  requestAnimationFrame(frame);
+  whenCore((c) => c.onFrame(frame));
   window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head })),
     cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar(),
     hurt: () => hurt(), burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };

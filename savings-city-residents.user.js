@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.14
+// @version      1.15
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -11,10 +11,9 @@
 /*
  * How it works
  * ------------
- * - The app's renderer is caught through three.js' devtools hook (window.__THREE_DEVTOOLS__),
- *   like the walk-mode script; the scene comes from the first render.
- * - The city data (roads, buildings) is read from the response the app itself reads
- *   (Response.json is watched), so it also follows the auto-layout script.
+ * - Needs the core script (savings-city-core): the scene, the city data (roads, buildings – what
+ *   the app itself reads, so it also follows the auto-layout script), traffic, the app's helpers,
+ *   sound and the frame loop come from there.
  * - Roads lie on the lines between tiles: asphalt ±0.16 from the line, sidewalk from 0.16 to
  *   0.25. Residents walk along the road lines, SIDEWALK_OFFSET to one side (p.side), on either
  *   side of the street in either direction. Their path is the road network shifted onto the
@@ -37,26 +36,10 @@
 (function () {
   'use strict';
 
-  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
-  // Everything this script plays goes through one gain node that copies the app's setting, also
-  // while a sound is playing (checked twice a second).
-  const appSoundLevel = () => {
-    try {
-      if (localStorage.getItem('citysaver:muted') === '1') return 0;
-      const v = parseFloat(localStorage.getItem('citysaver:volume'));
-      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
-    } catch { return 1; }
-  };
-  let soundOut = null;
-  function out(ctx) {
-    if (!soundOut || soundOut.context !== ctx) {
-      soundOut = ctx.createGain();
-      soundOut.gain.value = appSoundLevel();
-      soundOut.connect(ctx.destination);
-      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
-    }
-    return soundOut;
-  }
+  // the core script, also when this script loads before it; sound through its output, which
+  // follows the app's own sound button (mute + volume)
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  const out = (ctx) => (window.scCore ? window.scCore.out(ctx) : ctx.destination);
 
 
   // ---- settings -------------------------------------------------------------------------
@@ -119,57 +102,10 @@
   const CRUSH_MARGIN = 0.3;       // a building coming down kills people outside this close to its walls
   // ---------------------------------------------------------------------------------------
 
-  // ---------- catch the renderer + scene ----------
-  let scene = null, built = false;
-  const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
-  hook.addEventListener('observe', (e) => {
-    const r = e.detail;
-    if (!r || !r.isWebGLRenderer || r.__scResidents) return;
-    r.__scResidents = true;
-    const orig = r.render;
-    r.render = function (s, c) {
-      if (!scene && s && s.isScene && c && c.isOrthographicCamera) scene = s;
-      return orig.apply(this, arguments);
-    };
-  });
-
-  // ---------- city data (what the app reads) ----------
-  let city = null, cityVersion = 0;
-  const origJson = Response.prototype.json;
-  Response.prototype.json = async function () {
-    const d = await origJson.call(this);
-    try { if (d && Array.isArray(d.projects) && Array.isArray(d.roads)) { city = d; cityVersion++; app().catch(() => {}); } } catch {}
-    return d;
-  };
-
-  let appModule = null;
-  async function app() {
-    if (appModule) return appModule;
-    const s = [...document.querySelectorAll('script[type="module"][src]')].find((s) => /\/index-[^/]*\.js/.test(s.src));
-    if (!s) throw new Error('main module not found');
-    const m = findHelpers(await import(s.src));
-    if (typeof m.v !== 'function' || typeof m.a !== 'function') throw new Error('app internals changed');
-    return (appModule = m);
-  }
-  // The app's minified export names change with every build, so its helpers are recognised by
-  // what their code looks like (checked against the builds of 24 and 25 Nov 2026):
-  //   v = placed projects → [{id, fp, gx, gy, facing}]   A = rotate a footprint (fp, facing)
-  //   a = front-door road keys (gx, gy, fp, facing)      w = floors of a project
-  //   S = cells of a footprint                           n = tiles of the welcome sign
-  function findHelpers(m) {
-    const fns = Object.values(m).filter((f) => typeof f === 'function');
-    const code = (f) => { try { return Function.prototype.toString.call(f); } catch { return ''; } };
-    const find = (re) => fns.find((f) => re.test(code(f)));
-    const isSign = (a) => Array.isArray(a) && a.length >= 4 && a.length <= 64 && a.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isInteger));
-    return {
-      v: find(/\.filter\(\w+\)\.map\(\w+=>\(\{id:\w+\.id,fp:/),
-      A: find(/^function\s*\w*\(\w+,\w+\)\{let \w+=\w+\.base\?\?\w+/),
-      a: find(/^function\s*\w*\(\w+,\w+,\w+,\w+\)\{\w+=\w+\(\w+,\w+\);let \w+=\[\];for\(let\[\w+,\w+\]of /),
-      w: find(/^function\s*\w*\(\w+,\w+=\w+\)\{return \w+\(\w+\)\?Math\.min\(/),
-      S: find(/\{let (\w+)=\[\];for\(let (\w+)=0;\2<\w+\.w;\2\+\+\)for\(let (\w+)=0;\3<\w+\.d;\3\+\+\)\w+\(\w+,\2,\3\)&&\1\.push/),
-      n: Object.values(m).find(isSign),
-    };
-  }
+  // ---------- the scene, city data, traffic and the app's helpers: from the core ----------
+  let scene = null, built = false, trafficCars = null;
+  let city = null, cityVersion = 0, appModule = null;
+  whenCore((c) => c.onCity((d) => { city = d; cityVersion++; c.app().then((m) => { appModule = m; }).catch(() => {}); }));
 
   // ---------- road network ----------
   const tk = (x, y) => x + ',' + y;
@@ -559,18 +495,8 @@
   }
 
   // ---------- traffic: cars can run people over ----------
-  // The app moves its cars every frame with traffic.cars.forEach(...): that call reveals the list
-  // of car objects (x, z, heading, speed …). Same trick as the walk-mode script, done here too so
-  // this works without it.
-  let trafficCars = null;
-  const origForEach = Array.prototype.forEach;
-  Array.prototype.forEach = function () {
-    if (this !== trafficCars && this.length) {
-      const c = this[0];
-      if (c && typeof c === 'object' && typeof c.base === 'number' && typeof c.heading === 'number' && 'from' in c && 'to' in c) trafficCars = this;
-    }
-    return origForEach.apply(this, arguments);
-  };
+  // The app's traffic list (car objects with x, z, heading, speed …) comes from the core
+  // (trafficCars, refreshed every frame).
 
   // Moving cars, grouped per tile so each person only checks the cars close by.
   function movingCars() {
@@ -927,9 +853,10 @@
   }
 
   // ---------- loop ----------
-  let seenVersion = 0, last = 0;
-  function frame(t) {
-    requestAnimationFrame(frame);
+  let seenVersion = 0;
+  function frame(dt, t) {
+    const core = window.scCore;
+    scene = scene || core.scene; trafficCars = core.traffic();
     if (!scene || !city) return;
     if (!built) { built = buildMeshes(); if (!built) return; }
     if (!group.parent) scene.add(group);                       // in case the app rebuilt its scene
@@ -939,8 +866,6 @@
       if (appModule) net.triedDoors = true;
       spawn();
     }
-    const dt = Math.min(0.1, last ? (t - last) / 1000 : 0);
-    last = t;
     const hidden = new M().makeScale(0, 0, 0);
     if (!tip) {
       tip = new M(); bodyM = new M(); headM = new M();
@@ -982,7 +907,7 @@
     if (BLOOD) stepBlood(dt, n, m);
   }
   let tip = null, bodyM = null, headM = null, childBody = null, childHead = null;
-  requestAnimationFrame(frame);
+  whenCore((c) => c.onFrame(frame));
 
   // ---------- deaths ----------
   // Every death is announced (the bodycount script counts them): sc:kill { x, z, cause }.
