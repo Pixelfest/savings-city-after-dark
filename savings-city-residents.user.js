@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.13
-// @description  Simple, static little figures that slowly walk the sidewalks and now and then go into or come out of buildings.
+// @version      1.14
+// @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -16,9 +16,17 @@
  * - The city data (roads, buildings) is read from the response the app itself reads
  *   (Response.json is watched), so it also follows the auto-layout script.
  * - Roads lie on the lines between tiles: asphalt ±0.16 from the line, sidewalk from 0.16 to
- *   0.25. Residents walk along the road lines with SIDEWALK_OFFSET to their right ("keep right"),
- *   so they're on the sidewalk and people going the other way pass on the other side.
- *   At every junction they pick a random way on (only turning back at a dead end).
+ *   0.25. Residents walk along the road lines, SIDEWALK_OFFSET to one side (p.side), on either
+ *   side of the street in either direction. Their path is the road network shifted onto the
+ *   sidewalk: round a corner they walk to the corner of the sidewalk and on from there, so the only
+ *   time they're on the asphalt is a real crossing, straight across, all the way.
+ * - At every junction they pick a way on (only turning back at a dead end) and which side of that
+ *   street to take: normally the one that needs the fewest crossings, now and then (CROSS_CHANCE)
+ *   the other one: they cross. Decided once, in advance, so nobody turns back halfway.
+ * - Someone in front of you on the sidewalk: oncoming people both step to their right, someone
+ *   slower (or lying there) is passed on the free side.
+ * - Children: smaller bodies with the same head; each walks right next to a parent and follows
+ *   them everywhere (in and out of buildings too); if the parent dies, the child runs off.
  * - Front doors come from the app's own code (exact door position per building). Walking past
  *   a door on that side of the street, a resident sometimes goes in, stays inside for a while,
  *   and later comes out of some (other) door.
@@ -57,6 +65,13 @@
   const SPEED = 0.15;             // tiles per second (cars drive about 1–2)
   const SPEED_VARIATION = 0.35;   // ±35 %
   const SIDEWALK_OFFSET = 0.205;  // distance from the road line (middle of the sidewalk)
+  const CROSS_CHANCE = 0.2;       // at a corner: chance to take the far side of the next street (cross over)
+  const PASS_SHIFT = 0.022;       // how far people step aside to pass each other (the sidewalk is 0.09 wide)
+  const PASS_LOOKAHEAD = 0.12;    // they start stepping aside when someone is this close in front
+  const CHILD_SHARE = 0.18;       // share of adults walking with a child
+  const CHILD_HEIGHT = 0.62;      // a child's body is this much of an adult's (the head stays the same size)
+  const CHILD_WIDTH = 0.78;
+  const CHILD_GAP = 0.03;         // how far beside the parent (on the building side)
   const SIDEWALK_HEIGHT = 0.036;  // the app's sidewalks are blocks this high: residents stand on top
   const ASPHALT = 0.16;           // the asphalt reaches this far from the road line
   const LOOK_BEFORE_CROSSING = true;   // calm residents wait at the kerb when a car is coming
@@ -81,7 +96,7 @@
   ];
   const BALD = 0.07;              // share of residents without hair
   const FALL_SECONDS = 0.45;      // how long falling over takes when shot (walk mode)
-  const PANIC_SPEED = 5;          // running away: this many times faster than walking
+  const PANIC_SPEED = 2.8;        // running away: this many times faster than walking
   const PANIC_ENTER_CHANCE = 0.7; // while running away, chance to dive into a building passing its door
   const CAR_COLLISIONS = true;    // a moving car that touches a resident knocks them over
   const BLOOD = true;             // blood spatters when someone is knocked down, and a pool grows under them
@@ -207,29 +222,45 @@
   const rnd = (a, b) => a + Math.random() * (b - a);
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-  function placeOnEdge(p, a, b, s) {
+  // p.side = 1: to the right of the road line (seen walking a → b), −1: to the left of it
+  function placeOnEdge(p, a, b, s, side) {
     p.a = a; p.b = b; p.s = s;
     const [ax, ay] = net.xy.get(a), [bx, by] = net.xy.get(b);
     p.dir = [bx - ax, by - ay];
-    p.side = p.side || 1;                                        // 1 = keep right, −1 = keep left (when fleeing back)
-    p.prevOff = sideOffset(p);
+    p.side = side || p.side || 1;
+    p.planFor = null;
   }
-  // which side of the road line someone walks on, as a direction
+  // which side of the road line someone walks on, as a direction (pointing away from the road)
   const sideOffset = (p) => { const r = rightOf(p.dir[0], p.dir[1]); return [r[0] * p.side, r[1] * p.side]; };
+  // the point on the sidewalk line of edge (a, dir), at s along it
+  function edgePoint(a, dir, side, s) {
+    const [ax, ay] = net.xy.get(a), r = rightOf(dir[0], dir[1]);
+    return [ax + dir[0] * s + r[0] * side * SIDEWALK_OFFSET, ay + dir[1] * s + r[1] * side * SIDEWALK_OFFSET];
+  }
 
-  // Run away from (x, z): turn round if heading towards it; faster and away at junctions for a while.
+  // Run away from (x, z): turn round if heading towards it (unless halfway across the road: then
+  // on to the other side first); faster and away at junctions for a while.
   function panic(p, x, z, seconds) {
     if (!(p.panic > 0) && p.state !== 'inside' && Math.random() < SCREAM_CHANCE) scream(p, rnd(0, 0.5));
     p.panic = seconds * (0.8 + Math.random() * 0.4);
     p.fleeFrom = [x, z];
-    if (p.state !== 'walk') return;
-    if (p.dir[0] * (x - p.x) + p.dir[1] * (z - p.z) > 0) {
+    if (p.state !== 'walk' || p.parent) return;
+    p.planFor = null;                                            // think again about where to go
+    if (p.dir[0] * (x - p.x) + p.dir[1] * (z - p.z) > 0 && !onAsphalt(...edgePoint(p.a, p.dir, p.side, p.s))) {
       // turn round on the spot: same sidewalk, other direction
-      const off = sideOffset(p);
-      p.side = -p.side;
-      placeOnEdge(p, p.b, p.a, 1 - p.s);
-      p.prevOff = off;
+      placeOnEdge(p, p.b, p.a, 1 - p.s, -p.side);
     }
+  }
+
+  function newPerson() {
+    return { speed: SPEED * (1 + rnd(-SPEED_VARIATION, SPEED_VARIATION)), state: 'walk', x: 0, z: 0, h: 0, lat: 0, ox: 0, oz: 0 };
+  }
+  // a child that walks next to adult p (and goes where p goes)
+  function makeChild(p) {
+    const c = { speed: p.speed, state: p.state, x: p.x, z: p.z, h: p.h, parent: p, k: CHILD_HEIGHT, kw: CHILD_WIDTH, cside: 1, fresh: true,
+      insideAt: p.insideAt, voice: rnd(1150, 1450) };
+    p.child = c;
+    return c;
   }
 
   function spawn() {
@@ -238,17 +269,18 @@
     loose.length = 0; for (const set of looseSets) { set.list.length = 0; set.ring = 0; }
     if (!net.edges.length) return;
     const count = Math.min(MAX_PEOPLE, Math.round(net.edges.length * PER_ROAD));
-    for (let i = 0; i < count; i++) {
-      const p = { speed: SPEED * (1 + rnd(-SPEED_VARIATION, SPEED_VARIATION)), state: 'walk', x: 0, z: 0, h: 0 };
+    while (people.length < count) {
+      const p = newPerson();
       const [a, b] = pick(net.edges);
-      const s0 = rnd(0.25, 0.75);                                // start on the sidewalk, not in a junction
-      if (Math.random() < 0.5) placeOnEdge(p, a, b, s0); else placeOnEdge(p, b, a, s0);
+      const s0 = rnd(0.25, 0.75), side = Math.random() < 0.5 ? 1 : -1;   // start on the sidewalk, not in a junction
+      if (Math.random() < 0.5) placeOnEdge(p, a, b, s0, side); else placeOnEdge(p, b, a, s0, side);
       if (net.doorList.length && Math.random() < START_INSIDE) {
         p.state = 'inside'; p.timer = rnd(0, INSIDE_SECONDS[1]);
         const k = pick(net.doorList), n = net.doors.get(k), mid = midOf(k);
         p.insideAt = [mid[0] - n[0] * 0.35, mid[1] - n[1] * 0.35];
       }
       people.push(p);
+      if (people.length < count && Math.random() < CHILD_SHARE) people.push(makeChild(p));
     }
   }
 
@@ -292,6 +324,7 @@
   function step(p, dt) {
     if (p.state === 'gone') return;
     if (p.state === 'down') { p.fall = Math.min(1, p.fall + dt / FALL_SECONDS); return; }   // lies still
+    if (p.parent) { follow(p, dt); return; }
     if (p.panic > 0) p.panic -= dt;                              // calms down, indoors too
     if (p.state === 'inside') {
       p.timer -= dt;
@@ -303,43 +336,130 @@
       const f = Math.min(1, p.t / Math.max(0.01, p.dur));
       p.x = p.from[0] + (p.to[0] - p.from[0]) * f;
       p.z = p.from[1] + (p.to[1] - p.from[1]) * f;
+      p.ox = p.oz = 0;
       if (f >= 1) {
         if (p.state === 'enter') { p.state = 'inside'; p.timer = rnd(...INSIDE_SECONDS); }
         else { p.state = 'walk'; placeOnEdge(p, p.next[0], p.next[1], p.nextS ?? 0.5); p.nextS = undefined; }
       }
       return;
     }
-    // walking along a road line
+    // walking along a sidewalk
     const before = p.s;
     const panicking = p.panic > 0;
     if (panicking && Math.random() < SCREAM_REPEAT * dt) scream(p, 0);
     // about to step onto the road? look left and right first (people in a panic don't)
-    if (!panicking && LOOK_BEFORE_CROSSING && trafficCars && mustWait(p, p.speed * dt)) { p.waiting = (p.waiting || 0) + dt; place(p); return; }
+    if (!panicking && LOOK_BEFORE_CROSSING && trafficCars && mustWait(p, p.speed * dt)) { p.waiting = (p.waiting || 0) + dt; place(p, dt); return; }
     p.waiting = 0;
+    if (p.queue && !panicking) { place(p, dt); return; }          // someone right in front: wait a moment
     p.s += p.speed * (panicking ? PANIC_SPEED : 1) * dt;
     // passing the middle of a door on our side: maybe go in
     if (before < 0.5 && p.s >= 0.5 && net.doorList.length) {
       const k = edgeKeyOf(p.a, p.b), n = net.doors.get(k);
       const r = sideOffset(p);   // the side of the street we're on; panicking people like to hide indoors
-      if (n && r[0] * -n[0] + r[1] * -n[1] > 0 && Math.random() < (panicking ? PANIC_ENTER_CHANCE : ENTER_CHANCE)) { place(p); startEnter(p, k); return; }
+      if (n && r[0] * -n[0] + r[1] * -n[1] > 0 && Math.random() < (panicking ? PANIC_ENTER_CHANCE : ENTER_CHANCE)) { place(p, dt); startEnter(p, k); return; }
     }
-    while (p.s >= 1) {
-      const options = (net.adj.get(p.b) || []).filter((c) => c !== p.a);
-      let nextNode;
-      if (!options.length) nextNode = p.a;                       // dead end: turn around
-      else if (!panicking) nextNode = plannedNext(p);            // the way they already looked at
-      else if (panicking) {
-        // fleeing: the way that leads furthest from the danger (now and then the second best)
-        const far = (n) => { const [x, y] = net.xy.get(n); return Math.hypot(x - p.fleeFrom[0], y - p.fleeFrom[1]); };
-        const sorted = options.slice().sort((u, v) => far(v) - far(u));
-        nextNode = sorted.length > 1 && Math.random() < 0.2 ? sorted[1] : sorted[0];
-      } else nextNode = pick(options);
-      const off = sideOffset(p);
-      if (!panicking) p.side = 1;                                // calmed down: back to keeping right
-      placeOnEdge(p, p.b, nextNode, p.s - 1);
-      p.prevOff = off;                                           // blend the side-offset round the corner
+    plan(p);
+    while (p.s >= p.s1) {                                        // round the corner, onto the next street
+      const over = p.s - p.s1;
+      placeOnEdge(p, p.b, p.plan, p.planS0 + over, p.planSide);
+      plan(p);
     }
-    place(p);
+    place(p, dt);
+  }
+
+  // A child next to its parent, on the building side while walking. Parent dead: the child runs.
+  function follow(c, dt) {
+    const p = c.parent;
+    if (p.state === 'down' || p.state === 'gone') { orphan(c); return; }
+    c.state = p.state; c.panic = p.panic; c.fleeFrom = p.fleeFrom; c.insideAt = p.insideAt;
+    if (p.state === 'inside') { c.fresh = true; return; }
+    const hx = Math.sin(p.h), hz = Math.cos(p.h), r = rightOf(hx, hz);
+    if (p.state === 'walk') { const o = sideOffset(p); c.cside = r[0] * o[0] + r[1] * o[1] >= 0 ? 1 : -1; }
+    const tx = p.x + r[0] * c.cside * CHILD_GAP - hx * 0.006, tz = p.z + r[1] * c.cside * CHILD_GAP - hz * 0.006;
+    if (c.fresh) { c.x = tx; c.z = tz; c.fresh = false; }
+    else { const k = Math.min(1, dt * 10); c.x += (tx - c.x) * k; c.z += (tz - c.z) * k; }
+    c.h = p.h;
+  }
+  function orphan(c) {
+    const p = c.parent;
+    c.parent = null; if (p.child === c) p.child = null;
+    if (c.state === 'inside') { c.timer = rnd(...INSIDE_SECONDS); return; }
+    const e = nearestEdge(c.x, c.z); if (!e) { c.state = 'gone'; return; }
+    const [ax, ay] = net.xy.get(e.a), [bx, by] = net.xy.get(e.b);
+    const away = Math.hypot(bx - p.x, by - p.z) > Math.hypot(ax - p.x, ay - p.z);
+    if (away) placeOnEdge(c, e.a, e.b, e.s); else placeOnEdge(c, e.b, e.a, 1 - e.s);
+    const r = rightOf(c.dir[0], c.dir[1]), lx = ax + (bx - ax) * e.s, lz = ay + (by - ay) * e.s;
+    c.side = r[0] * (c.x - lx) + r[1] * (c.z - lz) >= 0 ? 1 : -1;
+    const [px, pz] = edgePoint(c.a, c.dir, c.side, c.s);
+    c.ox = c.x - px; c.oz = c.z - pz; c.lat = 0;                // eases from where they stand onto the sidewalk
+    c.state = 'walk';
+    panic(c, p.x, p.z, 15);
+  }
+  function nearestEdge(x, z) {
+    let best = null;
+    for (const [a, b] of net.edges) {
+      const [ax, ay] = net.xy.get(a), [bx, by] = net.xy.get(b), ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey || 1;
+      const s0 = Math.max(0, Math.min(1, ((x - ax) * ex + (z - ay) * ey) / l2)), d = Math.hypot(ax + ex * s0 - x, ay + ey * s0 - z);
+      if (!best || d < best.d) best = { a, b, s: s0, d };
+    }
+    return best;
+  }
+
+  // ---------- passing each other ----------
+  // Everyone outside, per cell of 0.25 tiles, rebuilt every frame.
+  const PASS_CELL = 0.25;
+  function crowdCells() {
+    const cells = new Map();
+    for (let i = 0; i < people.length && i < MAX_PEOPLE; i++) {
+      const p = people[i];
+      if (p.state === 'inside' || p.state === 'gone') continue;
+      const k = Math.floor(p.x / PASS_CELL) + ',' + Math.floor(p.z / PASS_CELL);
+      (cells.get(k) || cells.set(k, []).get(k)).push(p);
+    }
+    return cells;
+  }
+  const hasChild = (p) => p.child && p.child.state !== 'down' && p.child.state !== 'gone' && p.child.state !== 'inside';
+  // Someone close in front (or right beside): step aside, away from them (straight towards each
+  // other: both to their own right). Next to a parent with a child there's less room, so step
+  // aside further. Right behind someone who stands still (waiting at the kerb) or walks the same
+  // way: wait behind them instead of walking into them (p.queue).
+  function steer(p, cells, dt) {
+    p.queue = false;
+    if (p.state !== 'walk' || p.parent) return;
+    const f = p.dir, r = rightOf(f[0], f[1]);
+    const cx = Math.floor(p.x / PASS_CELL), cz = Math.floor(p.z / PASS_CELL);
+    const kid = hasChild(p) ? p.child : null;
+    // a parent looks out for the child beside them too
+    const kidLat = kid ? (kid.x - p.x) * r[0] + (kid.z - p.z) * r[1] : 0;
+    let block = null;
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      const list = cells.get((cx + i) + ',' + (cz + j)); if (!list) continue;
+      for (const q of list) {
+        if (q === p || q === kid) continue;
+        const dx = q.x - p.x, dz = q.z - p.z, along = dx * f[0] + dz * f[1];
+        if (along <= -0.025 || along > PASS_LOOKAHEAD) continue;
+        const lat = dx * r[0] + dz * r[1];
+        const gap = kid ? Math.min(Math.abs(lat), Math.abs(lat - kidLat)) : Math.abs(lat);
+        if (gap > 0.045) continue;
+        if (!block || along < block.along) block = { q, along, gap };
+      }
+    }
+    if (block && block.along > 0.004 && block.along < 0.04 && block.gap < 0.028) {
+      const q = block.q.parent || block.q;
+      const same = q.state === 'walk' && q.dir && q.dir[0] * f[0] + q.dir[1] * f[1] > 0.5;
+      if (same && (q.waiting > 0 || q.queue || q.speed <= p.speed)) p.queue = true;
+    }
+    if (block) {
+      // the whole group (parent + child) counts as one obstacle
+      let q = block.q, gx = q.x, gz = q.z, wide = !!kid;
+      if (q.parent) { gx = (q.x + q.parent.x) / 2; gz = (q.z + q.parent.z) / 2; wide = true; q = q.parent; }
+      else if (hasChild(q)) { gx = (q.x + q.child.x) / 2; gz = (q.z + q.child.z) / 2; wide = true; }
+      const lat = (gx - p.x) * r[0] + (gz - p.z) * r[1] - kidLat / 2;   // seen from the middle of our own pair
+      const oncoming = q.state === 'walk' && q.dir && q.dir[0] * f[0] + q.dir[1] * f[1] < -0.5;
+      const dirn = Math.abs(lat) > 0.004 ? -Math.sign(lat) : oncoming ? 1 : (p.lat >= 0 ? 1 : -1);
+      p.lat = dirn * PASS_SHIFT * (wide ? 1.8 : 1);
+      p.latHold = 0.6;
+    } else if ((p.latHold = (p.latHold || 0) - dt) <= 0) p.lat = 0;
   }
 
   // ---------- looking before crossing ----------
@@ -353,35 +473,54 @@
     return false;
   }
 
-  // The next road at the coming junction, chosen in advance so we can look where we'll walk.
-  function plannedNext(p) {
-    const key = p.a + '>' + p.b;
-    if (p.planFor !== key) {
-      const options = (net.adj.get(p.b) || []).filter((c) => c !== p.a);
-      p.plan = options.length ? pick(options) : p.a;
-      p.planFor = key;
+  // The next street at the coming junction and which side of it to take, decided in advance (so
+  // we can look where we'll walk, and nobody changes their mind halfway across). Also where the
+  // two sidewalk lines meet: this edge ends at s1, the next one starts at planS0.
+  function plan(p) {
+    const key = p.a + '>' + p.b + '/' + p.side;
+    if (p.planFor === key) return;
+    p.planFor = key;
+    const options = (net.adj.get(p.b) || []).filter((c) => c !== p.a);
+    let next;
+    if (!options.length) next = p.a;                             // dead end: turn around
+    else if (p.panic > 0 && p.fleeFrom) {
+      // fleeing: the way that leads furthest from the danger (now and then the second best)
+      const far = (n) => { const [x, y] = net.xy.get(n); return Math.hypot(x - p.fleeFrom[0], y - p.fleeFrom[1]); };
+      const sorted = options.slice().sort((u, v) => far(v) - far(u));
+      next = sorted.length > 1 && Math.random() < 0.2 ? sorted[1] : sorted[0];
+    } else next = pick(options);
+    const [bx, by] = net.xy.get(p.b), [nx, ny] = net.xy.get(next), dN = [nx - bx, ny - by];
+    const o = sideOffset(p), rN = rightOf(dN[0], dN[1]), dot = dN[0] * p.dir[0] + dN[1] * p.dir[1];
+    let side;
+    if (dot > 0.5) side = p.side;                                // straight on: same side of the street
+    else if (dot < -0.5) side = -p.side;                         // back the way we came: same sidewalk
+    else {
+      // round a corner: the side of the new street towards where we came from needs the fewest crossings
+      side = rN[0] * -p.dir[0] + rN[1] * -p.dir[1] > 0 ? 1 : -1;
+      if (!(p.panic > 0) && Math.random() < CROSS_CHANCE) side = -side;   // …or cross over to the other side
     }
-    return p.plan;
+    if (Math.abs(dot) > 0.5) { p.s1 = 1; p.planS0 = 0; }
+    else {
+      const oN = [rN[0] * side, rN[1] * side];
+      p.s1 = 1 + SIDEWALK_OFFSET * (oN[0] * p.dir[0] + oN[1] * p.dir[1]);
+      p.planS0 = SIDEWALK_OFFSET * (o[0] * dN[0] + o[1] * dN[1]);
+    }
+    p.plan = next; p.planSide = side;
   }
 
-  // Where this person will be after walking `dist` further (same rules as place()).
+  // Where this person will be after walking `dist` further (on their sidewalk line, without stepping aside).
   function positionAhead(p, dist) {
-    let a = p.a, dir = p.dir, s = p.s + dist, prev = p.prevOff, side = p.side;
-    if (s >= 1) {
-      const nxt = plannedNext(p), r = rightOf(dir[0], dir[1]);
-      prev = [r[0] * side, r[1] * side]; side = 1;
-      const [bx, by] = net.xy.get(p.b), [nx, ny] = net.xy.get(nxt);
-      a = p.b; dir = [nx - bx, ny - by]; s = Math.min(s - 1, 0.999);
-    }
-    const [ax, ay] = net.xy.get(a), r = rightOf(dir[0], dir[1]);
-    const w = Math.min(1, s / 0.3), ox = prev[0] + (r[0] * side - prev[0]) * w, oz = prev[1] + (r[1] * side - prev[1]) * w, ol = Math.hypot(ox, oz) || 1;
-    return [ax + dir[0] * s + (ox / ol) * SIDEWALK_OFFSET, ay + dir[1] * s + (oz / ol) * SIDEWALK_OFFSET];
+    plan(p);
+    const s = p.s + dist;
+    if (s <= p.s1) return edgePoint(p.a, p.dir, p.side, s);
+    const [bx, by] = net.xy.get(p.b), [nx, ny] = net.xy.get(p.plan);
+    return edgePoint(p.b, [nx - bx, ny - by], p.planSide, Math.min(p.planS0 + s - p.s1, 0.999));
   }
 
   // Standing on the sidewalk with the next step on the asphalt: wait if a moving car would come
   // near any point of the crossing while we're there (with CROSSING_MARGIN to spare).
   function mustWait(p, stepLen) {
-    if (onAsphalt(p.x, p.z)) return false;                     // already crossing: keep going
+    if (onAsphalt(...positionAhead(p, 0))) return false;        // already crossing: keep going
     const first = positionAhead(p, Math.max(stepLen, 0.01) + 0.01);
     if (!onAsphalt(first[0], first[1])) return false;          // not about to cross
     const path = [];
@@ -405,14 +544,17 @@
     return false;
   }
 
-  function place(p) {
-    const [ax, ay] = net.xy.get(p.a);
-    const r = sideOffset(p);
-    const w = Math.min(1, p.s / 0.3);                            // smooth shift to the new side after a turn
-    const ox = p.prevOff[0] + (r[0] - p.prevOff[0]) * w, oz = p.prevOff[1] + (r[1] - p.prevOff[1]) * w;
-    const ol = Math.hypot(ox, oz) || 1;
-    p.x = ax + p.dir[0] * p.s + (ox / ol) * SIDEWALK_OFFSET;
-    p.z = ay + p.dir[1] * p.s + (oz / ol) * SIDEWALK_OFFSET;
+  function place(p, dt = 0) {
+    const [x, z] = edgePoint(p.a, p.dir, p.side, p.s);
+    // stepping aside, measured away from the road (+) or towards it (−); with a child on the
+    // building side the parent keeps a bit closer to the road. Eased in world space, so it doesn't
+    // jump round corners.
+    const child = hasChild(p);
+    const u = Math.max(-0.04, Math.min(child ? 0.008 : 0.03, (p.lat || 0) * p.side + (child ? -0.014 : 0)));
+    const o = sideOffset(p), k = Math.min(1, dt * 6);
+    p.ox = (p.ox || 0) + (o[0] * u - (p.ox || 0)) * k;
+    p.oz = (p.oz || 0) + (o[1] * u - (p.oz || 0)) * k;
+    p.x = x + p.ox; p.z = z + p.oz;
     p.h = Math.atan2(p.dir[0], p.dir[1]);
   }
 
@@ -544,7 +686,7 @@
     const p = people[i];
     if (!p || p.state === 'down' || p.state === 'gone' || !V || !looseHeads) return false;
     const l = Math.hypot(d.x, d.z) || 1, dx = d.x / l, dz = d.z / l;
-    const neckY = SIDEWALK_HEIGHT + (HEAD_Y + HEAD / 2) * SCALE;
+    const neckY = SIDEWALK_HEIGHT + (HEAD_Y * (p.k || 1) + HEAD / 2) * SCALE;
     const h = { x: p.x, y: neckY, z: p.z, vx: dx * HEAD_SPEED * rnd(0.6, 1.2) + rnd(-0.2, 0.2), vy: HEAD_SPEED * rnd(0.4, 0.9) + Math.max(0, d.y || 0),
       vz: dz * HEAD_SPEED * rnd(0.6, 1.2) + rnd(-0.2, 0.2), rx: 0, ry: p.h, rz: 0, wx: rnd(-25, 25), wy: rnd(-10, 10), wz: rnd(-25, 25),
       rest: false, trail: 0.8, person: i, bald: bald[i] };
@@ -563,7 +705,7 @@
   // heartbeat squirts from the neck of a body, along the body's axis (m = the body's matrix)
   function squirt(p, m, dt, t) {
     p.squirt -= dt;
-    const e = m.elements, k = HEAD_Y * SCALE;
+    const e = m.elements, k = HEAD_Y * SCALE * (p.k || 1);
     const nx = e[4] * k + e[12], ny = e[5] * k + e[13], nz = e[6] * k + e[14];
     const left = p.squirt / NECK_SQUIRT_SECONDS, beat = Math.max(0, Math.sin(t * 0.0001 * 2 * Math.PI * 25 + (p.x * 7)));   // ~2.5 beats per second
     const rate = 150 * left * (0.15 + beat * beat);
@@ -642,7 +784,7 @@
     torsos.getColorAt(i, c1); addLoose(looseSets[2], kick(base + (LEG + TORSO / 2) * SCALE), c1.clone());
     if (!p.headless) {
       heads.getColorAt(i, c1); hairs.getColorAt(i, c2);
-      const h = kick(base + (HEAD_Y + HEAD / 2) * SCALE); h.bald = bald[i];
+      const h = kick(base + (HEAD_Y * (p.k || 1) + HEAD / 2) * SCALE); h.bald = bald[i];
       addLoose(looseSets[0], h, c1.clone(), c2.clone());
     }
     p.state = 'gone'; p.squirt = 0;
@@ -800,12 +942,18 @@
     const dt = Math.min(0.1, last ? (t - last) / 1000 : 0);
     last = t;
     const hidden = new M().makeScale(0, 0, 0);
-    if (!tip) tip = new M();
+    if (!tip) {
+      tip = new M(); bodyM = new M(); headM = new M();
+      childBody = new M().makeScale(CHILD_WIDTH, CHILD_HEIGHT, CHILD_WIDTH);
+      childHead = new M().makeTranslation(0, -(1 - CHILD_HEIGHT) * HEAD_Y * SCALE, 0);
+    }
     const m = new M();
     const n = Math.min(people.length, MAX_PEOPLE);
     const carsByTile = CAR_COLLISIONS ? movingCars() : null;
+    const crowd = dt > 0 ? crowdCells() : null;
     for (let i = 0; i < n; i++) {
       const p = people[i];
+      if (crowd) steer(p, crowd, dt);
       step(p, dt);
       if (carsByTile && p.state !== 'inside' && p.state !== 'down' && p.state !== 'gone') hitByCar(i, p, carsByTile);
       if (p.state === 'inside' || p.state === 'gone') { for (const part of parts) part.setMatrixAt(i, hidden); continue; }
@@ -819,15 +967,21 @@
         y += 0.011 * SCALE * f;                                 // lying on its back, not half in the sidewalk
       }
       m.setPosition(p.x, y, p.z);
-      legs.setMatrixAt(i, m); torsos.setMatrixAt(i, m); heads.setMatrixAt(i, p.headless ? hidden : m);
-      hairs.setMatrixAt(i, bald[i] || p.headless ? hidden : m);
+      if (p.k) {                                                // a child: smaller body, the same head on top of it
+        bodyM.multiplyMatrices(m, childBody); headM.multiplyMatrices(m, childHead);
+        legs.setMatrixAt(i, bodyM); torsos.setMatrixAt(i, bodyM); heads.setMatrixAt(i, p.headless ? hidden : headM);
+        hairs.setMatrixAt(i, bald[i] || p.headless ? hidden : headM);
+      } else {
+        legs.setMatrixAt(i, m); torsos.setMatrixAt(i, m); heads.setMatrixAt(i, p.headless ? hidden : m);
+        hairs.setMatrixAt(i, bald[i] || p.headless ? hidden : m);
+      }
       if (p.squirt > 0 && dt > 0) squirt(p, m, dt, t);
     }
     for (const part of parts) { part.count = n; part.instanceMatrix.needsUpdate = true; }
     if (HEADSHOTS) stepHeads(dt);
     if (BLOOD) stepBlood(dt, n, m);
   }
-  let tip = null;
+  let tip = null, bodyM = null, headM = null, childBody = null, childHead = null;
   requestAnimationFrame(frame);
 
   // ---------- deaths ----------
@@ -904,11 +1058,13 @@
   // knockDown(index, direction) → makes them fall over (away from the shot) and stay down.
   window.scResidents = {
     hit(o, d, max = 30) {
-      const H = 0.135 * SCALE, R = 0.02 * SCALE, HR = 0.0125 * SCALE, neck = SIDEWALK_HEIGHT + (HEAD_Y - 0.002) * SCALE;
+      const HR = 0.0125 * SCALE;
       const a = d.x * d.x + d.z * d.z;
       let best = null;
       people.forEach((p, i) => {
         if (i >= MAX_PEOPLE || p.state === 'inside' || p.state === 'down' || p.state === 'gone') return;
+        const k = p.k || 1;                                       // children: shorter and slimmer, same head
+        const H = (0.135 - (1 - k) * HEAD_Y) * SCALE, R = 0.02 * (p.kw || 1) * SCALE, neck = SIDEWALK_HEIGHT + (HEAD_Y * k - 0.002) * SCALE;
         const ex = o.x - p.x, ez = o.z - p.z;
         const ts = [];
         if (a > 1e-9) {
@@ -986,26 +1142,20 @@
       return n;
     },
     get deaths() { return deaths; },
+    get people() { return people; },                            // read-only use (tests, other scripts)
     // someone jumps out of a car at (x, z) and runs away from (fromX, fromZ), screaming; returns their index
     addRunner(x, z, fromX, fromZ, seconds = 15) {
       if (!net || !net.edges.length || !V) return -1;
-      // the nearest road line
-      let best = null;
-      for (const [a, b] of net.edges) {
-        const [ax, ay] = net.xy.get(a), [bx, by] = net.xy.get(b), ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey || 1;
-        const s0 = Math.max(0, Math.min(1, ((x - ax) * ex + (z - ay) * ey) / l2)), d = Math.hypot(ax + ex * s0 - x, ay + ey * s0 - z);
-        if (!best || d < best.d) best = { a, b, s: s0, d };
-      }
+      const best = nearestEdge(x, z);                            // the nearest road line
       if (!best) return -1;
       // run the way that leads away from the danger
       const [ax, ay] = net.xy.get(best.a), [bx, by] = net.xy.get(best.b);
       const away = Math.hypot(bx - fromX, by - fromZ) > Math.hypot(ax - fromX, ay - fromZ);
-      const p = { speed: SPEED * (1 + rnd(-SPEED_VARIATION, SPEED_VARIATION)), state: 'walk', x, z, h: 0, side: 1 };
+      const p = newPerson(); p.x = x; p.z = z; p.side = 1;
       if (away) placeOnEdge(p, best.a, best.b, best.s); else placeOnEdge(p, best.b, best.a, 1 - best.s);
       // on the sidewalk on the car's side of the road
       const r = rightOf(p.dir[0], p.dir[1]), lx = ax + (bx - ax) * best.s, lz = ay + (by - ay) * best.s;
       p.side = r[0] * (x - lx) + r[1] * (z - lz) >= 0 ? 1 : -1;
-      p.prevOff = sideOffset(p);
       const off = sideOffset(p);
       p.state = 'exit'; p.from = [x, z]; p.to = [lx + off[0] * SIDEWALK_OFFSET, lz + off[1] * SIDEWALK_OFFSET];
       p.t = 0; p.dur = Math.hypot(p.to[0] - x, p.to[1] - z) / (p.speed * PANIC_SPEED) + 0.05;
@@ -1014,7 +1164,7 @@
       p.panic = seconds; p.fleeFrom = [fromX, fromZ];
       // a free figure: a new one, or one that's gone
       let i = people.length < MAX_PEOPLE ? people.length : people.findIndex((q) => q.state === 'gone');
-      if (i < 0) i = people.findIndex((q) => q.state === 'inside');
+      if (i < 0) i = people.findIndex((q) => q.state === 'inside' && !q.child && !q.parent);
       if (i < 0) return -1;
       people[i] = p;
       scream(p, 0.1);

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.2
-// @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die.
+// @version      1.3
+// @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -26,6 +26,9 @@
  *   collapsing buildings bury them. Each death is announced as sc:kill (the bodycount counts it).
  * - 0 hearts: walk mode stops and "You died" fills the screen. Hearts are full again every time
  *   you start walking.
+ * - Every hit drops a few hamburgers on the sidewalks near you (road lines come from the city data;
+ *   the sidewalk is 0.16–0.25 from the line). Walk over one to fix a broken heart; with all hearts
+ *   whole they stay where they are.
  * Officers are a few boxes each (own meshes; there are at most 2 × MAX_CARS).
  */
 (function () {
@@ -76,6 +79,11 @@
   const SPAWN_SPEED = 2.2;         // tiles per second (normal cars about 1–2)
   const SPAWN_STOP = 2.2;          // it stops this close to you
   const SIREN = true;
+  const BURGERS = true;            // getting hit drops hamburgers on the sidewalk; walking over one fixes a heart
+  const BURGERS_PER_HIT = [2, 3];
+  const BURGER_DISTANCE = [0.6, 2.5]; // tiles from you
+  const MAX_BURGERS = 8;           // lying around at the same time (the oldest go first)
+  const BURGER_PICKUP = 0.07;      // tiles: this close and it's yours
   // ---------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
@@ -495,6 +503,8 @@
         #sc-cops-ui .hearts svg path{fill:#e8313f;stroke:#fff;stroke-width:1.5}
         #sc-cops-ui .hearts .lost{animation:sc-heart-lost .5s ease-out forwards}
         #sc-cops-ui .hearts .lost svg path{fill:rgba(0,0,0,.25);stroke:rgba(255,255,255,.6)}
+        #sc-cops-ui .hearts .gained{animation:sc-heart-gained .45s ease-out}
+        @keyframes sc-heart-gained{0%{transform:scale(1.7)}100%{transform:scale(1)}}
         @keyframes sc-heart-lost{0%{transform:scale(1.6)}100%{transform:scale(1)}}
         #sc-cops-ui .hurt{position:absolute;inset:0;box-shadow:inset 0 0 120px 40px rgba(200,0,0,.75);opacity:0;transition:opacity .45s}
         #sc-cops-ui .died{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:28px;
@@ -525,11 +535,106 @@
     requestAnimationFrame(() => { hurtEl.style.transition = 'opacity .45s'; hurtEl.style.opacity = '0'; });
     ouch();
     if (hearts <= 0) die();
+    else dropBurgers();
   }
+  function heal() {
+    hearts = Math.min(HEARTS, hearts + 1);
+    drawHearts();
+    const el = heartEls[hearts - 1];
+    if (el) { el.classList.remove('gained'); void el.offsetWidth; el.classList.add('gained'); }
+    chomp();
+  }
+
+  // ---------- hamburgers ----------
+  const burgers = [];              // { x, z, mesh, t }
+  let burgerGeo = null;
+  function makeBurgerGeo() {
+    if (burgerGeo) return burgerGeo;
+    const P = [], N = [], C = [], seg = 10;
+    const col = (hex) => { const c = new K.Color(hex); return [c.r, c.g, c.b]; };
+    const tri = (a, b, c, n, cc) => { for (const v of [a, b, c]) { P.push(...v); N.push(...n); C.push(...cc); } };
+    // a round slice from y0 to y1, radius r0 at the bottom and r1 at the top (shaded like the figures)
+    const disc = (y0, y1, r0, r1, hex) => {
+      const c = col(hex), side = c.map((v) => v * 0.8), top = c, bot = c.map((v) => v * 0.55);
+      for (let i = 0; i < seg; i++) {
+        const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2, am = (a0 + a1) / 2;
+        const p = (a, r, y) => [Math.sin(a) * r, y, Math.cos(a) * r];
+        const n = [Math.sin(am), 0, Math.cos(am)];
+        tri(p(a0, r0, y0), p(a1, r0, y0), p(a1, r1, y1), n, side);
+        tri(p(a0, r0, y0), p(a1, r1, y1), p(a0, r1, y1), n, side);
+        tri([0, y1, 0], p(a0, r1, y1), p(a1, r1, y1), [0, 1, 0], top);
+        tri([0, y0, 0], p(a1, r0, y0), p(a0, r0, y0), [0, -1, 0], bot);
+      }
+    };
+    disc(0, 0.007, 0.019, 0.021, '#d9953f');        // bottom bun
+    disc(0.007, 0.0115, 0.023, 0.023, '#6b3b1f');   // patty
+    disc(0.0115, 0.0135, 0.024, 0.024, '#f4c21b');  // cheese
+    disc(0.0135, 0.016, 0.025, 0.023, '#4caf3a');   // lettuce
+    disc(0.016, 0.024, 0.022, 0.019, '#e0a04a');    // top bun…
+    disc(0.024, 0.029, 0.019, 0.011, '#e7ab55');    // …domed
+    disc(0.029, 0.031, 0.011, 0.004, '#eeb862');
+    const g = new K.Geometry();
+    g.setAttribute('position', new K.Attr(new Float32Array(P), 3));
+    g.setAttribute('normal', new K.Attr(new Float32Array(N), 3));
+    g.setAttribute('color', new K.Attr(new Float32Array(C), 3));
+    return (burgerGeo = g);
+  }
+  // A free spot on a sidewalk: along a road line (not at a junction), 0.205 to one side.
+  function sidewalkSpot(pl) {
+    if (!roads) return null;
+    const w = W(), found = [];
+    for (const [n, list] of roads) {
+      const [ax, az] = xy(n);
+      if (Math.hypot(ax - pl.x, az - pl.z) > BURGER_DISTANCE[1] + 1.5) continue;
+      for (const m of list) {
+        if (m < n) continue;                                     // each road once
+        const [bx, bz] = xy(m), dx = bx - ax, dz = bz - az;
+        for (let k = 0; k < 3; k++) {
+          const t = rnd(0.3, 0.7), side = Math.random() < 0.5 ? -1 : 1;
+          const x = ax + dx * t - dz * 0.205 * side, z = az + dz * t + dx * 0.205 * side;
+          const d = Math.hypot(x - pl.x, z - pl.z);
+          if (d < BURGER_DISTANCE[0] || d > BURGER_DISTANCE[1] || w.blocked(x, z)) continue;
+          if (burgers.some((b) => Math.hypot(b.x - x, b.z - z) < 0.15)) continue;
+          found.push([x, z]);
+        }
+      }
+    }
+    return found.length ? found[Math.floor(Math.random() * found.length)] : null;
+  }
+  function dropBurgers() {
+    if (!BURGERS || !model()) return;
+    const w = W(), pl = w.player, n = Math.round(rnd(BURGERS_PER_HIT[0], BURGERS_PER_HIT[1]));
+    for (let i = 0; i < n; i++) {
+      const spot = sidewalkSpot(pl); if (!spot) break;
+      while (burgers.length >= MAX_BURGERS) burgers.shift().mesh.removeFromParent();
+      const mesh = new K.Mesh(makeBurgerGeo(), mat);
+      mesh.castShadow = true;
+      w.scene.add(mesh);
+      burgers.push({ x: spot[0], z: spot[1], mesh, t: -i * 0.15, spin: rnd(0, Math.PI * 2) });
+    }
+  }
+  function stepBurgers(dt) {
+    if (!burgers.length) return;
+    const pl = W().player;
+    for (let i = burgers.length - 1; i >= 0; i--) {
+      const b = burgers[i];
+      b.t += dt; b.spin += dt * 1.6;
+      if (hearts < HEARTS && Math.hypot(b.x - pl.x, b.z - pl.z) < BURGER_PICKUP) {
+        b.mesh.removeFromParent(); burgers.splice(i, 1); heal(); continue;
+      }
+      const pop = b.t <= 0 ? 0 : Math.min(1, b.t / 0.25), s = pop * (1 + 0.25 * Math.sin(Math.min(1, b.t / 0.25) * Math.PI));
+      b.mesh.visible = b.t > 0;
+      b.mesh.scale.setScalar(Math.max(0.001, s));
+      b.mesh.position.set(b.x, 0.036 + 0.012 + Math.sin(b.t * 2.5) * 0.006, b.z);   // hovers a little, turns slowly
+      b.mesh.rotation.set(0.12, b.spin, 0);
+    }
+  }
+  function clearBurgers() { for (const b of burgers) b.mesh.removeFromParent(); burgers.length = 0; }
   function die() {
     dead = true;
     W().leave();
     clearAll();
+    clearBurgers();
     buildUi();
     diedEl.style.display = 'flex';
     ui.querySelector('.hearts').style.display = 'none';
@@ -653,6 +758,7 @@
     buildUi();
     if (e.detail.walking) { register(); hearts = HEARTS; dead = false; diedEl.style.display = 'none'; lastPolice = performance.now(); }
     else if (!dead) clearAll();
+    clearBurgers();
     drawHearts();
   });
 
@@ -667,10 +773,12 @@
     if (lastPl && dt > 0) plSpeed = plSpeed * 0.8 + 0.2 * Math.hypot(pl.x - lastPl.x, pl.z - lastPl.z) / dt;
     lastPl = { x: pl.x, z: pl.z };
     try { step(dt, performance.now()); } catch (e) { console.warn('[cops]', e); }
+    try { stepBurgers(dt); } catch (e) { console.warn('[cops] burgers', e); }
   }
   requestAnimationFrame(frame);
   window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head })),
-    cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar() };
+    cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar(),
+    hurt: () => hurt(), burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };
 
   // ---------- sounds (synthesised) ----------
   let audio = null;
@@ -682,6 +790,17 @@
       f.type = 'bandpass'; f.frequency.value = 700; f.Q.value = 3;
       g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
       o.connect(f); f.connect(g); g.connect(out(a)); o.start(t); o.stop(t + 0.32);
+    } catch {}
+  }
+  function chomp() {
+    try {
+      const a = ctx(), t = a.currentTime;
+      [0, 0.13].forEach((d, i) => {
+        const o = a.createOscillator(), g = a.createGain();
+        o.type = 'triangle'; o.frequency.setValueAtTime(i ? 660 : 520, t + d); o.frequency.exponentialRampToValueAtTime(i ? 990 : 780, t + d + 0.09);
+        g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.22, t + d + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.12);
+        o.connect(g); g.connect(out(a)); o.start(t + d); o.stop(t + d + 0.14);
+      });
     } catch {}
   }
   function whizz() {

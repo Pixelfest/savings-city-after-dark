@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.24
-// @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, Esc to stop.
+// @version      1.26
+// @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -22,6 +22,9 @@
  *   boxes of their parts, so it always matches what's drawn (also with the auto-layout script).
  * - While walking, the app's own mouse/keyboard handling is switched off, its HUD is hidden, and
  *   the sun's shadows and the snowfall are re-centred on you.
+ * - Another script can take over moving and looking (scWalk.setDriver, used by the driving
+ *   script): walk mode then asks it every frame where you are and where the camera is, passes it
+ *   the keys held and the mouse movement, and hides the weapon.
  */
 (function () {
   'use strict';
@@ -50,7 +53,9 @@
 
   // ---- settings (all in tiles; one tile = 1 unit) --------------------------------------------
   const FOV = 70;                 // field of view in degrees
-  const WALK_SPEED = 0.8;         // tiles per second (mouse wheel changes it while walking)
+  const WALK_SPEED = 0.8;         // tiles per second (the , and . keys change it while walking)
+  const SPEED_STEP = 1.15;        // , slower / . faster: speed × or ÷ this per press
+  const START_WEAPON = 'none';    // what you hold when you start walking ('none' = empty hands)
   const RUN_FACTOR = 2.5;         // Shift multiplies the speed
   const EYE_HEIGHT = 0.155;       // eye level of the residents: sidewalk 0.036 + eyes 0.118 (null = automatic)
   const RADIUS = 0.04;            // how close you can get to walls
@@ -355,6 +360,23 @@
     stepBullets(dt);
     if (SHOOTING) stepWeapons(dt);
 
+    // someone else moves you (a car): it says where you are and where the camera looks from
+    if (driver) {
+      let v = null;
+      try { v = driver.step(dt, keys, driverLook); } catch (e) { console.warn('[walk] driver', e); }
+      driverLook.x = driverLook.y = 0;
+      if (v) { pos.x = v.x; pos.z = v.z; eye = v.eye ?? eye; yaw = v.yaw; pitch = v.pitch; }
+      const c = (v && v.cam) || { x: pos.x, y: eye, z: pos.z };
+      const el = renderer.domElement;
+      cam.aspect = (el.clientWidth || 1) / (el.clientHeight || 1);
+      cam.updateProjectionMatrix();
+      cam.position.set(c.x, c.y, c.z);
+      cam.rotation.set(pitch, yaw, (v && v.roll) || 0);
+      cam.updateMatrixWorld();
+      followView();
+      return;
+    }
+
     // movement relative to where you look
     let f = 0, s = 0;
     if (keys.has('KeyW') || keys.has('ArrowUp')) f += 1;
@@ -381,7 +403,10 @@
     cam.position.set(pos.x, eye, pos.z);
     cam.rotation.set(pitch, yaw, 0);
     cam.updateMatrixWorld();
+    followView();
+  }
 
+  function followView() {
     // sun shadows around you instead of around the app's view
     if (sun) {
       sun.position.set(pos.x - 18, 40, pos.z + 26);
@@ -438,6 +463,7 @@
     hud = [...document.querySelectorAll('.hud, .city-overlay')];
     hud.forEach((h) => { h.dataset.scWalkDisplay = h.style.display; h.style.display = 'none'; });
     keys.clear(); lastT = 0; speed = WALK_SPEED;
+    if (WEAPONS[START_WEAPON]) weapon = shown = START_WEAPON; swap = 0;
     walking = true;
     window.dispatchEvent(new CustomEvent('sc:walk', { detail: { walking: true } }));
     showUi(true);
@@ -448,6 +474,7 @@
     if (!walking) return;
     walking = false;
     window.dispatchEvent(new CustomEvent('sc:walk', { detail: { walking: false } }));
+    driver = null;
     clearBullets();
     trigger = false; spin = 0; whir(0);
     hadLock = false;
@@ -472,6 +499,15 @@
   // ---------- 5. input (captured before the app sees it) ----------
   let usingMouse = true;
   let drag = null;   // touch: look by dragging
+  let wheelAcc = 0, wheelAt = 0;
+  let driver = null;                     // { step(dt, keys, look) → { x, z, eye, yaw, pitch, roll?, cam? } } – see setDriver
+  const driverLook = { x: 0, y: 0 };     // mouse movement since the driver's last step
+  let walkEye = 0;                       // eye height on foot, kept while driving
+  const keyHooks = [];
+  function changeSpeed(f) {
+    speed = Math.min(8, Math.max(0.1, speed * f));
+    flash(`Snelheid ${speed.toFixed(1)}`);
+  }
   let hadLock = false;
 
   // Click once: the mouse pointer is captured and moving the mouse looks around (no button held).
@@ -490,9 +526,12 @@
 
   window.addEventListener('keydown', (e) => {
     if (!walking) return;
+    if (e.code !== 'Escape' && keyHooks.some((fn) => { try { return fn(e.code, e); } catch (err) { console.warn('[walk] key', err); return false; } })) { e.preventDefault(); e.stopImmediatePropagation(); return; }
     if (e.code === 'Escape') leave();
+    else if (driver) keys.add(e.code);                                     // driving: the keys are the car's
     else if (SHOOTING && WEAPON_KEYS[e.code]) selectWeapon(WEAPON_KEYS[e.code]);
-    else if (SHOOTING && e.code === 'KeyQ' && !e.repeat) { const ids = Object.keys(WEAPONS); selectWeapon(ids[(ids.indexOf(weapon) + 1) % ids.length]); }
+    else if (SHOOTING && e.code === 'KeyQ' && !e.repeat) cycleWeapon(1);
+    else if (e.code === 'Comma' || e.code === 'Period') changeSpeed(e.code === 'Period' ? SPEED_STEP : 1 / SPEED_STEP);
     else keys.add(e.code);
     e.preventDefault(); e.stopImmediatePropagation();
   }, true);
@@ -513,15 +552,20 @@
         if (e.pointerType === 'mouse') {
           usingMouse = true;
           if (!document.pointerLockElement) lockMouse();
-          else if (e.button === 0 && SHOOTING) { trigger = true; if (WEAPONS[weapon].plugin) firePlugin(weapon); else if (weapon === 'pistol') shoot('pistol'); }
+          else if (e.button === 0 && SHOOTING && !driver) { trigger = true; if (WEAPONS[weapon].plugin) firePlugin(weapon); else if (weapon === 'pistol') shoot('pistol'); }
         }
         else drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
       } else if (type === 'pointerup' || type === 'pointercancel') {
         if (e.pointerType === 'mouse' && (e.button === 0 || type === 'pointercancel')) trigger = false;
         if (drag && e.pointerId === drag.id) drag = null;
       } else if (type === 'wheel') {
-        speed = Math.min(8, Math.max(0.1, speed * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-        flash(`Snelheid ${speed.toFixed(1)}`);
+        // scroll wheel: next / previous weapon (one step per notch; touchpads send many small steps)
+        if (SHOOTING && !driver) {
+          wheelAcc += e.deltaMode ? e.deltaY * 40 : e.deltaY;
+          const now = performance.now();
+          if (Math.abs(wheelAcc) >= 40 && now - wheelAt > 120) { cycleWeapon(wheelAcc > 0 ? 1 : -1); wheelAcc = 0; wheelAt = now; }
+          else if (Math.abs(wheelAcc) >= 40) wheelAcc = 0;
+        }
       }
       e.preventDefault(); e.stopImmediatePropagation();
     }, { capture: true, passive: false });
@@ -1074,11 +1118,12 @@
     // at: where it sits in front of the eye; aim: the barrel points at the crosshair this far ahead
     // (any distance lands on the crosshair; nearer = turned more, so you see more of its side);
     // roll: slight tilt around the barrel; muzzle: muzzle position on the model
+    none: { name: 'Geen wapen', none: true },   // empty hands: nothing drawn, clicking does nothing
     pistol: { name: 'Pistool', at: [0.12, -0.115, -0.29], aim: 1.0, roll: -0.04, muzzle: [0, 0.019, -0.21], kick: 1 },
     minigun: { name: 'Minigun', at: [0.15, -0.14, -0.36], aim: 0.9, roll: -0.05, muzzle: [0, 0, -0.45], kick: 0.25 },
   };
-  const WEAPON_KEYS = { Digit1: 'pistol', Digit2: 'minigun' };
-  let weapon = 'pistol', shown = 'pistol', swap = 0;    // swap: 0 = up and ready … 1 = lowered out of view
+  const WEAPON_KEYS = { Digit0: 'none', Backquote: 'none', Digit1: 'pistol', Digit2: 'minigun' };
+  let weapon = START_WEAPON, shown = START_WEAPON, swap = 0;    // swap: 0 = up and ready … 1 = lowered out of view
   let trigger = false, spin = 0, spinAngle = 0, fireAcc = 0;
 
   // Yaw and pitch that make the barrel's axis (through the muzzle, along -z) pass through the point
@@ -1147,6 +1192,19 @@
     blackSmoke: (x, y, z, o) => blackSmoke(x, y, z, o || {}),
     blastEvent: (x, z, gib, knock, panic, y) => blastEvent(x, z, gib, knock, panic, y),
     get walking() { return walking; },
+    // another script moves you and the camera (a car); null gives control back. While set, the
+    // weapon is put away, WASD and the mouse go to driver.step(dt, keysHeld, mouseMovement).
+    setDriver(d) {
+      d = d && typeof d.step === 'function' ? d : null;
+      if (d && !driver) walkEye = eye; else if (!d && driver && walkEye) { eye = walkEye; pitch = 0; }   // back on your feet
+      driver = d; trigger = false; keys.clear(); driverLook.x = driverLook.y = 0;
+    },
+    get driving() { return !!driver; },
+    // fn(code, event) → true when the key was used (then walk mode ignores it); not for Escape
+    onKey(fn) { if (typeof fn === 'function') keyHooks.push(fn); },
+    setHelp(text) { const h = ui && ui.querySelector('.help'); if (h) { if (!h.dataset.walk) h.dataset.walk = h.textContent; h.textContent = text || h.dataset.walk; } },
+    note: (text, ms) => flash(text, ms),
+    parkedCars: () => [...parkedCars.values()],
     get scene() { return appScene; },
     classes() {
       if (!appScene || !bulletParts()) return null;
@@ -1171,6 +1229,10 @@
     if (!WEAPONS[w] || w === weapon) return;
     weapon = w;
     flash(WEAPONS[w].name);
+  }
+  function cycleWeapon(step) {
+    const ids = Object.keys(WEAPONS);
+    selectWeapon(ids[(ids.indexOf(weapon) + step + ids.length) % ids.length]);
   }
 
   function makeGun() {
@@ -1367,8 +1429,9 @@
   function updateGun() {
     const g = gun, m = gunMotion, dt = m.dt;
     // switching: lower the current weapon, swap, raise the new one
-    if (shown !== weapon) { swap = Math.min(1, swap + dt / 0.2); if (swap >= 1) { shown = weapon; g.shotAt = -1; } }
+    if (shown !== weapon) { swap = shown === 'none' ? 1 : Math.min(1, swap + dt / 0.2); if (swap >= 1) { shown = weapon; g.shotAt = -1; } }
     else swap = Math.max(0, swap - dt / 0.25);
+    if (shown === 'none') { for (const k in g.models) g.models[k].root.visible = false; m.lookX = m.lookY = m.moved = 0; return; }
     if (!g.models[shown]) shown = weapon = 'pistol';
     const W = WEAPONS[shown], model = g.models[shown];
     for (const k in g.models) g.models[k].root.visible = k === shown;
@@ -1411,7 +1474,7 @@
   }
 
   function drawGun(render) {
-    if (!SHOW_GUN || !SHOOTING || gunFailed) return;
+    if (!SHOW_GUN || !SHOOTING || gunFailed || driver) return;
     try {
       if (!gun) { gun = makeGun(); if (!gun) return; }
       updateGun();
@@ -1825,6 +1888,7 @@
   }
 
   function look(dx, dy) {
+    if (driver) { driverLook.x += dx; driverLook.y += dy; return; }
     gunMotion.lookX += dx; gunMotion.lookY += dy;
     yaw -= dx * LOOK_SENSITIVITY;
     pitch = Math.max(-1.4, Math.min(1.4, pitch - dy * LOOK_SENSITIVITY));
@@ -1847,18 +1911,18 @@
           #sc-walk-ui .cross:after{top:6px;left:0;height:2px;width:14px}
           #sc-walk-ui .help{position:absolute;left:16px;bottom:16px;background:rgba(20,30,45,.6);padding:8px 12px;border-radius:10px;text-shadow:0 1px 2px #000}
           #sc-walk-ui .stop{position:absolute;right:16px;top:16px;pointer-events:auto;border:0;border-radius:10px;padding:8px 14px;font:inherit;background:#fff;color:#223;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.3)}
-          #sc-walk-ui .flash{position:absolute;left:50%;top:60%;transform:translateX(-50%);background:rgba(20,30,45,.6);padding:4px 10px;border-radius:8px;opacity:0;transition:opacity .3s}
+          #sc-walk-ui .sc-note{position:absolute;left:50%;top:calc(50% + 22px);transform:translateX(-50%);white-space:nowrap;font:500 11px/1.3 system-ui,sans-serif;color:rgba(255,255,255,.9);background:rgba(20,30,45,.3);padding:1px 6px;border-radius:4px;text-shadow:0 1px 1px rgba(0,0,0,.6);opacity:0;transition:opacity .4s}
           #sc-walk-ui .pad{position:absolute;left:24px;bottom:24px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.18);border:2px solid rgba(255,255,255,.5);pointer-events:auto;touch-action:none;display:none}
           #sc-walk-ui .pad i{position:absolute;left:50%;top:50%;width:48px;height:48px;margin:-24px 0 0 -24px;border-radius:50%;background:rgba(255,255,255,.7)}
           #sc-walk-ui.touch .pad{display:block}#sc-walk-ui.touch .help{display:none}
         </style>
         <div class="cross"></div>
-        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun: ingedrukt houden) · 1/2/3/Q: wapen · scrollwiel: snelheid · R/F: hoger/lager · Esc: stoppen</div>
+        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun: ingedrukt houden) · scrollwiel / Q / 0–3: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
         <button class="stop" type="button">Stoppen met lopen</button>
-        <div class="flash"></div>
+        <div class="sc-note"></div>
         <div class="pad"><i></i></div>`;
       ui.querySelector('.stop').addEventListener('click', leave);
-      flashEl = ui.querySelector('.flash');
+      flashEl = ui.querySelector('.sc-note');
       // touch joystick
       const pad = ui.querySelector('.pad'), knob = pad.querySelector('i');
       let pid = null;
