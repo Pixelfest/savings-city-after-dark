@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      2.7
+// @version      2.8
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -96,10 +96,10 @@
   const SHAKE = 22;                // camera shake strength (pixels)
   const SOUND = true;
   const BOMBER = true;             // a B-2 flies over during the countdown and drops the bomb
-  const BOMBER_ALTITUDE = 7;       // tiles (≈ 140 m – low, so you see it from above too)
-  const BOMBER_SPEED = 4;          // tiles per second
+  const BOMBER_ALTITUDE = 14;      // tiles (≈ 280 m)
+  const BOMBER_SPEED = 6;          // tiles per second
   const BOMB_FALL = 3;             // seconds from release to impact (= the blast)
-  const BOMBER_SPAN = 6.5;         // wingspan in tiles (a real B-2: 52 m = 2.6 tiles; bigger reads better)
+  const BOMBER_SPAN = 12;          // wingspan in tiles (a real B-2: 52 m = 2.6 tiles; bigger reads better from above)
   // -----------------------------------------------------------------------------------------
 
   // ---------- catch the scene ----------

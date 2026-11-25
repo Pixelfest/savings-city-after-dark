@@ -18,15 +18,18 @@ page and the city is back as it was.
    `// @match        https://your-savings-city-host.example/*` with the address of your Savings City
    app (keep the `/*` at the end), or add the address under the loader's *Settings →
    Includes/Excludes → User matches* in Tampermonkey.
-4. **Get updates automatically:** Tampermonkey Dashboard → *Settings* → *Config mode: Advanced* →
-   *Externals* → *Update Interval*: **Always**. The loader pulls every script straight from this
-   repository (`@require`), so each page load then picks up the latest versions.
+4. **Updates:** every new release gets a new loader version, and the loader then fetches all
+   scripts fresh. Tampermonkey checks for script updates on its own (Settings → *Script Update* →
+   *Check Interval*); to get a release right away, use **Check for userscript updates** in the
+   Tampermonkey menu, or open the loader link above again and install it over the old one.
+   The browser console shows which loader version is running: `[Savings City After Dark] loader x.y`.
+   Remove the scripts you installed one by one, or they run twice.
 
 The loader contains every script below. To leave one out, delete its `@require` line in the loader.
 Keep the order: walk mode comes before residents, rocket launcher, cops and helicopter/cranes, which build on it.
 
-If you edit the loader (address, removed scripts), Tampermonkey will no longer replace it with
-newer loader versions from GitHub; the scripts it loads still update.
+Set the address under *User matches* rather than editing the loader: once you edit the loader,
+Tampermonkey stops updating it, and then the scripts it loads don't update either.
 
 ### Scripts one by one
 
@@ -46,7 +49,7 @@ Settings are constants at the top of each script. All sounds follow the app's ow
 | `savings-city-cops.user.js` | 1.2 | Walk mode: shoot and the nearest police car stops, two officers get out and shoot back; now and then a police car comes along the roads from out of sight. Officers can be shot (head shots knock the head off), blown up and buried. 10 hearts; when they're gone: "You died". |
 | `savings-city-heli-crane.user.js` | 1.0 | Walk mode: the helicopter and the construction cranes go down after 2 shots or a rocket – the helicopter explodes, spins down and burns, a crane topples over. |
 | `savings-city-bodycount.user.js` | 1.0 | Counter (top right) of the dead – residents, officers, people in exploding cars, the helicopter pilot; shot, run over, blown up, buried – and exploded cars. Click to reset. |
-| `savings-city-nuke.user.js` | 2.7 | ☢ button: a popup to pick the yield in tonnes of TNT (hand grenade … Tsar Bomba; blast radius, force and mushroom cloud follow it), then a countdown while a B-2 bomber flies over and drops the bomb, which lands on ground zero as it goes off; flash, shockwave, buildings breaking into solid chunks that fly outward, ruins, mushroom cloud, camera shake. |
+| `savings-city-nuke.user.js` | 2.8 | ☢ button: a popup to pick the yield in tonnes of TNT (hand grenade … Tsar Bomba; blast radius, force and mushroom cloud follow it), then a countdown while a B-2 bomber flies over and drops the bomb, which lands on ground zero as it goes off; flash, shockwave, buildings breaking into solid chunks that fly outward, ruins, mushroom cloud, camera shake. |
 | `savings-city-monster.user.js` | 1.3 | Button that releases a giant green monster with round glasses: it walks into the city, punches and tramples buildings, which collapse into solid chunks. |
 
 The scripts work on their own; some work together (walk mode + residents + rocket launcher + cops + helicopter/cranes;
