@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      2.8
+// @version      2.9
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -36,6 +36,8 @@
  *   to the Tsar Bomba). Blast radii follow the cube root of the yield (TOTAL_PER_KT, EDGE_PER_KT
  *   per kiloton), the shockwave takes as long as it needs to get there, chunks fly harder, the
  *   mushroom cloud grows with yield^0.25 (kept within what the view can show), flash and shake too.
+ * - Target: after the popup the mouse is a crosshair with two red rings on the ground (flattened
+ *   completely / edge of the damage); a click sets ground zero (in walk mode: where you look).
  * - B-2 bomber: during the countdown a flying wing crosses the city at BOMBER_ALTITUDE, from a
  *   random direction, straight over ground zero. It releases the bomb BOMB_FALL seconds before
  *   the end of the countdown; the bomb keeps the plane's speed and falls (gravity chosen so it
@@ -96,14 +98,14 @@
   const SHAKE = 22;                // camera shake strength (pixels)
   const SOUND = true;
   const BOMBER = true;             // a B-2 flies over during the countdown and drops the bomb
-  const BOMBER_ALTITUDE = 14;      // tiles (≈ 280 m)
+  const BOMBER_ALTITUDE = 21;      // tiles (≈ 420 m)
   const BOMBER_SPEED = 6;          // tiles per second
-  const BOMB_FALL = 3;             // seconds from release to impact (= the blast)
-  const BOMBER_SPAN = 12;          // wingspan in tiles (a real B-2: 52 m = 2.6 tiles; bigger reads better from above)
+  const BOMB_FALL = 5;             // seconds from release to impact (= the blast): released early, the plane is well away
+  const BOMBER_SPAN = 8;           // wingspan in tiles (a real B-2: 52 m = 2.6 tiles; bigger reads better from above)
   // -----------------------------------------------------------------------------------------
 
   // ---------- catch the scene ----------
-  let scene = null, renderer = null;
+  let scene = null, renderer = null, appCam = null;
   const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
   hook.addEventListener('observe', (e) => {
     const r = e.detail;
@@ -112,6 +114,7 @@
     const orig = r.render;
     r.render = function (s, c) {
       if (!scene && s && s.isScene && c && c.isOrthographicCamera) scene = s;
+      if (s === scene && c && c.isOrthographicCamera) appCam = c;
       return orig.apply(this, arguments);
     };
   });
@@ -1130,7 +1133,7 @@
     range.addEventListener('input', () => show(Math.pow(10, LOG_MIN + (LOG_MAX - LOG_MIN) * range.value / 1000), 'range'));
     popup.querySelectorAll('.presets button').forEach((b) => b.addEventListener('click', () => show(parseFloat(b.dataset.t))));
     const close = () => { popup.remove(); popup = null; document.removeEventListener('keydown', key, true); };
-    const fire = () => { try { localStorage.setItem('sc-nuke:yield', String(yieldTons)); } catch {} close(); startCountdown(); };
+    const fire = () => { try { localStorage.setItem('sc-nuke:yield', String(yieldTons)); } catch {} close(); if (locked) startCountdown(); else pickTarget(startCountdown); };
     const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } else if (e.key === 'Enter') { e.stopPropagation(); fire(); } };
     document.addEventListener('keydown', key, true);
     popup.querySelector('.cancel').addEventListener('click', close);
@@ -1139,13 +1142,77 @@
     setTimeout(() => num.focus(), 0);
   }
 
+  // ---------- picking the target ----------
+  // After the popup: the mouse becomes a crosshair; two red rings on the ground follow it (flattened
+  // completely / edge of the damage). A click (not a drag – dragging still moves the map) sets
+  // ground zero; Esc cancels. In walk mode: where you're looking, up to 30 tiles away.
+  let target = null, picking = null;
+  const CROSSHAIR = "url(\"data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><g fill="none" stroke="#ff2a2a" stroke-width="2"><circle cx="20" cy="20" r="11"/><path d="M20 2v12M20 26v12M2 20h12M26 20h12"/></g><circle cx="20" cy="20" r="2" fill="#ff2a2a"/></svg>') + "\") 20 20, crosshair";
+  function groundAt(clientX, clientY) {
+    const el = renderer && renderer.domElement; if (!el || !appCam) return null;
+    const r = el.getBoundingClientRect(), nx = ((clientX - r.left) / r.width) * 2 - 1, ny = -((clientY - r.top) / r.height) * 2 + 1;
+    const a = new K.V3(nx, ny, -1).unproject(appCam), b = new K.V3(nx, ny, 1).unproject(appCam);
+    const dy = b.y - a.y; if (Math.abs(dy) < 1e-9) return null;
+    const t = -a.y / dy; if (t < 0) return null;
+    return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+  }
+  function pickTarget(done) {
+    if (!scene || !classes()) { alert('De 3D-stad is nog niet geladen.'); return; }
+    const w = window.scWalk;
+    if (w && w.walking && w.player) {                            // walk mode: where you look
+      const p = w.player, d = { x: -Math.sin(p.yaw) * Math.cos(p.pitch), y: Math.sin(p.pitch), z: -Math.cos(p.yaw) * Math.cos(p.pitch) };
+      const t = d.y < -0.01 ? Math.min(30, p.y / -d.y) : 30;
+      target = { x: p.x + d.x * t, z: p.z + d.z * t };
+      done(); return;
+    }
+    const fx = effects(yieldTons), el = renderer.domElement;
+    const mat = (col, op) => new K.Lambert({ color: col, emissive: col, transparent: true, opacity: op, depthWrite: false, depthTest: false, side: 2 });
+    const outer = new K.Mesh(ring(0.96), mat('#ff2a2a', 0.8)), inner = new K.Mesh(ring(0.9), mat('#ff2a2a', 0.9)), fill = new K.Mesh(ring(0), mat('#ff2a2a', 0.12));
+    const marker = new K.Object3D(); marker.userData.scNuke = true;
+    for (const m of [outer, inner, fill]) { m.renderOrder = 999; m.frustumCulled = false; marker.add(m); }
+    outer.scale.set(fx.edge, 1, fx.edge); fill.scale.set(fx.edge, 1, fx.edge); inner.scale.set(Math.max(0.3, fx.total), 1, Math.max(0.3, fx.total));
+    marker.position.y = 0.05; marker.visible = false;
+    scene.add(marker);
+    const hint = document.createElement('div');
+    hint.style.cssText = 'position:fixed;left:50%;top:14%;transform:translateX(-50%);z-index:10040;pointer-events:none;background:rgba(20,22,30,.85);color:#fff;padding:10px 16px;border-radius:12px;font:700 16px/1.3 system-ui,sans-serif;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+    hint.innerHTML = '🎯 Klik op het doel<br><span style="font-weight:500;font-size:13px;opacity:.8">' + fmtTons(yieldTons) + ' · binnenste ring: alles plat · buitenste ring: schade · slepen = kaart verschuiven · Esc = annuleren</span>';
+    document.body.appendChild(hint);
+    const style = document.createElement('style');
+    style.textContent = `canvas, .city-overlay, .city-overlay * { cursor: ${CROSSHAIR} !important; }`;
+    document.head.appendChild(style);
+    let down = null;
+    const onMove = (e) => {
+      const g = groundAt(e.clientX, e.clientY); marker.visible = !!g; if (g) marker.position.set(g.x, 0.05, g.z);
+      if (!e.buttons) e.stopPropagation();                        // no hover cards from the app while aiming (dragging still pans)
+    };
+    const onDown = (e) => { if (e.target === el || el.contains(e.target) || e.target.closest('.city-overlay')) down = [e.clientX, e.clientY]; };
+    const isClick = (e) => down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 6;
+    const onUp = (e) => { if (isClick(e)) { e.stopPropagation(); e.preventDefault(); } };          // the app must not select anything
+    const onClick = (e) => {
+      if (!isClick(e)) return;
+      e.stopPropagation(); e.preventDefault();
+      const g = groundAt(e.clientX, e.clientY); down = null;
+      if (!g) return;
+      target = g; finish(); done();
+    };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); finish(); } };
+    const finish = () => {
+      window.removeEventListener('pointermove', onMove, true); window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('pointerup', onUp, true); window.removeEventListener('click', onClick, true); window.removeEventListener('keydown', onKey, true);
+      marker.removeFromParent(); hint.remove(); style.remove(); picking = null; updateButton();
+    };
+    window.addEventListener('pointermove', onMove, true); window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('pointerup', onUp, true); window.addEventListener('click', onClick, true); window.addEventListener('keydown', onKey, true);
+    picking = { finish };
+  }
+
   // ---------- go ----------
   // Preparation runs in small slices during the countdown, so the page keeps running smoothly:
   // finding everything that can break, sorting it by distance and cutting it into plates.
   let ready = false, preparing = false, fired = false, onReady = null;
   function* preparation() {
     const c = cityShape();
-    nuke = { t0: 0, cx: c.cx, cz: c.cz, R: c.R, ...effects(yieldTons) };
+    nuke = { t0: 0, cx: target ? target.x : c.cx, cz: target ? target.z : c.cz, R: c.R, ...effects(yieldTons) };
     const root = new K.Object3D(); root.userData.scNuke = true; root.name = 'sc-nuke'; scene.add(root);
     nukeRoot = root;
     // everything that can break, sorted by distance from ground zero
@@ -1306,7 +1373,7 @@
   }
   function startBomber(tDet) {
     if (!BOMBER || COUNTDOWN < BOMB_FALL + 1 || !classes()) return;
-    const c = cityShape(), a = Math.random() * Math.PI * 2, u = [Math.cos(a), Math.sin(a)];
+    const c = target ? { cx: target.x, cz: target.z } : cityShape(), a = Math.random() * Math.PI * 2, u = [Math.cos(a), Math.sin(a)];
     const H = BOMBER_ALTITUDE, v = BOMBER_SPEED, tRel = tDet - BOMB_FALL * 1000;
     const R = [c.cx - u[0] * v * BOMB_FALL, c.cz - u[1] * v * BOMB_FALL];                       // where it lets go
     const g = 2 * (H - 0.08) / (BOMB_FALL * BOMB_FALL);
@@ -1419,7 +1486,7 @@
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-nuke';
     b.innerHTML = '<b class="s-bg"></b>' + ICON;
-    b.addEventListener('click', () => { if (counting || fired) startCountdown(); else openPopup(); });   // during the countdown: cancel
+    b.addEventListener('click', (e) => { e.stopPropagation(); if (picking) picking.finish(); else if (counting || fired) startCountdown(); else openPopup(); });   // during the countdown: cancel
     row.appendChild(b);
     updateButton();
   }
