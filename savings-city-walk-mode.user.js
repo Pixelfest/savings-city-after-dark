@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.27
+// @version      1.29
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -74,7 +74,7 @@
   const CAR_BLAST_PROP_RADIUS = 0.6;  // trees and lamps this close fall over
   const CAR_BLAST_CAR_RADIUS = 0.5;   // other cars this close take a hit (enough of them: a chain reaction)
   const BLACK_SMOKE = 1;          // amount of black smoke from burning wrecks (0 = the old grey puffs)
-  const SMOKE_HEIGHT = 3.5;       // tiles: about how high the black smoke column rises before it's gone
+  const SMOKE_HEIGHT = 1.5;       // tiles: about how high the black smoke column rises before it's gone (the core's puffs are gone by 1.5)
   // Distances in tiles. A car is 0.22 long (≈ 4.5 m), so 1 tile ≈ 20 m.
   const BLAST_KNOCK_RADIUS = 0.6; // ≈ 12 m: residents this close fall over
   const BLAST_PANIC_RADIUS = 3;   // ≈ 60 m: residents this close run away
@@ -91,6 +91,7 @@
   const MINIGUN_SPREAD = 1.5;     // degrees: bullets spray a little around the crosshair
   const GUN_BOB = 1;              // how much the gun bobs while walking and lags behind when you look (0 = still)
   const START_FACING = 'street';  // starting at a building: 'street' = back to the door, looking away; 'building' = look at it
+  const OPEN_GROUND = 1;           // tiles: double-click the ground at least this far from roads and buildings to start walking there, facing the city centre
   // ---------------------------------------------------------------------------------------------
 
   let renderer = null;
@@ -733,7 +734,7 @@
   function blastEvent(x, z, gib, knock, panic, y = 0.08) {
     window.dispatchEvent(new CustomEvent('sc:blast', { detail: { x, y, z, gib, knock, panic } }));
   }
-  // black smoke: rises (slowing to `rise`), drifts with the wind, grows big and fades as it goes up
+  // black smoke: rises (slowing to `rise`), drifts with the wind, grows big and shrinks away as it goes up
   function blackSmoke(x, y, z, o) {
     spawn('blacksmoke', x, y, z, { fade: true, alpha: 0.9, grow: 7, rise: 0.3, drag: 1.2, ...o });
   }
@@ -784,37 +785,24 @@
     return ColorClass;
   }
 
-  // ---------- fire, smoke and debris (small cubes; they shrink instead of fading) ----------
+  // ---------- fire and debris (small cubes; they shrink instead of fading) ----------
+  // Smoke and dust (kinds 'smoke', 'blacksmoke', 'dust', and every puff with o.fade) go to the
+  // core's solid puffs (scCore.smoke: one InstancedMesh per kind); the cubes are the fallback when
+  // the core is older than 1.3.
   const particles = [];
   let cubeGeo = null; const partMats = {};
   const PALETTE = { spark: ['#fff3b0', '#ffd24a'], leaf: ['#7cbf3a', '#a6d84a', '#5e9d2e'], wood: ['#8a5a3b', '#a8754f', '#6e4529'], glass: ['#f3e3a6', '#ffffff', '#dfe8ee'], flash: ['#fff6c8'], fire: ['#fff3b0', '#ffd24a', '#ff9a2a', '#f0531f'], smoke: ['#3b3b3e', '#55565a', '#6e6f74'], debris: ['#2a2624', '#3a3532', '#5b5f66'],
     blacksmoke: ['#141416', '#1c1c1f', '#252528', '#2e2e31'], dust: ['#a89c8a', '#b9ad9b', '#9a8f80', '#c4b8a6', '#8f857a'] };
-  // Puffs (o.fade): see-through low-poly balls that keep growing and fade out instead of shrinking.
-  // Their opacity steps through FADE_LEVELS shared materials per colour (no material per puff).
-  const FADE_LEVELS = 12, WIND = [0.09, 0.035];     // wind: tiles per second, stronger higher up
-  let puffGeo = null, LambertClass = null; const fadeMats = {};
-  function fadeMat(col, level) {
-    const key = col + '|' + level;
-    return fadeMats[key] || (fadeMats[key] = new (LambertClass || FlatMaterial)({ color: col, transparent: true, opacity: level / FADE_LEVELS, depthWrite: false }));
-  }
-  function makePuffGeo() {
-    // icosahedron, radius 0.5, flat shaded
-    const t = (1 + Math.sqrt(5)) / 2, V = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]]
-      .map((v) => { const l = Math.hypot(...v) * 2; return v.map((c) => c / l); });
-    const F = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]];
-    const P = [], N = [];
-    for (const [a, b, c] of F) {
-      const A = V[a], B = V[b], C = V[c];
-      const n = [(B[1] - A[1]) * (C[2] - A[2]) - (B[2] - A[2]) * (C[1] - A[1]), (B[2] - A[2]) * (C[0] - A[0]) - (B[0] - A[0]) * (C[2] - A[2]), (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])];
-      const l = Math.hypot(...n) || 1;
-      for (const v of [A, B, C]) { P.push(...v); N.push(n[0] / l, n[1] / l, n[2] / l); }
-    }
-    const g = new Geometry();
-    g.setAttribute('position', new Attr(new Float32Array(P), 3));
-    g.setAttribute('normal', new Attr(new Float32Array(N), 3));
-    return g;
+  const SMOKE_KINDS = new Set(['smoke', 'blacksmoke', 'dust']);
+  function smokePuff(kind, x, y, z, o) {
+    const core = window.scCore;
+    if (!core || !core.smoke) return false;
+    if (o.fade) return core.smoke(SMOKE_KINDS.has(kind) ? kind : 'smoke', x, y, z, o);
+    // a plain smoke puff (rockets, car parts): rises at its own speed, grows, shrinks away
+    return core.smoke('smoke', x, y, z, { vx: o.vx, vy: o.vy, vz: o.vz, rise: o.vy || 0.1, drag: 0.6, size: o.size, grow: o.grow || 1, life: o.life, color: o.color, alpha: 0.8 });
   }
   function spawn(kind, x, y, z, o) {
+    if ((o.fade || SMOKE_KINDS.has(kind)) && smokePuff(kind, x, y, z, o)) return;
     if (!bulletParts()) return;
     if (!cubeGeo) {
       const P = [], N = [], h = 0.5;
@@ -827,17 +815,14 @@
       cubeGeo.setAttribute('normal', new Attr(new Float32Array(N), 3));
     }
     const col = o.color || PALETTE[kind][Math.floor(Math.random() * PALETTE[kind].length)];
-    if (o.fade && !puffGeo) puffGeo = makePuffGeo();
-    const mat = o.fade ? fadeMat(col, 0) : partMats[col] || (partMats[col] = new FlatMaterial({ color: col }));
-    const m = new MeshClass(o.fade ? puffGeo : cubeGeo, mat);
+    const mat = partMats[col] || (partMats[col] = new FlatMaterial({ color: col }));
+    const m = new MeshClass(cubeGeo, mat);
     m.position.set(x, y, z);
     m.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
     m.scale.setScalar(o.size);
     m.frustumCulled = false;
     appScene.add(m);
-    if (o.fade) { m.castShadow = false; m.renderOrder = 2; }
-    particles.push({ m, kind, col, vx: o.vx || 0, vy: o.vy || 0, vz: o.vz || 0, g: o.g || 0, size: o.size, grow: o.grow || 1, life: o.life, age: 0, land: o.land, spin: o.spin,
-      fade: !!o.fade, alpha: o.alpha ?? 0.8, rise: o.rise ?? 0, drag: o.drag ?? 1, flat: o.flat || 1, turn: (Math.random() - 0.5) * 0.6, level: 0 });
+    particles.push({ m, kind, vx: o.vx || 0, vy: o.vy || 0, vz: o.vz || 0, g: o.g || 0, size: o.size, grow: o.grow || (o.fade ? 3 : 1), life: o.life, age: 0, land: o.land, spin: o.spin });
   }
 
   let effectsOn = false, lastFx = 0;
@@ -892,7 +877,6 @@
       p.age += dt;
       const f = p.age / p.life;
       if (f >= 1) { p.m.removeFromParent(); particles.splice(k, 1); continue; }
-      if (p.fade) { stepPuff(p, f, dt); continue; }
       p.vy -= p.g * dt;
       p.m.position.x += p.vx * dt; p.m.position.y += p.vy * dt; p.m.position.z += p.vz * dt;
       if (p.land && p.m.position.y < 0.045) { p.m.position.y = 0.045; p.vx *= 0.5; p.vz *= 0.5; p.vy = Math.abs(p.vy) * 0.25; }
@@ -902,21 +886,6 @@
       p.m.scale.setScalar(Math.max(1e-4, grown * fade));
     }
     if (busy) requestAnimationFrame(effects); else effectsOn = false;
-  }
-
-  function stepPuff(p, f, dt) {
-    const m = p.m, k = Math.exp(-p.drag * dt), wind = 0.4 + Math.max(0, m.position.y) * 0.35;
-    p.vx = p.vx * k + WIND[0] * wind * (1 - k);
-    p.vz = p.vz * k + WIND[1] * wind * (1 - k);
-    p.vy = p.vy * k + p.rise * (1 - k);
-    m.position.x += p.vx * dt; m.position.y += p.vy * dt; m.position.z += p.vz * dt;
-    m.rotation.y += p.turn * dt;
-    const s = p.size * (1 + (p.grow - 1) * (1 - (1 - f) * (1 - f)));   // grows fast, then slowly
-    m.scale.set(s, s / p.flat, s);
-    const floor = 0.04 + s / p.flat * 0.3;                              // rolls over the ground, not through it
-    if (m.position.y < floor) { m.position.y = floor; if (p.vy < 0) p.vy = 0; }
-    const level = Math.round(p.alpha * Math.min(1, f / 0.06) * Math.pow(1 - f, 1.6) * FADE_LEVELS);
-    if (level !== p.level) { p.level = level; m.visible = level > 0; if (level > 0) m.material = fadeMat(p.col, level); }
   }
 
   // ---------- bullets ----------
@@ -936,7 +905,6 @@
     while (proto && !Object.prototype.hasOwnProperty.call(proto, 'translate')) proto = Object.getPrototypeOf(proto);
     Geometry = proto.constructor; Attr = mesh.geometry.attributes.position.constructor;
     FlatMaterial = (basic || lambert).constructor;
-    LambertClass = lambert && lambert.constructor;
     // a small grey slug, stretched along its flight direction (+z) so it reads as a fast streak
     const w = BULLET_SIZE / 2, l = BULLET_LENGTH / 2, P = [], N = [];
     const quad = (a, b, c, e, n) => { for (const v of [a, b, c, a, c, e]) { P.push(...v); N.push(...n); } };
@@ -1136,6 +1104,7 @@
     blackSmoke: (x, y, z, o) => blackSmoke(x, y, z, o || {}),
     blastEvent: (x, z, gib, knock, panic, y) => blastEvent(x, z, gib, knock, panic, y),
     get walking() { return walking; },
+    get weapon() { return weapon; },                               // the selected weapon's id ('none', 'pistol', 'minigun', 'rocket', …)
     // another script moves you and the camera (a car); null gives control back. While set, the
     // weapon is put away, WASD and the mouse go to driver.step(dt, keysHeld, mouseMovement).
     setDriver(d) {
@@ -1947,12 +1916,14 @@
     lastPick = pickAt(e.clientX, e.clientY);
   }, true);
 
-  // Double-click a building: start walking in front of its door straight away.
+  // Double-click a building: start walking in front of its door straight away. Double-click open
+  // ground outside the city (no road or building within OPEN_GROUND): start right there, looking
+  // at the middle of the city.
   window.addEventListener('dblclick', (e) => {
     if (walking || !renderer || e.target !== renderer.domElement) return;
     const id = pickAt(e.clientX, e.clientY);
-    const st = id != null && doorStart(id);
-    if (!st) return;                                     // not on a building: leave it to the app
+    const st = (id != null && doorStart(id)) || openGroundStart(e.clientX, e.clientY);
+    if (!st) return;                                     // not on a building or open ground: leave it to the app
     e.preventDefault(); e.stopImmediatePropagation();
     // the two clicks also opened the info card; close it once React has rendered it
     setTimeout(() => document.querySelector('.info-card .m-close')?.click(), 0);
@@ -1997,7 +1968,48 @@
     return { door, n };
   }
 
-  function applyStart({ door, n }) {
+  // Where a screen point in the normal (top-down) view meets the ground (y = 0), or null.
+  function groundAt(clientX, clientY) {
+    if (!renderer || !appCamera) return null;
+    const r = renderer.domElement.getBoundingClientRect();
+    const V = appCamera.position.constructor;
+    const nx = ((clientX - r.left) / r.width) * 2 - 1, ny = -((clientY - r.top) / r.height) * 2 + 1;
+    const a = new V(nx, ny, -1).unproject(appCamera), b = new V(nx, ny, 1).unproject(appCamera);
+    const dy = b.y - a.y; if (Math.abs(dy) < 1e-9) return null;
+    const t = -a.y / dy; if (t < 0) return null;
+    return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+  }
+  // Open ground outside the city: a start there, facing the middle of the city (null if a road or
+  // building is within OPEN_GROUND).
+  function openGroundStart(clientX, clientY) {
+    const g = groundAt(clientX, clientY); if (!g) return null;
+    const near = (x0, z0, x1, z1) => Math.hypot(Math.max(x0 - g.x, 0, g.x - x1), Math.max(z0 - g.z, 0, g.z - z1)) < OPEN_GROUND;
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, any = false;
+    const grow = (a, b, c, d) => { any = true; x0 = Math.min(x0, a); x1 = Math.max(x1, c); z0 = Math.min(z0, b); z1 = Math.max(z1, d); };
+    // roads: "x,y,h" runs from (x, y) to (x + 1, y), "x,y,v" to (x, y + 1)
+    for (const k of (city && city.roads) || []) {
+      const [x, y, t] = String(k).split(','), rx = +x, rz = +y, ex = t === 'h' ? rx + 1 : rx, ez = t === 'h' ? rz : rz + 1;
+      if (!Number.isFinite(rx) || !Number.isFinite(rz)) continue;
+      if (near(rx, rz, ex, ez)) return null;
+      grow(rx, rz, ex, ez);
+    }
+    for (const grp of buildingGroups()) {
+      const b = groupBox(grp); if (!b) continue;
+      if (near(b[0], b[2], b[3], b[5])) return null;
+      grow(b[0], b[2], b[3], b[5]);
+    }
+    if (!any) return null;
+    return { at: [g.x, g.z], look: [(x0 + x1) / 2, (z0 + z1) / 2] };
+  }
+
+  function applyStart(st) {
+    if (st.at) {                                         // open ground: stand there, face the centre
+      pos.x = st.at[0]; pos.z = st.at[1];
+      yaw = Math.atan2(-(st.look[0] - pos.x), -(st.look[1] - pos.z));
+      pitch = 0.05;
+      return;
+    }
+    const { door, n } = st;
     // The road runs on the door line; start on the sidewalk just in front of the door, and step
     // further out if a wall or porch is in the way.
     let x = door[0] - n[0] * 0.2, z = door[1] - n[1] * 0.2;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.2
+// @version      3.3
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -70,14 +70,14 @@
   const LIGHT_BOOST = 3.5;         // how much brighter the scene gets for a moment (was 7)
   const FOUNDATION_HEIGHT = 0.03;  // things lower than this survive even at ground zero
   const MAX_DEBRIS = 1500;        // pieces of rubble (instanced cubes; each moves every frame until it lies still) – × the detail setting's factor
-  const BLAST_SPEED = 10;          // how hard chunks and rubble are flung near the centre, for 15 kt (scales with the yield)
+  const BLAST_SPEED = 22;          // how hard chunks and rubble are flung outward near the centre, for 15 kt (scales with the yield; was 10)
   const CHUNK_SIZE = 0.2;          // buildings break into solid chunks about this big (tiles); smaller = more chunks
   const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide (wider when the chunks are bigger)
   const RUIN_SHARE = 0.75;         // at the edge of the blast this share of a building still stands (less towards the centre, none in the middle)
   const RUIN_JAGGED = 0.12;        // how much the broken tops of neighbouring columns differ (tiles; 0 = one flat cut)
   const MAX_CHUNK_VERTICES = 60000;    // (× the detail setting's factor: 1, 2, 4, 8, 16) for a big city the chunk size is raised so they stay below about this (every moving chunk's
                                        // vertices are recomputed and uploaded each frame: this is what the blast costs)
-  const SCATTER_DEGREES = 35;      // pieces fly away from ground zero ± this much, so debris mixes
+  const SCATTER_DEGREES = 15;      // pieces fly away from ground zero ± this much, so debris mixes (was 35: now clearly outward)
   const GRAVEL = 0.12;             // other things (roof details, trees …) blown away: chance per triangle of a rubble cube
   const CLOUD_PUFFS = 500;
   const CLOUD_LINGER = 20;         // after this many seconds the cloud rises and drifts away
@@ -332,16 +332,17 @@
     const [cx, cy, cz] = pivot;
     const turn = rnd(-1, 1) * SCATTER_DEGREES * Math.PI / 180, bx = (cx - nuke.cx) / (d || 1), bz = (cz - nuke.cz) / (d || 1);
     const dx = bx * Math.cos(turn) - bz * Math.sin(turn), dz = bx * Math.sin(turn) + bz * Math.cos(turn);
-    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
-    const out = nuke.speed * power * rnd(0.3, 1.3) + 0.3;
-    return { v: [dx * out + rnd(-0.2, 0.2), rnd(0.4, 1.8) * power + 0.25 + cy * 0.25, dz * out + rnd(-0.2, 0.2)], spin: rnd(1.5, 7) * power + 0.6 };
+    // outward first: strong all the way to the edge of the damage, only a little upward
+    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.4);
+    const out = nuke.speed * power * rnd(0.75, 1.25) + 1;
+    return { v: [dx * out + rnd(-0.1, 0.1), rnd(0.3, 1.2) * power + 0.25 + cy * 0.2, dz * out + rnd(-0.1, 0.1)], spin: rnd(1.5, 7) * power + 0.6 };
   }
   // The shockwave reached this chunk: it starts flying.
   function launch(fr) {
     if (fr.active) return;
     fr.active = true;
     const f = flight(fr.pivot, fr.d || 1);
-    B().launch(solid.set, fr, f.v, 0, f.spin);
+    B().launch(solid.set, fr, f.v, 0, f.spin, true);              // (slides on along the ground: blown away)
   }
   // buildings already in chunks before the blast (rockets, the monster): what's above the ruin's
   // height there flies like the rest
@@ -562,10 +563,10 @@
     if (!debris || dN >= maxDebris) return;
     const k = dN++;
     const dx = (x - nuke.cx) / (d || 1), dz = (z - nuke.cz) / (d || 1);
-    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
-    const out = nuke.speed * power * rnd(0.4, 1.2) + 0.2;
+    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.4);
+    const out = nuke.speed * power * rnd(0.6, 1.2) + 0.5;
     D.p.set([x, cy, z], k * 3);
-    D.v.set([dx * out + rnd(-0.3, 0.3), rnd(0.3, 2.2) * power + cy * 0.3, dz * out + rnd(-0.3, 0.3)], k * 3);
+    D.v.set([dx * out + rnd(-0.2, 0.2), rnd(0.3, 1.6) * power + cy * 0.25, dz * out + rnd(-0.2, 0.2)], k * 3);
     D.r.set([rnd(0, 6), rnd(0, 6), rnd(0, 6)], k * 3);
     D.w.set([rnd(-9, 9), rnd(-9, 9), rnd(-9, 9)], k * 3);
     D.s[k] = size; D.rest[k] = 0;
@@ -795,7 +796,7 @@
     return {
       yield: tons, total, edge,
       wave: Math.min(16, Math.max(0.8, edge / WAVE_TILES_PER_SECOND)),                // seconds for the wave to reach the edge
-      speed: Math.min(30, Math.max(2, BLAST_SPEED * Math.sqrt(total / (TOTAL_PER_KT * Math.cbrt(15))))),
+      speed: Math.min(60, Math.max(4, BLAST_SPEED * Math.sqrt(total / (TOTAL_PER_KT * Math.cbrt(15))))),
       H: Math.min(150, Math.max(1.2, CLOUD_PER_KT * Math.pow(kt, 0.25))),             // mushroom cloud height
       shake: SHAKE * Math.min(2, Math.max(0.15, Math.sqrt(edge / (EDGE_PER_KT * Math.cbrt(15))))),
       light: 1 + (LIGHT_BOOST - 1) * Math.min(1.4, Math.max(0.25, Math.pow(kt / 15, 0.15))),

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – rocket launcher (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.7
+// @version      1.8
 // @description  Adds a rocket launcher to walk mode (key 3). Residents and cars are blown apart, walls get holes blown in them.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -44,6 +44,9 @@
   const PROP_RADIUS = 0.45;        // trees and lamps this close fall over
   const HOLE_RADIUS = 0.16;        // chunks within this distance of the impact are blown out (chunk size, hits to collapse: buildings script)
   const PART_SPEED = 2.2;          // how hard car parts fly
+  const PRECUT_EVERY = 0.25;       // seconds: while the launcher is in your hands, the building under the crosshair is cut this often…
+  const PRECUT_REST = 2;           // …and, finer, the spot you aim at once the crosshair has rested on it this many checks
+  const PRECUT_SAME = 0.12;        // tiles: the aim point moving less than this counts as resting
   // --------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
@@ -138,7 +141,7 @@
     // the building it is going to hit: start cutting it into chunks now, while the rocket flies
     // the building it will hit is cut into chunks now, while the rocket flies – small ones around
     // where it will hit (buildings script: expect)
-    try { const B = window.scBuildings, h = B && w.rayBuildings(start, d, RANGE); if (h) { const p = { x: start.x + d.x * h.t, y: start.y + d.y * h.t, z: start.z + d.z * h.t }; if (B.expect) B.expect(p); else B.prepare(B.at(p)); } } catch (e) { console.warn('[rockets] prepare', e); }
+    try { const B = window.scBuildings, h = B && w.rayBuildings(start, d, RANGE); if (h) { const p = { x: start.x + d.x * h.t, y: start.y + d.y * h.t, z: start.z + d.z * h.t }; if (B.expect) B.expect(p, HOLE_RADIUS, { dir: d, prio: 'fire' }); else B.prepare(B.at(p)); } } catch (e) { console.warn('[rockets] prepare', e); }
     for (let k = 0; k < 5; k++) w.spawn('fire', start.x - d.x * 0.1, start.y, start.z - d.z * 0.1, { vx: -d.x * rnd(0.3, 0.8), vy: rnd(0, 0.1), vz: -d.z * rnd(0.3, 0.8), size: rnd(0.01, 0.018), life: rnd(0.06, 0.12) });   // a short flash out of the back
     w.startEffects();
     if (!loopOn) { loopOn = true; last = 0; requestAnimationFrame(loop); }
@@ -213,6 +216,33 @@
     const core = window.scCore;
     if (core) core.damage({ kind: 'blast', source: 'rocket', x: hit.at.x, y: hit.at.y, z: hit.at.z, n: hit.n, radius: HOLE_RADIUS });
   }
+
+  // ---------- cutting ahead, while you aim ----------
+  // A few times a second while the launcher is in your hands: the building under the crosshair is
+  // cut into chunks (buildings script, in its worker) and, once the crosshair rests on a spot, the
+  // chunks there are cut finer – usually all done before you fire. The buildings script does
+  // nothing twice for the same building or spot.
+  let aimLast = null, aimRest = 0, aimAt = 0;
+  function aimAhead(now) {
+    const w = W(), B = window.scBuildings;
+    if (!w || !B || !B.expect || !w.walking || w.driving || w.weapon !== 'rocket') { aimLast = null; return; }
+    if (now - aimAt < PRECUT_EVERY * 1000) return;
+    aimAt = now;
+    const pl = w.player, d = { x: -Math.sin(pl.yaw) * Math.cos(pl.pitch), y: Math.sin(pl.pitch), z: -Math.cos(pl.yaw) * Math.cos(pl.pitch) };
+    const o = { x: pl.x, y: pl.y, z: pl.z }, h = w.rayBuildings(o, d, RANGE);
+    if (!h) { aimLast = null; return; }
+    const p = { x: o.x + d.x * h.t, y: o.y + d.y * h.t, z: o.z + d.z * h.t };
+    aimRest = aimLast && Math.hypot(p.x - aimLast.x, p.y - aimLast.y, p.z - aimLast.z) < PRECUT_SAME ? aimRest + 1 : 0;
+    aimLast = p;
+    const bd = B.at(p, 0.05); if (!bd) return;
+    if (aimRest >= PRECUT_REST) B.expect(p, HOLE_RADIUS, { dir: d, prio: 'aim' });
+    else if (!B.isSolid(bd.id)) B.prepare(bd);
+  }
+  (function attach() {
+    const c = window.scCore;
+    if (!c) { if ((attach.n = (attach.n || 0) + 1) < 240) setTimeout(attach, 250); return; }
+    c.onFrame((dt, now) => { try { aimAhead(now); } catch (e) { if (!aimAhead.warned) { aimAhead.warned = true; console.warn('[rockets] aim', e); } } });
+  })();
 
   // ---------- cars burst into their parts ----------
   const parts = [];

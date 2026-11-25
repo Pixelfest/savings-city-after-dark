@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -34,7 +34,9 @@
  *   audio() one shared AudioContext.
  * - onFrame(fn): one requestAnimationFrame loop for everyone; fn(dt, now), dt in seconds (at most
  *   0.1). Errors are caught per callback (and reported once).
- * - puff(x, y, z, opts): a dust puff (grows, drifts, fades) that works without walk mode.
+ * - smoke(kind, x, y, z, opts): smoke and dust ('dust', 'blacksmoke', 'smoke') as solid low-poly
+ *   puffs, one InstancedMesh per kind (see "smoke and dust" below); walk mode's smoke goes here too.
+ *   puff(x, y, z, opts): the older dust puff (vx, vy, vz, size, life, delay, color), now one of those.
  * - settings: sliders other scripts add (define({ id, label, min, max, step, value, format?, help? }),
  *   get(id), set(id, v), onChange(id, fn)); kept in localStorage. A button in the menu opens a
  *   popup with all of them. The core's own: 'detail' (1 = normal … 5 = most detailed), read through
@@ -193,46 +195,190 @@
   requestAnimationFrame(frame);
   function onFrame(fn) { frameFns.add(fn); return () => frameFns.delete(fn); }
 
-  // ---------- dust puffs (work without walk mode) ----------
-  const puffs = [];
-  let puffGeo = null, puffMat = null;
-  function puffGeometry() {
-    // a low-poly ball of radius 1
-    const P = [], N = [], seg = 8, ring = 5;
-    const pt = (i, j) => { const a = (i / seg) * Math.PI * 2, b = (j / ring) * Math.PI - Math.PI / 2; return [Math.cos(b) * Math.cos(a), Math.sin(b), Math.cos(b) * Math.sin(a)]; };
-    for (let j = 0; j < ring; j++) for (let i = 0; i < seg; i++) {
-      const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1);
-      for (const v of [a, c, b, a, d, c]) { P.push(...v); N.push(...v); }
+  // ---------- smoke and dust: solid puffs, one InstancedMesh per kind ----------
+  // Every puff is one instance of a low-poly ball (icosahedron): position, size, rotation and
+  // colour per instance, so all smoke of a kind is one draw call. Solid (no transparency: no
+  // sorting, no overdraw): instead of fading, a puff shrinks away at the end of its life and as
+  // it climbs towards SMOKE_TOP – nothing is left above that height. Fixed capacity per kind,
+  // kept in flat typed arrays (no objects per puff, no garbage); when a kind is full the oldest
+  // puff is reused.
+  const SMOKE_TOP = 1.5;           // tiles (≈ 30 m): puffs are gone by this height…
+  const SMOKE_BAND = 0.7;          // …and start shrinking this far below it
+  const SMOKE_WIND = [0.09, 0.035];// tiles per second, a bit stronger higher up
+  const SMOKE_TINT = 0.55;         // how far a puff's colour goes towards its kind's "thin" colour as it ages
+  const APP_EXHAUST = true;        // the app's own exhaust puffs (a barrel roll) drawn as solid puffs too
+  const SMOKE_KINDS = {
+    // colours: one is picked per puff (unless the caller gives one); fade: what thin smoke looks like
+    // scale: solid puffs look heavier than see-through ones of the same size
+    dust: { cap: 1600, scale: 0.8, colors: ['#bfb39f', '#cdc2b0', '#b3a895', '#d6ccba', '#a99f90'], fade: '#e6e0d6' },
+    blacksmoke: { cap: 1600, scale: 0.85, colors: ['#1d1d20', '#26262a', '#303034', '#3a3a3e'], fade: '#77777c' },
+    smoke: { cap: 500, scale: 1, colors: ['#3b3b3e', '#55565a', '#6e6f74'], fade: '#a4a5aa' },
+    exhaust: { cap: 600, scale: 1, colors: ['#eef1f6'], fade: '#ffffff' },
+  };
+  // per puff, at offset i × ST: position, velocity, age, life, size, grow, rise, drag, flat, thin, wind, colour (3)
+  const ST = 18, X = 0, Y = 1, Z = 2, VX = 3, VY = 4, VZ = 5, AGE = 6, LIFE = 7, SIZE = 8, GROW = 9, RISE = 10, DRAG = 11, FLAT = 12, THIN = 13, WINDF = 14, CR = 15;
+  const smokeKinds = new Map();    // kind → { mesh, d (Float32Array cap × ST), R (cap × 9), cap, next, used, live, fade }
+  let smokeGeo = null, smokeMat = null;
+  const linear = new Map();        // '#rrggbb' → [r, g, b] (linear, like three.js colours)
+  function lin(hex) {
+    let c = linear.get(hex);
+    if (!c) { const k = new K.Color(hex); c = [k.r, k.g, k.b]; linear.set(hex, c); }
+    return c;
+  }
+  function icosahedron() {
+    // radius 0.5 (a puff of `size` is that wide), flat shaded
+    const t = (1 + Math.sqrt(5)) / 2, V = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]]
+      .map((v) => { const l = Math.hypot(...v) * 2; return v.map((c) => c / l); });
+    const F = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]];
+    const P = [], N = [];
+    for (const [a, b, c] of F) {
+      const A = V[a], B = V[b], C = V[c], n = [A[0] + B[0] + C[0], A[1] + B[1] + C[1], A[2] + B[2] + C[2]], l = Math.hypot(...n);
+      for (const v of [A, B, C]) { P.push(...v); N.push(n[0] / l, n[1] / l, n[2] / l); }
     }
     const g = new K.Geometry();
     g.setAttribute('position', new K.Attr(new Float32Array(P), 3));
     g.setAttribute('normal', new K.Attr(new Float32Array(N), 3));
     return g;
   }
-  // opts: vx, vy, vz (tiles/s), size (final radius, roughly), life (s), delay (s), color
-  function puff(x, y, z, o = {}) {
-    if (!scene || !classes()) return;
-    if (!puffGeo) { puffGeo = puffGeometry(); puffMat = new K.Lambert({ color: '#b9aa96', transparent: true, opacity: 0.85, depthWrite: false }); }
-    const mat = puffMat.clone();
-    if (o.color) mat.color.set(o.color);
-    const m = new K.Mesh(puffGeo, mat);
-    m.position.set(x, y, z); m.scale.setScalar(0.001); m.visible = false; m.frustumCulled = false; m.userData.scPuff = true;
-    scene.add(m);
-    puffs.push({ m, vx: o.vx || 0, vy: o.vy || 0, vz: o.vz || 0, size: o.size || 0.15, life: o.life || 3, age: -(o.delay || 0) });
+  function smokeKind(kind) {
+    let sk = smokeKinds.get(kind);
+    if (sk) return sk;
+    const def = SMOKE_KINDS[kind];
+    if (!def || !scene || !classes() || !K.Instanced) return null;
+    if (!smokeGeo) { smokeGeo = icosahedron(); smokeMat = new K.Lambert({ color: '#ffffff' }); }
+    const mesh = new K.Instanced(smokeGeo, smokeMat, def.cap);
+    mesh.count = 0; mesh.frustumCulled = false; mesh.castShadow = mesh.receiveShadow = false;
+    mesh.userData.scSmoke = kind; mesh.userData.scPuff = true; mesh.name = 'sc-smoke-' + kind;
+    mesh.setColorAt(0, new K.Color('#ffffff'));
+    if (mesh.instanceMatrix.setUsage) { mesh.instanceMatrix.setUsage(35048); mesh.instanceColor.setUsage(35048); }   // dynamic
+    scene.add(mesh);
+    sk = { kind, mesh, d: new Float32Array(def.cap * ST), R: new Float32Array(def.cap * 9), cap: def.cap, next: 0, used: 0, live: 0, fade: lin(def.fade), colors: def.colors, scale: def.scale };
+    // a random orientation per slot, once (puffs don't spin)
+    for (let i = 0; i < def.cap; i++) randomRotation(sk.R, i * 9);
+    smokeKinds.set(kind, sk);
+    return sk;
+  }
+  function randomRotation(R, o) {
+    // a random unit quaternion → 3×3 matrix (row-major)
+    let x = Math.random() * 2 - 1, y = Math.random() * 2 - 1, z = Math.random() * 2 - 1, w = Math.random() * 2 - 1;
+    const l = Math.hypot(x, y, z, w) || 1; x /= l; y /= l; z /= l; w /= l;
+    R[o] = 1 - 2 * (y * y + z * z); R[o + 1] = 2 * (x * y - z * w); R[o + 2] = 2 * (x * z + y * w);
+    R[o + 3] = 2 * (x * y + z * w); R[o + 4] = 1 - 2 * (x * x + z * z); R[o + 5] = 2 * (y * z - x * w);
+    R[o + 6] = 2 * (x * z - y * w); R[o + 7] = 2 * (y * z + x * w); R[o + 8] = 1 - 2 * (x * x + y * y);
+  }
+  // A puff of `kind` ('dust', 'blacksmoke', 'smoke'). opts (tiles, seconds): vx, vy, vz; size (how
+  // wide it starts), grow (it ends up this many times as big), life, delay; rise (the speed it
+  // rises at once it has settled), drag (how fast it settles: velocity → rise + wind), flat (>1:
+  // squashed, rolling over the ground), alpha (0…1: thinner smoke is smaller and lighter),
+  // wind (0…1), color ('#rrggbb', else one of the kind's colours).
+  function smoke(kind, x, y, z, o = {}) {
+    const sk = smokeKind(SMOKE_KINDS[kind] ? kind : 'smoke'); if (!sk) return false;
+    const i = sk.next; sk.next = (i + 1) % sk.cap; if (sk.used < sk.cap) sk.used = Math.max(sk.used, i + 1);
+    const d = sk.d, b = i * ST;
+    if (!(d[b + AGE] < d[b + LIFE])) sk.live++;                    // (a slot still in use is simply reused: the oldest)
+    d[b + X] = x; d[b + Y] = y; d[b + Z] = z;
+    d[b + VX] = o.vx || 0; d[b + VY] = o.vy || 0; d[b + VZ] = o.vz || 0;
+    d[b + AGE] = -(o.delay || 0); d[b + LIFE] = o.life || 3;
+    d[b + SIZE] = (o.size || 0.1) * sk.scale; d[b + GROW] = o.grow || 3; d[b + RISE] = o.rise ?? 0.1; d[b + DRAG] = o.drag ?? 1;
+    d[b + FLAT] = o.flat || 1; d[b + WINDF] = o.wind ?? 1;
+    const a = Math.max(0.05, Math.min(1, (o.alpha ?? 0.8) / 0.85));
+    d[b + THIN] = 0.55 + 0.45 * a;                                  // thin smoke: smaller…
+    const c = lin(o.color || sk.colors[(Math.random() * sk.colors.length) | 0]), f = sk.fade, t = (1 - a) * 0.5;
+    d[b + CR] = c[0] + (f[0] - c[0]) * t; d[b + CR + 1] = c[1] + (f[1] - c[1]) * t; d[b + CR + 2] = c[2] + (f[2] - c[2]) * t;   // …and lighter
+    return true;
+  }
+  function stepSmoke(sk, dt) {
+    const d = sk.d, R = sk.R, m = sk.mesh.instanceMatrix.array, col = sk.mesh.instanceColor.array, fd = sk.fade;
+    let live = 0, hi = 0;
+    for (let i = 0; i < sk.used; i++) {
+      const b = i * ST, life = d[b + LIFE];
+      let age = d[b + AGE];
+      const e = i * 16;
+      if (!(age < life)) { if (m[e + 15] !== 0) zero(m, e); continue; }   // a free slot: drawn as nothing
+      live++; hi = i + 1;
+      age += dt; d[b + AGE] = age;
+      if (age < 0) { zero(m, e); continue; }                         // not yet (delay)
+      // velocity settles towards rising + the wind (cheap: 1 / (1 + drag·dt) instead of exp)
+      let y = d[b + Y];
+      const k = 1 / (1 + d[b + DRAG] * dt), q = 1 - k, wind = (0.4 + (y > 0 ? y : 0) * 0.35) * d[b + WINDF];
+      const vx = d[b + VX] * k + SMOKE_WIND[0] * wind * q, vz = d[b + VZ] * k + SMOKE_WIND[1] * wind * q;
+      let vy = d[b + VY] * k + d[b + RISE] * q;
+      const x = d[b + X] + vx * dt, z = d[b + Z] + vz * dt;
+      y += vy * dt;
+      // size: grows fast, then slowly; pops up at the start, shrinks away at the end and near the top
+      const f = age / life, g = 1 - (1 - f) * (1 - f);
+      let s = d[b + SIZE] * (1 + (d[b + GROW] - 1) * g) * d[b + THIN];
+      s *= (f < 0.06 ? f / 0.06 : 1) * (f > 0.5 ? (1 - f) * 2 : 1);
+      const top = (SMOKE_TOP - y) / SMOKE_BAND;
+      if (top <= 0) { d[b + AGE] = life; live--; zero(m, e); continue; }   // gone at the top
+      if (top < 1) s *= top;
+      const flat = d[b + FLAT], sy = s / flat, floor = 0.04 + sy * 0.3;
+      if (y < floor) { y = floor; if (vy < 0) vy = 0; }               // rolls over the ground, not through it
+      d[b + X] = x; d[b + Y] = y; d[b + Z] = z; d[b + VX] = vx; d[b + VY] = vy; d[b + VZ] = vz;
+      // matrix = translate · scale(s, s/flat, s) · rotation (column-major)
+      const r = i * 9;
+      m[e] = R[r] * s; m[e + 1] = R[r + 3] * sy; m[e + 2] = R[r + 6] * s;
+      m[e + 4] = R[r + 1] * s; m[e + 5] = R[r + 4] * sy; m[e + 6] = R[r + 7] * s;
+      m[e + 8] = R[r + 2] * s; m[e + 9] = R[r + 5] * sy; m[e + 10] = R[r + 8] * s;
+      m[e + 12] = x; m[e + 13] = y; m[e + 14] = z; m[e + 15] = 1;
+      // colour: towards the thin colour as it ages
+      const t = f * SMOKE_TINT, c = b + CR, o3 = i * 3;
+      col[o3] = d[c] + (fd[0] - d[c]) * t; col[o3 + 1] = d[c + 1] + (fd[1] - d[c + 1]) * t; col[o3 + 2] = d[c + 2] + (fd[2] - d[c + 2]) * t;
+    }
+    sk.live = live;
+    if (!live) { sk.used = 0; sk.next = 0; }                       // all gone: start at the front again (nothing drawn)
+    sk.mesh.count = live ? hi : 0;
+    upload(sk.mesh.instanceMatrix, hi * 16); upload(sk.mesh.instanceColor, hi * 3);
+  }
+  function zero(m, e) { for (let k = 0; k < 16; k++) m[e + k] = 0; }
+  function upload(a, n) { if (!n) return; if (a.addUpdateRange) a.addUpdateRange(0, n); a.needsUpdate = true; }
+  // The app's own exhaust puffs (white smoke from a car's exhaust and wheels in a barrel roll):
+  // its points (soft, see-through, sized for the top-down camera) are hidden and every live one is
+  // drawn as a solid puff of the same place and size instead.
+  let appExhaust = null, exhaustLookedAt = 0;
+  function findExhaust() {
+    if (appExhaust && appExhaust.parent) return appExhaust;
+    const now = performance.now();
+    if (now - exhaustLookedAt < 3000) return null;
+    exhaustLookedAt = now; appExhaust = null;
+    scene.traverse((o) => { const a = o.isPoints && o.geometry && o.geometry.attributes; if (!appExhaust && a && a.aSize && a.aAlpha && !a.aColor) appExhaust = o; });
+    return appExhaust;
+  }
+  function stepExhaust() {
+    const pts = findExhaust(); if (!pts) return;
+    pts.visible = false;
+    const sk = smokeKind('exhaust'); if (!sk) return;
+    const a = pts.geometry.attributes, P = a.position.array, S = a.aSize.array, A = a.aAlpha.array, m = sk.mesh.instanceMatrix.array, R = sk.R;
+    let n = 0;
+    for (let i = 0; i < A.length && n < sk.cap; i++) {
+      const al = A[i]; if (al < 0.02 || P[i * 3 + 1] > SMOKE_TOP) continue;
+      // fading out (alpha) → shrinking away
+      const s = S[i] * 0.75 * Math.sqrt(al / 0.9), e = n * 16, r = (i % sk.cap) * 9;
+      m[e] = R[r] * s; m[e + 1] = R[r + 3] * s; m[e + 2] = R[r + 6] * s; m[e + 3] = 0;
+      m[e + 4] = R[r + 1] * s; m[e + 5] = R[r + 4] * s; m[e + 6] = R[r + 7] * s; m[e + 7] = 0;
+      m[e + 8] = R[r + 2] * s; m[e + 9] = R[r + 5] * s; m[e + 10] = R[r + 8] * s; m[e + 11] = 0;
+      m[e + 12] = P[i * 3]; m[e + 13] = P[i * 3 + 1]; m[e + 14] = P[i * 3 + 2]; m[e + 15] = 1;
+      n++;
+    }
+    if (n && !sk.colored) { const c = lin(SMOKE_KINDS.exhaust.colors[0]), col = sk.mesh.instanceColor.array; for (let k = 0; k < sk.cap; k++) col.set(c, k * 3); upload(sk.mesh.instanceColor, sk.cap * 3); sk.colored = true; }
+    sk.mesh.count = n;
+    upload(sk.mesh.instanceMatrix, n * 16);
   }
   onFrame((dt) => {
-    for (let k = puffs.length - 1; k >= 0; k--) {
-      const p = puffs[k]; p.age += dt;
-      if (p.age < 0) continue;
-      const f = p.age / p.life;
-      if (f >= 1) { p.m.removeFromParent(); p.m.material.dispose(); puffs.splice(k, 1); continue; }
-      p.m.visible = true;
-      const drag = Math.exp(-1.2 * dt); p.vx *= drag; p.vz *= drag; p.vy *= drag;
-      p.m.position.x += p.vx * dt; p.m.position.y += p.vy * dt; p.m.position.z += p.vz * dt;
-      p.m.scale.set(p.size * (0.4 + f * 1.4), p.size * (0.3 + f * 0.9), p.size * (0.4 + f * 1.4));
-      p.m.material.opacity = 0.85 * (1 - f) * Math.min(1, p.age * 4);
+    for (const sk of smokeKinds.values()) {
+      if (sk.kind === 'exhaust') continue;
+      if (sk.mesh.parent !== scene && scene) scene.add(sk.mesh);
+      if (sk.used) stepSmoke(sk, dt);
     }
+    if (APP_EXHAUST && scene) stepExhaust();
   });
+  // the old dust puff (grows, drifts, fades), now a solid one: opts vx, vy, vz, size (about its
+  // final radius), life, delay, color
+  function puff(x, y, z, o = {}) {
+    return smoke('dust', x, y, z, { vx: o.vx, vy: o.vy, vz: o.vz, size: (o.size || 0.15) * 0.9, grow: 4, flat: 1.3, drag: 1.2, rise: 0.02, life: o.life || 3, delay: o.delay, color: o.color });
+  }
+  // what's in use, per kind (for tests): { kind: { live, capacity } }
+  function smokeStats() { const r = {}; for (const [k, sk] of smokeKinds) r[k] = { live: sk.kind === 'exhaust' ? sk.mesh.count : sk.live, capacity: sk.cap }; return r; }
 
   // ---------- the damage bus ----------
   const damageFns = [];
@@ -378,7 +524,7 @@
   function projectOf(o) { for (let p = o; p; p = p.parent) if (p.userData && p.userData.projectId !== undefined) return p; return null; }
 
   window.scCore = {
-    version: '1.2',
+    version: '1.3',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
@@ -390,7 +536,7 @@
     get cityVersion() { return cityVersion; },
     onCity(fn) { if (typeof fn === 'function') { cityFns.push(fn); if (city) try { fn(city); } catch (e) { console.warn('[core] city', e); } } },
     traffic: () => trafficCars,
-    out, audio, onFrame, puff, damage, onDamage, isFacade, projectOf,
+    out, audio, onFrame, puff, smoke, smokeStats, damage, onDamage, isFacade, projectOf,
     settings, detail, openSettings,
   };
   // scripts that loaded before the core and are waiting for it

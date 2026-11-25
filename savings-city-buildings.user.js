@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -9,8 +9,8 @@
 // ==/UserScript==
 
 /*
- * Needs savings-city-core (window.scCore): the scene, three.js classes, the frame loop, dust puffs
- * and the damage bus. Uses walk mode (window.scWalk) when it's there, for its dust and sounds.
+ * Needs savings-city-core (window.scCore): the scene, three.js classes, the frame loop, dust
+ * (scCore.smoke) and the damage bus. Uses walk mode (window.scWalk) when it's there, for its sounds.
  *
  * How a building breaks
  * ---------------------
@@ -19,18 +19,23 @@
  *   facade's texture mapping (windows) and colours per wall.
  * - prepare(building) cuts every box into convex chunks about CHUNK_SIZE big, bigger for big
  *   buildings so there are never many more than MAX_CHUNKS (random, slightly tilted planes; in
- *   slabs, in time slices of a few ms, so nothing stutters). A hit or collapse that arrives before
- *   the cutting is done waits for it (the building stays as it is until then). Outside faces keep
- *   the facade, inside faces are broken concrete in the wall's colour. All chunks go into one mesh
- *   with the facade material; every chunk keeps its own range of vertices.
+ *   slabs). The cutting runs in a Web Worker made from this script's own code (cutterCore), so the
+ *   page never waits for it; the page only gets the finished arrays and makes one mesh of them.
+ *   Where no worker can be made, the same code runs on the page in slices of a few ms. A hit or
+ *   collapse that arrives before the cut is done waits for it (the building stays as it is until
+ *   then; the cut is moved to the front). Outside faces keep the facade, inside faces are broken
+ *   concrete in the wall's colour. All chunks go into one mesh with the facade material; every
+ *   chunk keeps its own range of vertices.
  * - swapIn: the chunks are shown and the building's own triangles are hidden (collapsed to a point
  *   in the city-block meshes the app draws, kept hidden when the app redraws a block).
- * - expect(point): a hit is coming (the rocket launcher calls it when it fires). The building is
- *   cut (if it wasn't yet) and the chunks around the aim point are cut again, much smaller
- *   (FINE_SIZE), while the rocket flies: a crater of many small pieces, the rest stays light.
- *   The refined pieces go into a mesh of their own; the coarse chunk they replace is collapsed.
- *   Cutting and refining run one after the other in time slices (st.queue); hits that arrive
- *   earlier wait for the queue to empty.
+ * - expect(point, radius, { dir, prio }): a hit is coming (the rocket launcher calls it when it
+ *   fires, and while you aim). The building is cut (if it wasn't yet) and the chunks around the aim
+ *   point are cut again, much smaller (FINE_SIZE): only within FINE_REACH crater radii, only on the
+ *   side facing the shooter (FINE_DEPTH deep) and at most FINE_MAX pieces (× detail), nearest
+ *   first – a crater of many small pieces, the rest stays light. The fine pieces go into a mesh of
+ *   their own; the coarse chunks they replace are collapsed. A spot is cut finer once. A hit only
+ *   waits for the coarse cut, never for the finer one: if that's not back yet, the crater is made of
+ *   the coarse chunks (and the finer pieces of chunks that already flew are dropped).
  * - crater(): chunks near a point fly out. hit() = a crater that counts; after HITS_TO_COLLAPSE
  *   the building comes down.
  * - collapse(building, opts) in two styles:
@@ -54,9 +59,12 @@
   // ---- settings (tiles; 1 tile ≈ 20 m) ----
   const CHUNK_SIZE = 0.2;          // buildings are cut into chunks about this big (smaller = finer holes, but much heavier)…
   const MAX_CHUNKS = 800;          // …but never into more than about this many: big buildings get bigger chunks
-  const CUT_SLICE_MS = 8;          // cutting runs in slices this long, between frames (nothing stutters)
+  const CUT_SLICE_MS = 8;          // without a worker: cutting runs on the page in slices this long, between frames
+  const USE_WORKER = true;         // cut in a Web Worker (off the page's thread); falls back to slices if one can't be made
   const FINE_SIZE = 0.1;           // where a rocket is about to hit, chunks are cut again this small (÷ ∛detail factor)…
-  const FINE_REACH = 2.2;          // …within this many crater radii of the aim point
+  const FINE_REACH = 1.4;          // …within this many crater radii of the aim point…
+  const FINE_DEPTH = 0.9;          // …only on the side facing the shooter: at most this many crater radii deep…
+  const FINE_MAX = 200;            // …and at most this many fine pieces per spot (× detail factor), the nearest chunks first
   const RUBBLE_AVOID_SECONDS = 120;// residents stay away from a collapsed building this long
   const HITS_TO_COLLAPSE = 7;      // blasts (rockets) a building takes before it comes down
   const HOLE_RADIUS = 0.16;        // default crater radius
@@ -77,14 +85,13 @@
   const scene = () => C() && C().scene;
   const isFacade = (m) => !!(m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade');
 
-  // ---------- sound and dust (walk mode's when you're walking, else the core's puffs) ----------
+  // ---------- sound and dust (the core's solid puffs; walk mode's sounds) ----------
   function sound(kind) { const w = W(); if (w && w.sound) w.sound(kind); }
-  // opts as walk mode's dust: vx, vy, vz, size, life, plus rise, drag, flat, grow, alpha (walk mode only), delay (puffs only)
+  // opts as the core's smoke: vx, vy, vz, size, life, rise, drag, flat, grow, alpha, delay
   function dust(x, y, z, o) {
-    const w = W();
-    if (w && w.walking && w.spawn) { w.spawn('dust', x, y, z, { fade: true, ...o }); w.startEffects(); return; }
     const c = C(); if (!c) return;
-    c.puff(x, y, z, { vx: o.vx, vy: o.vy, vz: o.vz, size: (o.size || 0.1) * 2.2, life: Math.min(6, o.life || 3), delay: o.delay });
+    if (c.smoke) { c.smoke('dust', x, y, z, o); return; }
+    c.puff(x, y, z, { vx: o.vx, vy: o.vy, vz: o.vz, size: (o.size || 0.1) * 2.2, life: Math.min(6, o.life || 3), delay: o.delay });   // (core older than 1.3)
   }
 
   // ---------- chunk sets: many pieces in one mesh, each moving on its own ----------
@@ -117,19 +124,43 @@
       if (frs.length % 200 === 0) yield;
     }
     g.setDrawRange(0, total);
+    return addSet(g, frs, material, opts);
+  }
+  function addSet(g, frs, material, opts) {
     const mesh = new K.Mesh(g, material);
     mesh.castShadow = mesh.receiveShadow = true; mesh.frustumCulled = false; mesh.userData.scSolid = true;
     mesh.visible = !opts.hidden;
     (opts.parent || scene()).add(mesh);
-    const set = { mesh, g, pos: P, nor: N, col: Co, frs, active: false, dusty: !!opts.dusty, center: opts.center || null };
+    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, center: opts.center || null };
     sets.add(set);
     return set;
   }
   function chunkSet(pieces, material, opts) { const gen = buildSet(pieces, material, opts); let r; do { r = gen.next(); } while (!r.done); return r.value; }
-  // a chunk starts moving: velocity v, after `delay` seconds, tumbling at `spin` rad/s
-  function launch(set, fr, v, delay = 0, spin = rnd(1, 5)) {
+  // A chunk set from the cutter's flat arrays (see pack() in cutterCore): no work per vertex here.
+  // A hidden one is drawn with nothing (draw range 0) instead of being invisible, so its buffers
+  // already go to the GPU now and not in the frame of the first hit.
+  function packedSet(d, material, opts = {}) {
+    const g = new K.Geometry();
+    const attr = (a, w) => { const at = new K.Attr(a, w); if (at.setUsage) at.setUsage(35048); return at; };
+    g.setAttribute('position', attr(d.pos, 3)); g.setAttribute('normal', attr(d.nor, 3)); g.setAttribute('color', new K.Attr(d.col, 3)); g.setAttribute('uv', new K.Attr(d.uv, 2));
+    const frs = [], M = d.meta;
+    for (let i = 0; i < d.P; i++) {
+      const o = i * 14, start = M[o], count = M[o + 1];
+      frs.push({ start, count, pivot: [M[o + 2], M[o + 3], M[o + 4]], normal: [M[o + 5], M[o + 6], M[o + 7]], lo: [M[o + 8], M[o + 9], M[o + 10]], hi: [M[o + 11], M[o + 12], M[o + 13]],
+        orig: d.orig.subarray(start * 3, (start + count) * 3), n0: d.n0.subarray(start * 3, (start + count) * 3), state: 'still', idx: d.src ? d.src[i] : i, fine: !!d.src });
+    }
+    const total = d.pos.length / 3;
+    g.setDrawRange(0, opts.hidden ? 0 : total);
+    const set = addSet(g, frs, material, { ...opts, hidden: false });
+    set.total = total;
+    return set;
+  }
+  function showSet(set) { if (set.total !== undefined) set.g.setDrawRange(0, set.total); set.mesh.visible = true; }
+  // a chunk starts moving: velocity v, after `delay` seconds, tumbling at `spin` rad/s; `slide`:
+  // it keeps more of its speed when it lands and slides on (a blast wave)
+  function launch(set, fr, v, delay = 0, spin = rnd(1, 5), slide = false) {
     let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
-    Object.assign(fr, { state: 'flying', v, delay, R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0], axis: [ax / al, ay / al, az / al], w: spin, landed: false, age: 0 });
+    Object.assign(fr, { state: 'flying', v, delay, R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0], axis: [ax / al, ay / al, az / al], w: spin, landed: false, age: 0, slide });
     set.active = true;
   }
   function stepSets(dt) {
@@ -151,7 +182,7 @@
           const n = [R[0] * x + R[1] * y + R[2] * z, R[3] * x + R[4] * y + R[5] * z, R[6] * x + R[7] * y + R[8] * z];
           const tilt = Math.acos(Math.min(1, Math.max(-1, -n[1])));
           if (tilt > 0.01) { let ax = n[2], az = -n[0]; let l = Math.hypot(ax, az); if (l < 1e-6) { ax = 1; az = 0; l = 1; } fr.R = mul(rot(ax / l, 0, az / l, Math.min(tilt, 6 * dt)), R); }
-          const f = Math.exp(-5 * dt); fr.v[0] *= f; fr.v[2] *= f;
+          const f = Math.exp(-(fr.slide ? 2 : 5) * dt); fr.v[0] *= f; fr.v[2] *= f;
           if ((tilt <= 0.01 && Math.hypot(fr.v[0], fr.v[2]) < 0.05) || fr.age > 12) fr.state = 'rest';
         }
         let minY = writeChunk(set, fr);
@@ -165,7 +196,7 @@
               let dx = x - c[0], dz = z - c[1]; const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
               dust(x, 0.06, z, { vx: dx * rnd(0.3, 0.9) + fr.v[0] * 0.3, vy: rnd(0.02, 0.15), vz: dz * rnd(0.3, 0.9) + fr.v[2] * 0.3, rise: 0.03, drag: 0.6, flat: 1.5, size: rnd(0.08, 0.16), grow: rnd(4, 7), life: rnd(6, 10), alpha: 0.7 });
             }
-            fr.v[0] *= 0.4; fr.v[2] *= 0.4;
+            const keep = fr.slide ? 0.7 : 0.4; fr.v[0] *= keep; fr.v[2] *= keep;
           }
           fr.v[1] = Math.max(0, fr.v[1]) * 0.1;
           minY = writeChunk(set, fr);
@@ -233,7 +264,7 @@
     return list().filter((bd) => Math.hypot(Math.max(bd.x0 - x, 0, x - bd.x1), Math.max(bd.z0 - z, 0, z - bd.z1)) <= r);
   }
 
-  // ---- cutting a building into chunks, in time slices ----
+  // ---- cutting a building into chunks: in a Web Worker, or in time slices on the page ----
   // Chunk size for a building: CHUNK_SIZE, or bigger so there are about MAX_CHUNKS at most
   // (measured: shatter makes about 7.7 × volume / size³ pieces – it cuts until every side is short).
   // The detail setting (core: 1 … 5) multiplies the number of chunks by 1, 2, 4, 8, 16.
@@ -242,107 +273,122 @@
     const f = C() && C().detail ? C().detail().factor : 1;
     return Math.max(CHUNK_SIZE / Math.cbrt(f), Math.cbrt((7.7 * volume) / (MAX_CHUNKS * f)));
   }
-  function* cutBuilding(bd, st) {
-    const pieces = [], size = st.size = chunkSizeFor(bd);
-    for (const b of bd.boxes) {
-      const wall = b.wallColor, concrete0 = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
-      const tags = { '+x': { side: '+x', ext: true }, '-x': { side: '-x', ext: true }, '+z': { side: '+z', ext: true }, '-z': { side: '-z', ext: true }, '+y': { side: '+y', ext: true }, '-y': { side: '-y', ext: false } };
-      // in slabs of about two chunk heights, so one cut never has to deal with a whole tower
-      const layers = Math.max(1, Math.round((b.y1 - b.y0) / (size * 2)));
-      for (let l = 0; l < layers; l++) {
-        const ya = b.y0 + (b.y1 - b.y0) * l / layers, yb = b.y0 + (b.y1 - b.y0) * (l + 1) / layers;
-        const t = { ...tags, '+y': { side: '+y', ext: l === layers - 1 }, '-y': { side: '-y', ext: false } };
-        const chunks = [];
-        shatter(boxPoly(b.x0, ya, b.z0, b.x1, yb, b.z1, t), size, chunks);
-        for (const ch of chunks) {
-          const s2 = rnd(0.88, 1.1);
-          let big = null, area = -1;
-          for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
-          const tint = concrete0.map((v) => v * s2);
-          pieces.push({ tris: pieceTriangles(ch, b, tint), normal: big, poly: ch, box: b, tint });   // shape kept: it can be cut finer later
-        }
-        yield;
-      }
-    }
-    const mat = Array.isArray(bd.mesh.material) ? bd.mesh.material[0] : bd.mesh.material;
-    st.set = yield* buildSet(pieces, mat, { hidden: true, dusty: true, center: [bd.cx, bd.cz] });
-    st.sets.push(st.set);
-    st.ready = true;
-  }
-  // Cut the still chunks within `reach` of p again, `size` small: new pieces in a mesh of their
-  // own, the coarse chunks they came from collapsed (state 'gone').
-  function* refineAt(st, p, reach, size) {
-    const pieces = [], victims = [];
-    for (const set of st.sets) for (const fr of set.frs) {
-      if (fr.state !== 'still' || !fr.poly || fr.fine) continue;
-      const { lo, hi } = bounds(fr.poly);
-      const dx = Math.max(lo[0] - p.x, 0, p.x - hi[0]), dy = Math.max(lo[1] - p.y, 0, p.y - hi[1]), dz = Math.max(lo[2] - p.z, 0, p.z - hi[2]);
-      if (Math.hypot(dx, dy, dz) > reach || Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) <= size * 1.3) continue;
-      const out = [];
-      shatter(fr.poly, size, out);
-      for (const ch of out) {
-        let big = null, area = -1;
-        for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
-        pieces.push({ tris: pieceTriangles(ch, fr.box, fr.tint), normal: big, poly: ch, box: fr.box, tint: fr.tint, fine: true });
-      }
-      victims.push([set, fr]);
-      yield;
-    }
-    if (!pieces.length) return;
-    const mat = Array.isArray(st.bd.mesh.material) ? st.bd.mesh.material[0] : st.bd.mesh.material;
-    const set = yield* buildSet(pieces, mat, { hidden: !st.shown, dusty: true, center: [st.bd.cx, st.bd.cz] });
-    st.sets.push(set);
-    // swap in the same frame: the coarse chunks out (collapsed to a point), the fine ones in
-    for (const [old, fr] of victims) {
-      fr.state = 'gone';
-      for (let k = fr.start; k < fr.start + fr.count; k++) old.pos.setXYZ(k, fr.pivot[0], fr.pivot[1], fr.pivot[2]);
-      if (old.pos.addUpdateRange) old.pos.addUpdateRange(fr.start * 3, fr.count * 3);
-      old.pos.needsUpdate = true;
-    }
-  }
-  // The queue of cutting work per building, run in slices between frames; what waited for it
-  // (hits, collapses) runs when it's empty – after the generators, never from inside one.
-  const busy = (st) => st.queue.length > 0;
-  function enqueue(st, gen) {
-    st.queue.push(gen);
-    if (st.running) return;
-    st.running = true;
-    const slice = () => {
-      const t0 = performance.now();
-      while (st.queue.length && performance.now() - t0 < CUT_SLICE_MS) { if (st.queue[0].next().done) st.queue.shift(); }
-      if (st.queue.length) { setTimeout(slice, 0); return; }
-      st.running = false;
-      const todo = st.pending; st.pending = [];
-      for (const fn of todo) { try { fn(); } catch (e) { console.warn('[buildings] pending', e); } }
+  // The cutter: cutterCore (at the end of this file) runs in a worker made from its own source
+  // text; the page only sends the boxes and gets finished arrays back. If no worker can be made
+  // (or it fails), the same code runs here, in slices between frames. send(msg) → Promise(reply).
+  let cutter = null;
+  function getCutter() {
+    if (cutter) return cutter;
+    const waiting = new Map();                                     // job → { msg, resolve }
+    let seq = 0, port = null, mode = '';
+    const receive = (m) => { if (m && m.op === 'ready') return; const w = waiting.get(m.job); if (w) { waiting.delete(m.job); w.resolve(m); } };
+    const local = () => {
+      mode = 'page';
+      const fake = { postMessage: (m) => receive(m) };
+      cutterCore(fake, CUT_SLICE_MS);
+      return { postMessage: (m) => fake.onmessage({ data: m }) };
     };
-    setTimeout(slice, 0);
+    const fallBack = (why) => {
+      if (mode === 'page') return;
+      console.warn('[buildings] no worker for cutting (' + why + '): cutting on the page instead');
+      try { port && port.terminate && port.terminate(); } catch {}
+      port = local();
+      for (const w of [...waiting.values()].sort((x, y) => x.msg.job - y.msg.job)) port.postMessage(w.msg);   // again, in order
+    };
+    if (USE_WORKER && typeof Worker === 'function') {
+      try {
+        const src = '(' + cutterCore.toString() + ')(self, 40);';
+        const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+        mode = 'worker'; port = w;
+        let alive = false;
+        w.onmessage = (e) => { alive = true; receive(e.data); };
+        w.onerror = (e) => { e.preventDefault && e.preventDefault(); fallBack(e.message || 'error'); };
+        setTimeout(() => { if (!alive) fallBack('no answer'); }, 4000);
+      } catch (e) { port = null; }
+    }
+    if (!port) port = local();
+    cutter = {
+      get mode() { return mode; },
+      send(msg) { msg.job = ++seq; return new Promise((resolve) => { waiting.set(msg.job, { msg, resolve }); port.postMessage(msg); }); },
+      post(msg) { port.postMessage(msg); },                         // no answer expected
+    };
+    return cutter;
   }
+  // the boxes as plain data (no functions, no links between them) for the worker
+  const plainBoxes = (boxes) => boxes.map((b) => ({ x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, z0: b.z0, z1: b.z1, roof: b.roof, wallColor: b.wallColor,
+    walls: b.walls.map((w) => ({ ax: w.ax, along: w.along, sign: w.sign, at: w.at, s0: w.s0, s1: w.s1, y0: w.y0, y1: w.y1, c: w.c, ua: w.ua, sa: w.sa, du: w.du, va: w.va, ya: w.ya, dv: w.dv })) }));
+  const PRIO = { aim: 1, fire: 2 };                                // what the cutter does first: what a rocket is about to hit
+  const facadeMat = (bd) => (Array.isArray(bd.mesh.material) ? bd.mesh.material[0] : bd.mesh.material);
+  // hits and collapses that waited for the cut
+  function runPending(st) {
+    const todo = st.pending; st.pending = [];
+    for (const fn of todo) { try { fn(); } catch (e) { console.warn('[buildings] pending', e); } }
+  }
+  // The coarse cut isn't there yet: what's waiting for it goes first.
+  const busy = (st) => !st.ready;
+  function hurry(st) { if (!st.hurried && !st.ready) { st.hurried = true; getCutter().post({ op: 'prio', b: st.bd.id, prio: PRIO.fire }); } }
 
   // start cutting a building (in the background); returns its state
-  function prepare(x) {
+  function prepare(x, prio = PRIO.aim) {
     const bd = byId(x);
     if (!bd || !classes()) return null;
     if (solids.has(bd.id)) return solids.get(bd.id);
-    const st = { bd, hits: 0, ready: false, set: null, sets: [], queue: [], running: false, shown: false, down: false, wave: null, pending: [] };
+    const st = { bd, hits: 0, ready: false, set: null, sets: [], shown: false, down: false, wave: null, pending: [], spots: [], refining: 0, size: chunkSizeFor(bd), t0: performance.now() };
     solids.set(bd.id, st);
-    enqueue(st, cutBuilding(bd, st));
+    getCutter().send({ op: 'cut', b: bd.id, boxes: plainBoxes(bd.boxes), size: st.size, prio }).then((m) => {
+      try {
+        st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, center: [bd.cx, bd.cz] });
+        st.sets.push(st.set);
+      } catch (e) { console.warn('[buildings] cut', e); }
+      st.ready = true; st.cutMs = performance.now() - st.t0;
+      runPending(st);
+    });
     return st;
   }
-  // a hit is coming at p (the rocket launcher, when it fires): cut, and cut finer around p
-  function expect(p, radius = HOLE_RADIUS) {
+  // A hit is coming at p: cut the building (if it isn't yet) and, finer, the chunks around p.
+  // opts: { dir: the shot's direction (only the side facing the shooter is cut finer), prio:
+  // 'fire' (a rocket is on its way: first) | 'aim' (the crosshair rests here: in the background) }.
+  // The same spot twice is cut once.
+  function expect(p, radius = HOLE_RADIUS, opts = {}) {
     const bd = at(p, 0.05); if (!bd) return false;
-    const st = prepare(bd); if (!st || st.claimed || st.down) return false;
+    const prio = PRIO[opts.prio] || PRIO.fire;
+    const st = prepare(bd, prio); if (!st || st.claimed || st.down) return false;
+    if (prio === PRIO.fire) hurry(st);
+    if (st.spots.some((q) => Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z) < radius * 0.6)) return true;
+    st.spots.push({ x: p.x, y: p.y, z: p.z });
     const f = C() && C().detail ? C().detail().factor : 1;
-    enqueue(st, (function* () { yield* refineAt(st, p, radius * FINE_REACH, FINE_SIZE / Math.cbrt(f)); })());
+    const d = opts.dir, dl = d ? Math.hypot(d.x, d.y, d.z) || 1 : 1;
+    const exclude = st.set ? st.set.frs.filter((fr) => fr.state !== 'still').map((fr) => fr.idx) : [];
+    st.refining++;
+    getCutter().send({ op: 'refine', b: bd.id, p: [p.x, p.y, p.z], reach: radius * FINE_REACH, size: FINE_SIZE / Math.cbrt(f), cap: Math.round(FINE_MAX * f),
+      dir: d ? [d.x / dl, d.y / dl, d.z / dl] : null, depth: radius * FINE_DEPTH, exclude, prio }).then((m) => {
+      st.refining--;
+      try { applyRefine(st, m); } catch (e) { console.warn('[buildings] refine', e); }
+    });
     return true;
   }
-  // everything still queued, right now (only where waiting isn't possible)
-  function finish(st) { while (st.queue.length) { if (st.queue[0].next().done) st.queue.shift(); } }
+  // the finer pieces are back: swap them in for the coarse chunks they came from – those that are
+  // still standing (a hit that came first used the coarse ones)
+  function applyRefine(st, m) {
+    const d = m.data; if (!d || !d.P || !st.set || st.claimed) return;
+    const coarse = st.set.frs, still = (i) => coarse[i] && coarse[i].state === 'still';
+    if (!m.victims.some(still)) return;
+    const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, center: [st.bd.cx, st.bd.cz] });
+    st.sets.push(set);
+    set.down = st.down;
+    const collapse = (owner, fr) => {
+      fr.state = 'gone';
+      for (let k = fr.start; k < fr.start + fr.count; k++) owner.pos.setXYZ(k, fr.pivot[0], fr.pivot[1], fr.pivot[2]);
+      if (owner.pos.addUpdateRange) owner.pos.addUpdateRange(fr.start * 3, fr.count * 3);
+      owner.pos.needsUpdate = true;
+    };
+    for (const fr of set.frs) if (!still(fr.idx)) collapse(set, fr);   // its coarse chunk is already gone
+    for (const i of m.victims) if (still(i)) collapse(st.set, coarse[i]);
+  }
   // the chunks in, the building's own triangles out
   function swapIn(st) {
-    if (st.shown || st.claimed) return;
-    finish(st);
-    for (const set of st.sets) set.mesh.visible = true;
+    if (st.shown || st.claimed || !st.ready) return;
+    for (const set of st.sets) showSet(set);
     hideBuilding(st.bd);
     st.shown = true;
   }
@@ -388,7 +434,7 @@
   // chunks within `radius` of p fly out (n: out of the surface there); returns how many
   function crater(x, p, n, radius = HOLE_RADIUS) {
     const st = prepare(x); if (!st || st.claimed) return 0;
-    if (busy(st)) { st.pending.push(() => crater(st.bd, p, n, radius)); return 0; }
+    if (busy(st)) { hurry(st); st.pending.push(() => crater(st.bd, p, n, radius)); return 0; }
     swapIn(st);
     // with big chunks (a big building) the crater is at least the chunk the blast hit
     // refined around an aim point: small pieces there, a crater of the normal size; elsewhere at
@@ -412,7 +458,7 @@
   // a crater that counts: after HITS_TO_COLLAPSE of them the building comes down from this impact
   function hit(x, p, n, opts = {}) {
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
-    if (busy(st)) { st.hits += opts.count ?? 1; st.pending.push(() => { st.hits -= opts.count ?? 1; hit(st.bd, p, n, opts); }); return true; }
+    if (busy(st)) { hurry(st); st.hits += opts.count ?? 1; st.pending.push(() => { st.hits -= opts.count ?? 1; hit(st.bd, p, n, opts); }); return true; }
     crater(st.bd, p, n, opts.radius || HOLE_RADIUS);
     st.hits += opts.count ?? 1;
     const hitsNeeded = opts.collapseAt || (C() && C().settings ? C().settings.get('hitsToCollapse') : 0) || HITS_TO_COLLAPSE;
@@ -424,7 +470,7 @@
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
     st.down = true;                                                // down from now on (also while the cutting finishes)
     avoidRubble(st.bd);
-    if (busy(st)) { st.pending.push(() => fall(st, opts)); return true; }
+    if (busy(st)) { hurry(st); st.pending.push(() => fall(st, opts)); return true; }
     fall(st, opts);
     return true;
   }
@@ -534,7 +580,7 @@
         if (d > front) continue;
         fr.waved = true;
         const r = fn(fr, d);
-        if (r) launch(set, fr, r.v, 0, r.spin ?? rnd(1, 5));
+        if (r) launch(set, fr, r.v, 0, r.spin ?? rnd(1, 5), true);
       }
       if (!st.down) { st.down = true; goneAfter(st, 200, 3000); }
     }
@@ -572,6 +618,7 @@
       format: (v) => (v === 1 ? '1 raket' : `${v} raketten`) });
   })();
 
+  const geo = cutterCore(null);   // the geometry functions, here on the page (the nuke uses them)
   window.scBuildings = {
     list, at, near, prepare: (x) => !!prepare(x), expect,
     isSolid: (id) => solids.has(id),
@@ -580,10 +627,11 @@
     // how a building is doing: { solid, down, hits, chunks, standing } (null: not in chunks yet)
     state(x) { const id = x && typeof x === 'object' ? x.id : x, st = solids.get(id); if (!st || st.claimed) return st ? { claimed: true } : null;
       const all = st.sets.flatMap((x) => x.frs).filter((f) => f.state !== 'gone');
-      return { solid: true, down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length }; },
+      return { solid: true, ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length }; },
     crater, hit, collapse, blastWave, claim,
+    get cutter() { return cutter ? cutter.mode : null; },        // 'worker' or 'page' (no worker could be made)
     // low-level, for scripts with their own plans (the nuke)
-    geometry: { readMasses, boxPoly, shatter, pieceTriangles, newell, bounds, isFacade, JF },
+    geometry: { readMasses, boxPoly: geo.boxPoly, shatter: geo.shatter, pieceTriangles: geo.pieceTriangles, newell: geo.newell, bounds: geo.bounds, isFacade, JF },
     chunkSet, buildSet, launch,
     get chunkSize() { return CHUNK_SIZE; },
     chunkSizeFor: (x) => { const bd = byId(x); return bd ? chunkSizeFor(bd) : CHUNK_SIZE; },
@@ -611,9 +659,11 @@
         let a = 0, b = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][along] - P[0][along]) > 1e-5) { b = k; break; }
         let c2 = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][1] - P[0][1]) > 1e-5) { c2 = k; break; }
         const du = (U[b][0] - U[a][0]) / (P[b][along] - P[a][along]), dv = (U[c2][1] - U[0][1]) / (P[c2][1] - P[0][1]);
+        // texture mapping as numbers (ua + (s − sa)·du, va + (y − ya)·dv), so it can go to the worker
+        const ua = U[a][0], sa = P[a][along], va = U[0][1], ya = P[0][1];
         walls.push({ ax, along, sign, at: P[0][ax], s0: Math.min(...P.map((p) => p[along])), s1: Math.max(...P.map((p) => p[along])),
-          y0: Math.min(...P.map((p) => p[1])), y1: Math.max(...P.map((p) => p[1])), c,
-          u: (s) => U[a][0] + (s - P[a][along]) * du, v: (y) => U[0][1] + (y - P[0][1]) * dv });
+          y0: Math.min(...P.map((p) => p[1])), y1: Math.max(...P.map((p) => p[1])), c, ua, sa, du, va, ya, dv,
+          u: (s) => ua + (s - sa) * du, v: (y) => va + (y - ya) * dv });
       }
     }
     const near = (a, b) => Math.abs(a - b) < 1e-3;
@@ -631,107 +681,6 @@
     return boxes;
   }
 
-  const insideBox = (b, p, eps = 1e-4) => p[0] > b.x0 + eps && p[0] < b.x1 - eps && p[1] > b.y0 + eps && p[1] < b.y1 - eps && p[2] > b.z0 + eps && p[2] < b.z1 - eps;
-
-  // ---- convex polyhedra: a list of faces { v: [[x, y, z], …] counter-clockwise seen from outside, n, tag } ----
-  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-  function newell(v) {
-    let x = 0, y = 0, z = 0;
-    for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; x += (a[1] - b[1]) * (a[2] + b[2]); y += (a[2] - b[2]) * (a[0] + b[0]); z += (a[0] - b[0]) * (a[1] + b[1]); }
-    return [x, y, z];   // length = 2 × area
-  }
-  function face(v, n, tag) { if (dot(newell(v), n) < 0) v = v.slice().reverse(); return { v, n, tag }; }
-  function boxPoly(x0, y0, z0, x1, y1, z1, tags) {
-    return [
-      face([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], [1, 0, 0], tags['+x']),
-      face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0], tags['-x']),
-      face([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], [0, 1, 0], tags['+y']),
-      face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0], tags['-y']),
-      face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1], tags['+z']),
-      face([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], [0, 0, -1], tags['-z']),
-    ];
-  }
-  // cut a convex polyhedron by the plane n·p = d: [part behind, part in front]
-  function split(poly, n, d) {
-    const back = [], front = [], cut = [];
-    const EPS = 1e-9;
-    for (const f of poly) {
-      const b = [], fr = [], m = f.v.length;
-      for (let i = 0; i < m; i++) {
-        const a = f.v[i], c = f.v[(i + 1) % m];
-        let da = dot(n, a) - d, dc = dot(n, c) - d;
-        if (Math.abs(da) < EPS) da = 0; if (Math.abs(dc) < EPS) dc = 0;
-        if (da <= 0) b.push(a);
-        if (da >= 0) fr.push(a);
-        if (da === 0) cut.push(a);
-        if ((da < 0 && dc > 0) || (da > 0 && dc < 0)) {
-          const t = da / (da - dc), p = [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t, a[2] + (c[2] - a[2]) * t];
-          b.push(p); fr.push(p); cut.push(p);
-        }
-      }
-      if (b.length >= 3 && Math.hypot(...newell(b)) > 1e-10) back.push({ v: b, n: f.n, tag: f.tag });
-      if (fr.length >= 3 && Math.hypot(...newell(fr)) > 1e-10) front.push({ v: fr, n: f.n, tag: f.tag });
-    }
-    // the new face where the cut went through: the cut points, in order around their middle
-    const seen = new Set(), pts = [];
-    for (const p of cut) { const k = p.map((x) => Math.round(x * 1e6)).join(','); if (!seen.has(k)) { seen.add(k); pts.push(p); } }
-    if (pts.length >= 3 && back.length && front.length) {
-      const c = pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] + p[1] / pts.length, s[2] + p[2] / pts.length], [0, 0, 0]);
-      let u = cross(n, Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]); const ul = Math.hypot(...u); u = u.map((x) => x / ul);
-      const w = cross(n, u);
-      pts.sort((p, q) => Math.atan2(dot(sub(p, c), w), dot(sub(p, c), u)) - Math.atan2(dot(sub(q, c), w), dot(sub(q, c), u)));
-      back.push(face(pts, n, 'cut'));
-      front.push(face(pts.slice(), [-n[0], -n[1], -n[2]], 'cut'));
-    }
-    return [back, front];
-  }
-  function bounds(poly) {
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (const f of poly) for (const p of f.v) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
-    return { lo, hi };
-  }
-  // keep cutting the largest direction with a slightly tilted plane until pieces are about `size`
-  function shatter(poly, size, out, depth = 0) {
-    const { lo, hi } = bounds(poly), ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    const k = ext[0] >= ext[1] && ext[0] >= ext[2] ? 0 : ext[1] >= ext[2] ? 1 : 2, L = ext[k];
-    if (L <= size * rnd(0.8, 1.25) || depth > 40) { out.push(poly); return; }
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const tilt = attempt < 3 ? 0.5 : 0.1;                       // a cut that failed: try again, straighter
-      const n = [rnd(-tilt, tilt), rnd(-tilt, tilt), rnd(-tilt, tilt)]; n[k] = 1;
-      const nl = Math.hypot(...n); for (let a = 0; a < 3; a++) n[a] /= nl;
-      const c = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]; c[k] += L * rnd(-0.18, 0.18);
-      const [a, b] = split(poly, n, dot(n, c));
-      if (a.length >= 4 && b.length >= 4) { shatter(a, size, out, depth + 1); shatter(b, size, out, depth + 1); return; }
-    }
-    out.push(poly);
-  }
-
-  // Triangles (with colour and facade texture coordinates) for one piece.
-  function pieceTriangles(poly, box, concrete) {
-    const tris = [];
-    for (const f of poly) {
-      let c = concrete, uvOf = () => JF;
-      const t = f.tag;
-      if (t && t !== 'cut' && t.ext) {
-        const mid = f.v.reduce((s, p) => [s[0] + p[0] / f.v.length, s[1] + p[1] / f.v.length, s[2] + p[2] / f.v.length], [0, 0, 0]);
-        const out = [mid[0] + f.n[0] * 0.004, mid[1] + f.n[1] * 0.004, mid[2] + f.n[2] * 0.004];
-        if (!box.siblings.some((b) => insideBox(b, out, -1e-4))) {    // really on the outside of the building
-          if (t.side === '+y') c = box.roof;
-          else {
-            const ax = t.side[1] === 'x' ? 0 : 2, sign = t.side[0] === '+' ? 1 : -1;
-            const w = box.walls.find((w) => w.ax === ax && w.sign === sign && mid[1] >= w.y0 - 1e-3 && mid[1] <= w.y1 + 1e-3 && mid[w.along] >= w.s0 - 1e-3 && mid[w.along] <= w.s1 + 1e-3);
-            if (w) { c = w.c; uvOf = (p) => [w.u(p[w.along]), w.v(p[1])]; }
-          }
-        }
-      }
-      const vs = f.v.map((p) => ({ p, n: f.n, c, uv: uvOf(p) }));
-      for (let i = 1; i + 1 < vs.length; i++) tris.push([vs[0], vs[i], vs[i + 1]]);
-    }
-    return tris;
-  }
-
   // rotation of `angle` around a unit axis, as a 3×3 matrix (row-major)
   function rot(x, y, z, angle) {
     const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
@@ -741,4 +690,252 @@
     A[0] * B[0] + A[1] * B[3] + A[2] * B[6], A[0] * B[1] + A[1] * B[4] + A[2] * B[7], A[0] * B[2] + A[1] * B[5] + A[2] * B[8],
     A[3] * B[0] + A[4] * B[3] + A[5] * B[6], A[3] * B[1] + A[4] * B[4] + A[5] * B[7], A[3] * B[2] + A[4] * B[5] + A[5] * B[8],
     A[6] * B[0] + A[7] * B[3] + A[8] * B[6], A[6] * B[1] + A[7] * B[4] + A[8] * B[7], A[6] * B[2] + A[7] * B[5] + A[8] * B[8]];
+
+  // ---------- the cutter: pure geometry, also runs in a worker ----------
+  // cutterCore(port, sliceMs) works on messages from `port` (a worker's `self`, or a stand-in on
+  // the page) and answers through port.postMessage. It must stay self-contained: in the worker it
+  // is rebuilt from its source text, so it can't use anything from outside this function.
+  // Messages:
+  //   { op: 'cut', job, b, boxes, size, prio } → { op, job, b, data } (the chunks of building b; kept
+  //       here, for cutting finer later)
+  //   { op: 'refine', job, b, p, reach, size, cap, dir, depth, exclude, prio } → { op, job, b, data,
+  //       victims } (finer pieces of the coarse chunks near p that face the shooter, nearest first,
+  //       at most `cap`; victims = the coarse chunks they replace)
+  //   { op: 'prio', b, prio } (a hit is waiting for building b), { op: 'drop', b }
+  // data = flat arrays (transferred, not copied): pos, nor, n0 (normals at rest), col, uv, orig
+  // (positions relative to each piece's pivot), meta (14 per piece: start, count, pivot, normal of
+  // its largest face, bounds lo, hi), src (refine: the coarse chunk of every piece), P (pieces).
+  // Jobs run in slices of sliceMs, the most urgent first (a building's cut before its refinements).
+  // With port null it only returns the geometry functions.
+  function cutterCore(port, sliceMs) {
+    const rnd = (a, b) => a + Math.random() * (b - a);
+    const JF = [0.04, 0.96];       // the facade texture's plain spot
+    const insideBox = (b, p, eps = 1e-4) => p[0] > b.x0 + eps && p[0] < b.x1 - eps && p[1] > b.y0 + eps && p[1] < b.y1 - eps && p[2] > b.z0 + eps && p[2] < b.z1 - eps;
+
+    // ---- convex polyhedra: a list of faces { v: [[x, y, z], …] counter-clockwise seen from outside, n, tag } ----
+    const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    function newell(v) {
+      let x = 0, y = 0, z = 0;
+      for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; x += (a[1] - b[1]) * (a[2] + b[2]); y += (a[2] - b[2]) * (a[0] + b[0]); z += (a[0] - b[0]) * (a[1] + b[1]); }
+      return [x, y, z];   // length = 2 × area
+    }
+    function face(v, n, tag) { if (dot(newell(v), n) < 0) v = v.slice().reverse(); return { v, n, tag }; }
+    function boxPoly(x0, y0, z0, x1, y1, z1, tags) {
+      return [
+        face([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], [1, 0, 0], tags['+x']),
+        face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0], tags['-x']),
+        face([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], [0, 1, 0], tags['+y']),
+        face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0], tags['-y']),
+        face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1], tags['+z']),
+        face([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], [0, 0, -1], tags['-z']),
+      ];
+    }
+    // cut a convex polyhedron by the plane n·p = d: [part behind, part in front]
+    function split(poly, n, d) {
+      const back = [], front = [], cut = [];
+      const EPS = 1e-9;
+      for (const f of poly) {
+        const b = [], fr = [], m = f.v.length;
+        for (let i = 0; i < m; i++) {
+          const a = f.v[i], c = f.v[(i + 1) % m];
+          let da = dot(n, a) - d, dc = dot(n, c) - d;
+          if (Math.abs(da) < EPS) da = 0; if (Math.abs(dc) < EPS) dc = 0;
+          if (da <= 0) b.push(a);
+          if (da >= 0) fr.push(a);
+          if (da === 0) cut.push(a);
+          if ((da < 0 && dc > 0) || (da > 0 && dc < 0)) {
+            const t = da / (da - dc), p = [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t, a[2] + (c[2] - a[2]) * t];
+            b.push(p); fr.push(p); cut.push(p);
+          }
+        }
+        if (b.length >= 3 && Math.hypot(...newell(b)) > 1e-10) back.push({ v: b, n: f.n, tag: f.tag });
+        if (fr.length >= 3 && Math.hypot(...newell(fr)) > 1e-10) front.push({ v: fr, n: f.n, tag: f.tag });
+      }
+      // the new face where the cut went through: the cut points, in order around their middle
+      const seen = new Set(), pts = [];
+      for (const p of cut) { const k = p.map((x) => Math.round(x * 1e6)).join(','); if (!seen.has(k)) { seen.add(k); pts.push(p); } }
+      if (pts.length >= 3 && back.length && front.length) {
+        const c = pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] + p[1] / pts.length, s[2] + p[2] / pts.length], [0, 0, 0]);
+        let u = cross(n, Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]); const ul = Math.hypot(...u); u = u.map((x) => x / ul);
+        const w = cross(n, u);
+        pts.sort((p, q) => Math.atan2(dot(sub(p, c), w), dot(sub(p, c), u)) - Math.atan2(dot(sub(q, c), w), dot(sub(q, c), u)));
+        back.push(face(pts, n, 'cut'));
+        front.push(face(pts.slice(), [-n[0], -n[1], -n[2]], 'cut'));
+      }
+      return [back, front];
+    }
+    function bounds(poly) {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (const f of poly) for (const p of f.v) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
+      return { lo, hi };
+    }
+    // keep cutting the largest direction with a slightly tilted plane until pieces are about `size`
+    function shatter(poly, size, out, depth = 0) {
+      const { lo, hi } = bounds(poly), ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+      const k = ext[0] >= ext[1] && ext[0] >= ext[2] ? 0 : ext[1] >= ext[2] ? 1 : 2, L = ext[k];
+      if (L <= size * rnd(0.8, 1.25) || depth > 40) { out.push(poly); return; }
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const tilt = attempt < 3 ? 0.5 : 0.1;                       // a cut that failed: try again, straighter
+        const n = [rnd(-tilt, tilt), rnd(-tilt, tilt), rnd(-tilt, tilt)]; n[k] = 1;
+        const nl = Math.hypot(...n); for (let a = 0; a < 3; a++) n[a] /= nl;
+        const c = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]; c[k] += L * rnd(-0.18, 0.18);
+        const [a, b] = split(poly, n, dot(n, c));
+        if (a.length >= 4 && b.length >= 4) { shatter(a, size, out, depth + 1); shatter(b, size, out, depth + 1); return; }
+      }
+      out.push(poly);
+    }
+
+    // Triangles (with colour and facade texture coordinates) for one piece.
+    function pieceTriangles(poly, box, concrete) {
+      const tris = [];
+      for (const f of poly) {
+        let c = concrete, uvOf = () => JF;
+        const t = f.tag;
+        if (t && t !== 'cut' && t.ext) {
+          const mid = f.v.reduce((s, p) => [s[0] + p[0] / f.v.length, s[1] + p[1] / f.v.length, s[2] + p[2] / f.v.length], [0, 0, 0]);
+          const out = [mid[0] + f.n[0] * 0.004, mid[1] + f.n[1] * 0.004, mid[2] + f.n[2] * 0.004];
+          if (!box.siblings.some((b) => insideBox(b, out, -1e-4))) {    // really on the outside of the building
+            if (t.side === '+y') c = box.roof;
+            else {
+              const ax = t.side[1] === 'x' ? 0 : 2, sign = t.side[0] === '+' ? 1 : -1;
+              const w = box.walls.find((w) => w.ax === ax && w.sign === sign && mid[1] >= w.y0 - 1e-3 && mid[1] <= w.y1 + 1e-3 && mid[w.along] >= w.s0 - 1e-3 && mid[w.along] <= w.s1 + 1e-3);
+              if (w) { c = w.c; uvOf = (p) => wallUV(w, p); }
+            }
+          }
+        }
+        const vs = f.v.map((p) => ({ p, n: f.n, c, uv: uvOf(p) }));
+        for (let i = 1; i + 1 < vs.length; i++) tris.push([vs[0], vs[i], vs[i + 1]]);
+      }
+      return tris;
+    }
+
+
+    // the texture mapping of a wall at point p (the numbers from readMasses)
+    function wallUV(w, p) { return [w.ua + (p[w.along] - w.sa) * w.du, w.va + (p[1] - w.ya) * w.dv]; }
+    const lib = { boxPoly, split, shatter, pieceTriangles, newell, bounds, JF };
+    if (!port) return lib;
+
+    // ---- pieces → flat arrays ----
+    function largest(poly) { let big = null, area = -1; for (const f of poly) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } } return big; }
+    function pack(pieces, withSrc) {
+      let V = 0;
+      const tris = pieces.map((pc) => { const t = pieceTriangles(pc.poly, pc.box, pc.tint); V += t.length * 3; return t; });
+      const P = pieces.length, pos = new Float32Array(V * 3), nor = new Float32Array(V * 3), col = new Float32Array(V * 3), uv = new Float32Array(V * 2), orig = new Float32Array(V * 3);
+      const meta = new Float32Array(P * 14), src = withSrc ? new Int32Array(P) : null;
+      let k = 0;
+      for (let i = 0; i < P; i++) {
+        const pc = pieces[i], start = k;
+        let px = 0, py = 0, pz = 0, m = 0;
+        for (const t of tris[i]) for (const v of t) { px += v.p[0]; py += v.p[1]; pz += v.p[2]; m++; }
+        px /= m || 1; py /= m || 1; pz /= m || 1;
+        for (const t of tris[i]) for (const v of t) {
+          pos[k * 3] = v.p[0]; pos[k * 3 + 1] = v.p[1]; pos[k * 3 + 2] = v.p[2];
+          orig[k * 3] = v.p[0] - px; orig[k * 3 + 1] = v.p[1] - py; orig[k * 3 + 2] = v.p[2] - pz;
+          nor[k * 3] = v.n[0]; nor[k * 3 + 1] = v.n[1]; nor[k * 3 + 2] = v.n[2];
+          col[k * 3] = v.c[0]; col[k * 3 + 1] = v.c[1]; col[k * 3 + 2] = v.c[2];
+          uv[k * 2] = v.uv[0]; uv[k * 2 + 1] = v.uv[1];
+          k++;
+        }
+        const n = pc.normal || [0, -1, 0], o = i * 14;
+        meta[o] = start; meta[o + 1] = k - start; meta[o + 2] = px; meta[o + 3] = py; meta[o + 4] = pz;
+        meta[o + 5] = n[0]; meta[o + 6] = n[1]; meta[o + 7] = n[2];
+        meta[o + 8] = pc.lo[0]; meta[o + 9] = pc.lo[1]; meta[o + 10] = pc.lo[2]; meta[o + 11] = pc.hi[0]; meta[o + 12] = pc.hi[1]; meta[o + 13] = pc.hi[2];
+        if (src) src[i] = pc.src;
+      }
+      const data = { pos, nor, n0: nor.slice(), col, uv, orig, meta, src, P };
+      return { data, transfer: [pos.buffer, nor.buffer, data.n0.buffer, col.buffer, uv.buffer, orig.buffer, meta.buffer].concat(src ? [src.buffer] : []) };
+    }
+    function piece(poly, box, tint, extra) { const { lo, hi } = bounds(poly); return { poly, box, tint, normal: largest(poly), lo, hi, ...extra }; }
+
+    // ---- the jobs ----
+    const buildings = new Map();   // b → { pieces, done }
+    function* cut(msg) {
+      const boxes = msg.boxes, size = msg.size, pieces = [];
+      const bld = { pieces, done: false };
+      buildings.set(msg.b, bld);
+      for (const b of boxes) b.siblings = boxes;
+      for (const b of boxes) {
+        const wall = b.wallColor, concrete0 = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
+        const tags = { '+x': { side: '+x', ext: true }, '-x': { side: '-x', ext: true }, '+z': { side: '+z', ext: true }, '-z': { side: '-z', ext: true } };
+        // in slabs of about two chunk heights, so one cut never has to deal with a whole tower
+        const layers = Math.max(1, Math.round((b.y1 - b.y0) / (size * 2)));
+        for (let l = 0; l < layers; l++) {
+          const ya = b.y0 + (b.y1 - b.y0) * l / layers, yb = b.y0 + (b.y1 - b.y0) * (l + 1) / layers;
+          const t = { ...tags, '+y': { side: '+y', ext: l === layers - 1 }, '-y': { side: '-y', ext: false } };
+          const chunks = [];
+          shatter(boxPoly(b.x0, ya, b.z0, b.x1, yb, b.z1, t), size, chunks);
+          for (const ch of chunks) { const s2 = rnd(0.88, 1.1); pieces.push(piece(ch, b, concrete0.map((v) => v * s2))); }
+          yield;
+        }
+      }
+      const out = pack(pieces, false);
+      bld.done = true;
+      return { msg: { op: 'cut', job: msg.job, b: msg.b, data: out.data }, transfer: out.transfer };
+    }
+    function* refine(msg) {
+      const bld = buildings.get(msg.b), empty = { msg: { op: 'refine', job: msg.job, b: msg.b, data: null, victims: [] }, transfer: [] };
+      if (!bld) return empty;
+      const [px, py, pz] = msg.p, dir = msg.dir, skip = new Set(msg.exclude || []), cand = [];
+      bld.pieces.forEach((pc, i) => {
+        if (pc.refined || skip.has(i)) return;
+        const { lo, hi } = pc;
+        if (Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) <= msg.size * 1.3) return;   // small enough already
+        const dx = Math.max(lo[0] - px, 0, px - hi[0]), dy = Math.max(lo[1] - py, 0, py - hi[1]), dz = Math.max(lo[2] - pz, 0, pz - hi[2]), dist = Math.hypot(dx, dy, dz);
+        if (dist > msg.reach) return;
+        // the side facing the shooter: the chunk's nearest part not deeper than `depth` into the building
+        if (dir) {
+          const nx = Math.max(lo[0], Math.min(px, hi[0])), ny = Math.max(lo[1], Math.min(py, hi[1])), nz = Math.max(lo[2], Math.min(pz, hi[2]));
+          const cx = dir[0] > 0 ? lo[0] : hi[0], cy = dir[1] > 0 ? lo[1] : hi[1], cz = dir[2] > 0 ? lo[2] : hi[2];   // the corner nearest the shooter
+          const depth = Math.min((nx - px) * dir[0] + (ny - py) * dir[1] + (nz - pz) * dir[2], (cx - px) * dir[0] + (cy - py) * dir[1] + (cz - pz) * dir[2]);
+          if (depth > msg.depth) return;
+        }
+        cand.push({ i, dist });
+      });
+      cand.sort((a, b) => a.dist - b.dist);
+      const pieces = [], victims = [];
+      for (const { i } of cand) {
+        const pc = bld.pieces[i], out = [];
+        shatter(pc.poly, msg.size, out);
+        if (pieces.length && pieces.length + out.length > msg.cap) break;
+        for (const ch of out) pieces.push(piece(ch, pc.box, pc.tint, { src: i }));
+        pc.refined = true; victims.push(i);
+        yield;
+      }
+      if (!pieces.length) return empty;
+      const out = pack(pieces, true);
+      return { msg: { op: 'refine', job: msg.job, b: msg.b, data: out.data, victims }, transfer: out.transfer };
+    }
+    const jobs = [];
+    let running = false;
+    function pick() {
+      let best = null;
+      for (const j of jobs) if (!best || j.prio > best.prio) best = j;
+      if (best && best.kind === 'refine') {                        // a building's cut comes before its refinements
+        const c = jobs.find((j) => j.kind === 'cut' && j.b === best.b);
+        if (c) best = c;
+      }
+      return best;
+    }
+    function tick() {
+      const t0 = Date.now();
+      while (jobs.length && Date.now() - t0 < sliceMs) {
+        const j = pick();
+        let r;
+        try { r = j.gen.next(); } catch (e) { r = { done: true, value: { msg: { op: j.kind, job: j.job, b: j.b, data: null, victims: [], error: String(e) }, transfer: [] } }; }
+        if (r.done) { jobs.splice(jobs.indexOf(j), 1); port.postMessage(r.value.msg, r.value.transfer); }
+      }
+      if (jobs.length) setTimeout(tick, 0); else running = false;
+    }
+    port.onmessage = (e) => {
+      const m = e.data;
+      if (m.op === 'cut' || m.op === 'refine') jobs.push({ kind: m.op, job: m.job, b: m.b, prio: m.prio || 1, gen: m.op === 'cut' ? cut(m) : refine(m) });
+      else if (m.op === 'prio') { for (const j of jobs) if (j.b === m.b) j.prio = Math.max(j.prio, m.prio); }
+      else if (m.op === 'drop') buildings.delete(m.b);
+      if (jobs.length && !running) { running = true; setTimeout(tick, 0); }
+    };
+    port.postMessage({ op: 'ready' });
+    return lib;
+  }
 })();
