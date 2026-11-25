@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -25,6 +25,12 @@
  *   with the facade material; every chunk keeps its own range of vertices.
  * - swapIn: the chunks are shown and the building's own triangles are hidden (collapsed to a point
  *   in the city-block meshes the app draws, kept hidden when the app redraws a block).
+ * - expect(point): a hit is coming (the rocket launcher calls it when it fires). The building is
+ *   cut (if it wasn't yet) and the chunks around the aim point are cut again, much smaller
+ *   (FINE_SIZE), while the rocket flies: a crater of many small pieces, the rest stays light.
+ *   The refined pieces go into a mesh of their own; the coarse chunk they replace is collapsed.
+ *   Cutting and refining run one after the other in time slices (st.queue); hits that arrive
+ *   earlier wait for the queue to empty.
  * - crater(): chunks near a point fly out. hit() = a crater that counts; after HITS_TO_COLLAPSE
  *   the building comes down.
  * - collapse(building, opts) in two styles:
@@ -49,6 +55,8 @@
   const CHUNK_SIZE = 0.2;          // buildings are cut into chunks about this big (smaller = finer holes, but much heavier)…
   const MAX_CHUNKS = 800;          // …but never into more than about this many: big buildings get bigger chunks
   const CUT_SLICE_MS = 8;          // cutting runs in slices this long, between frames (nothing stutters)
+  const FINE_SIZE = 0.1;           // where a rocket is about to hit, chunks are cut again this small (÷ ∛detail factor)…
+  const FINE_REACH = 2.2;          // …within this many crater radii of the aim point
   const RUBBLE_AVOID_SECONDS = 120;// residents stay away from a collapsed building this long
   const HITS_TO_COLLAPSE = 7;      // blasts (rockets) a building takes before it comes down
   const HOLE_RADIUS = 0.16;        // default crater radius
@@ -250,45 +258,91 @@
           const s2 = rnd(0.88, 1.1);
           let big = null, area = -1;
           for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
-          pieces.push({ tris: pieceTriangles(ch, b, concrete0.map((v) => v * s2)), normal: big });
+          const tint = concrete0.map((v) => v * s2);
+          pieces.push({ tris: pieceTriangles(ch, b, tint), normal: big, poly: ch, box: b, tint });   // shape kept: it can be cut finer later
         }
         yield;
       }
     }
     const mat = Array.isArray(bd.mesh.material) ? bd.mesh.material[0] : bd.mesh.material;
     st.set = yield* buildSet(pieces, mat, { hidden: true, dusty: true, center: [bd.cx, bd.cz] });
+    st.sets.push(st.set);
     st.ready = true;
-    // what arrived while we were cutting (a rocket that was faster, a monster's punch) – right after
-    // this generator has finished (not from inside it)
-    setTimeout(() => {
-      st.gen = null;
+  }
+  // Cut the still chunks within `reach` of p again, `size` small: new pieces in a mesh of their
+  // own, the coarse chunks they came from collapsed (state 'gone').
+  function* refineAt(st, p, reach, size) {
+    const pieces = [], victims = [];
+    for (const set of st.sets) for (const fr of set.frs) {
+      if (fr.state !== 'still' || !fr.poly || fr.fine) continue;
+      const { lo, hi } = bounds(fr.poly);
+      const dx = Math.max(lo[0] - p.x, 0, p.x - hi[0]), dy = Math.max(lo[1] - p.y, 0, p.y - hi[1]), dz = Math.max(lo[2] - p.z, 0, p.z - hi[2]);
+      if (Math.hypot(dx, dy, dz) > reach || Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) <= size * 1.3) continue;
+      const out = [];
+      shatter(fr.poly, size, out);
+      for (const ch of out) {
+        let big = null, area = -1;
+        for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
+        pieces.push({ tris: pieceTriangles(ch, fr.box, fr.tint), normal: big, poly: ch, box: fr.box, tint: fr.tint, fine: true });
+      }
+      victims.push([set, fr]);
+      yield;
+    }
+    if (!pieces.length) return;
+    const mat = Array.isArray(st.bd.mesh.material) ? st.bd.mesh.material[0] : st.bd.mesh.material;
+    const set = yield* buildSet(pieces, mat, { hidden: !st.shown, dusty: true, center: [st.bd.cx, st.bd.cz] });
+    st.sets.push(set);
+    // swap in the same frame: the coarse chunks out (collapsed to a point), the fine ones in
+    for (const [old, fr] of victims) {
+      fr.state = 'gone';
+      for (let k = fr.start; k < fr.start + fr.count; k++) old.pos.setXYZ(k, fr.pivot[0], fr.pivot[1], fr.pivot[2]);
+      if (old.pos.addUpdateRange) old.pos.addUpdateRange(fr.start * 3, fr.count * 3);
+      old.pos.needsUpdate = true;
+    }
+  }
+  // The queue of cutting work per building, run in slices between frames; what waited for it
+  // (hits, collapses) runs when it's empty – after the generators, never from inside one.
+  const busy = (st) => st.queue.length > 0;
+  function enqueue(st, gen) {
+    st.queue.push(gen);
+    if (st.running) return;
+    st.running = true;
+    const slice = () => {
+      const t0 = performance.now();
+      while (st.queue.length && performance.now() - t0 < CUT_SLICE_MS) { if (st.queue[0].next().done) st.queue.shift(); }
+      if (st.queue.length) { setTimeout(slice, 0); return; }
+      st.running = false;
       const todo = st.pending; st.pending = [];
       for (const fn of todo) { try { fn(); } catch (e) { console.warn('[buildings] pending', e); } }
-    }, 0);
+    };
+    setTimeout(slice, 0);
   }
+
   // start cutting a building (in the background); returns its state
   function prepare(x) {
     const bd = byId(x);
     if (!bd || !classes()) return null;
     if (solids.has(bd.id)) return solids.get(bd.id);
-    const st = { bd, hits: 0, ready: false, gen: null, set: null, shown: false, down: false, wave: null, pending: [] };
-    st.gen = cutBuilding(bd, st);
+    const st = { bd, hits: 0, ready: false, set: null, sets: [], queue: [], running: false, shown: false, down: false, wave: null, pending: [] };
     solids.set(bd.id, st);
-    const slice = () => {
-      if (st.ready || !st.gen) return;
-      const t0 = performance.now();
-      while (performance.now() - t0 < CUT_SLICE_MS) { if (st.gen.next().done) { st.gen = null; return; } }
-      setTimeout(slice, 0);
-    };
-    slice();
+    enqueue(st, cutBuilding(bd, st));
     return st;
   }
-  function finish(st) { if (st.gen) { while (!st.gen.next().done); st.gen = null; } }
+  // a hit is coming at p (the rocket launcher, when it fires): cut, and cut finer around p
+  function expect(p, radius = HOLE_RADIUS) {
+    const bd = at(p, 0.05); if (!bd) return false;
+    const st = prepare(bd); if (!st || st.claimed || st.down) return false;
+    const f = C() && C().detail ? C().detail().factor : 1;
+    enqueue(st, (function* () { yield* refineAt(st, p, radius * FINE_REACH, FINE_SIZE / Math.cbrt(f)); })());
+    return true;
+  }
+  // everything still queued, right now (only where waiting isn't possible)
+  function finish(st) { while (st.queue.length) { if (st.queue[0].next().done) st.queue.shift(); } }
   // the chunks in, the building's own triangles out
   function swapIn(st) {
     if (st.shown || st.claimed) return;
     finish(st);
-    st.set.mesh.visible = true;
+    for (const set of st.sets) set.mesh.visible = true;
     hideBuilding(st.bd);
     st.shown = true;
   }
@@ -334,17 +388,23 @@
   // chunks within `radius` of p fly out (n: out of the surface there); returns how many
   function crater(x, p, n, radius = HOLE_RADIUS) {
     const st = prepare(x); if (!st || st.claimed) return 0;
-    if (!st.ready) { st.pending.push(() => crater(st.bd, p, n, radius)); return 0; }
+    if (busy(st)) { st.pending.push(() => crater(st.bd, p, n, radius)); return 0; }
     swapIn(st);
     // with big chunks (a big building) the crater is at least the chunk the blast hit
-    const R = Math.max(radius, st.size * 0.8) * rnd(0.85, 1.15), out = n || { x: 0, y: 0, z: 0 };
+    // refined around an aim point: small pieces there, a crater of the normal size; elsewhere at
+    // least the (big) chunk the blast hit
+    const fine = st.sets.length > 1 && st.sets.some((set) => set.frs.some((fr) => fr.fine && fr.state === 'still' && Math.hypot(fr.pivot[0] - p.x, fr.pivot[1] - p.y, fr.pivot[2] - p.z) < radius * 1.5));
+    const R = Math.max(radius, fine ? 0 : st.size * 0.8) * rnd(0.85, 1.15), out = n || { x: 0, y: 0, z: 0 };
+    // the hole is already there (an earlier hit at the same spot): the blast digs deeper, inwards
+    const standing = (c) => { let k = 0; for (const set of st.sets) for (const fr of set.frs) if (fr.state === 'still' && Math.hypot(fr.pivot[0] - c.x, fr.pivot[1] - c.y, fr.pivot[2] - c.z) < R) k++; return k; };
+    for (let step = 0; step < 4 && n && standing(p) < 6; step++) p = { x: p.x - out.x * R * 0.8, y: p.y - (out.y || 0) * R * 0.8, z: p.z - out.z * R * 0.8 };
     let count = 0;
-    for (const fr of st.set.frs) {
+    for (const set of st.sets) for (const fr of set.frs) {
       if (fr.state !== 'still') continue;
       const dx = fr.pivot[0] - p.x, dy = fr.pivot[1] - p.y, dz = fr.pivot[2] - p.z, d = Math.hypot(dx, dy, dz);
       if (d > R * rnd(0.85, 1.15)) continue;
       const l = d || 1, sp = rnd(0.6, 2.2) * (1 - d / (R * 1.2) * 0.5);
-      launch(st.set, fr, [(dx / l) * 0.5 * sp + out.x * sp + rnd(-0.3, 0.3), (dy / l) * 0.4 * sp + rnd(0.2, 1), (dz / l) * 0.5 * sp + out.z * sp + rnd(-0.3, 0.3)], 0, rnd(4, 12));
+      launch(set, fr, [(dx / l) * 0.5 * sp + out.x * sp + rnd(-0.3, 0.3), (dy / l) * 0.4 * sp + rnd(0.2, 1), (dz / l) * 0.5 * sp + out.z * sp + rnd(-0.3, 0.3)], 0, rnd(4, 12));
       count++;
     }
     return count;
@@ -352,7 +412,7 @@
   // a crater that counts: after HITS_TO_COLLAPSE of them the building comes down from this impact
   function hit(x, p, n, opts = {}) {
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
-    if (!st.ready) { st.hits += opts.count ?? 1; st.pending.push(() => { st.hits -= opts.count ?? 1; hit(st.bd, p, n, opts); }); return true; }
+    if (busy(st)) { st.hits += opts.count ?? 1; st.pending.push(() => { st.hits -= opts.count ?? 1; hit(st.bd, p, n, opts); }); return true; }
     crater(st.bd, p, n, opts.radius || HOLE_RADIUS);
     st.hits += opts.count ?? 1;
     const hitsNeeded = opts.collapseAt || (C() && C().settings ? C().settings.get('hitsToCollapse') : 0) || HITS_TO_COLLAPSE;
@@ -364,7 +424,7 @@
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
     st.down = true;                                                // down from now on (also while the cutting finishes)
     avoidRubble(st.bd);
-    if (!st.ready) { st.pending.push(() => fall(st, opts)); return true; }
+    if (busy(st)) { st.pending.push(() => fall(st, opts)); return true; }
     fall(st, opts);
     return true;
   }
@@ -375,7 +435,7 @@
   }
   function fall(st, opts) {
     swapIn(st);
-    st.set.down = true;
+    for (const set of st.sets) set.down = true;
     const bd = st.bd, cx = bd.cx, cz = bd.cz;
     const P = (v) => (Array.isArray(v) ? { x: v[0], y: v[1], z: v[2] } : v);
     const p = P(opts.at) || { x: cx, y: bd.top / 2, z: cz };
@@ -384,14 +444,14 @@
       // pushed over: a crack runs from p through the building, chunks are thrown the push's way
       const dv = P(opts.push), dl = Math.hypot(dv.x, dv.z) || 1, dir = [dv.x / dl, 0, dv.z / dl];
       const force = opts.force ?? 3, spread = opts.spread ?? COLLAPSE_SPREAD, H = bd.top;
-      for (const fr of st.set.frs) {
+      for (const set of st.sets) for (const fr of set.frs) {
         if (fr.state !== 'still' || fr.pivot[1] < 0.03 + Math.random() * STUMP) continue;
         const d = Math.hypot(fr.pivot[0] - p.x, (fr.pivot[1] - p.y) * 0.6, fr.pivot[2] - p.z);
         const up = clamp01((fr.pivot[1] - 0.03) / Math.max(0.1, H - 0.03)), nearHit = clamp01(1 - d / 0.8);
         const push = force * (0.25 + 0.75 * up + nearHit) * rnd(0.6, 1.2), side = rnd(-0.35, 0.35);
         const delay = d / spread + rnd(0, 0.15) * (1 - nearHit);
         last = Math.max(last, delay);
-        launch(st.set, fr, [dir[0] * push - dir[2] * side * push * 0.5, rnd(-0.2, 0.6) + nearHit * 0.8, dir[2] * push + dir[0] * side * push * 0.5], delay, rnd(1, 5) * (0.5 + up));
+        launch(set, fr, [dir[0] * push - dir[2] * side * push * 0.5, rnd(-0.2, 0.6) + nearHit * 0.8, dir[2] * push + dir[0] * side * push * 0.5], delay, rnd(1, 5) * (0.5 + up));
       }
       // dust rolling out from the foot of the building, more on the far side
       if (DUST > 0) for (let k = 0; k < 18 * DUST; k++) {
@@ -406,7 +466,7 @@
       let nx = n ? n.x : 0, nz = n ? n.z : 0;
       if (Math.hypot(nx, nz) < 0.3) { nx = p.x - cx; nz = p.z - cz; } const l2 = Math.hypot(nx, nz) || 1; nx /= l2; nz /= l2;
       const H = Math.max(0.1, bd.top - p.y);
-      for (const fr of st.set.frs) {
+      for (const set of st.sets) for (const fr of set.frs) {
         if (fr.state !== 'still' || fr.pivot[1] < 0.03 + Math.random() * STUMP) continue;
         const dh = Math.hypot(fr.pivot[0] - p.x, fr.pivot[2] - p.z), dy = fr.pivot[1] - p.y;
         let delay, v;
@@ -420,7 +480,7 @@
           v = [(fr.pivot[0] - cx) * rnd(0, 0.5) + rnd(-0.1, 0.1), rnd(-0.2, 0.05), (fr.pivot[2] - cz) * rnd(0, 0.5) + rnd(-0.1, 0.1)];
         }
         last = Math.max(last, delay);
-        launch(st.set, fr, v, delay, rnd(0.5, 3));
+        launch(set, fr, v, delay, rnd(0.5, 3));
       }
       if (opts.sound !== false) { sound('crack'); setTimeout(() => sound('boom'), 250); setTimeout(() => sound('boom'), 900 + last * 400); }
       // a burst of dust and concrete out of the hole
@@ -464,17 +524,17 @@
   // null (it stays: the ruin). Such a building counts as down from then on.
   function blastWave(cx, cz, front, fn) {
     for (const st of solids.values()) {
-      if (st.claimed || !st.set) continue;
+      if (st.claimed || !st.set || busy(st)) continue;
       const bd = st.bd;
       if (Math.hypot(Math.max(bd.x0 - cx, 0, cx - bd.x1), Math.max(bd.z0 - cz, 0, cz - bd.z1)) > front) continue;
       swapIn(st);
-      for (const fr of st.set.frs) {
+      for (const set of st.sets) for (const fr of set.frs) {
         if (fr.state !== 'still' || fr.waved) continue;
         const d = Math.hypot(fr.pivot[0] - cx, fr.pivot[2] - cz);
         if (d > front) continue;
         fr.waved = true;
         const r = fn(fr, d);
-        if (r) launch(st.set, fr, r.v, 0, r.spin ?? rnd(1, 5));
+        if (r) launch(set, fr, r.v, 0, r.spin ?? rnd(1, 5));
       }
       if (!st.down) { st.down = true; goneAfter(st, 200, 3000); }
     }
@@ -513,13 +573,14 @@
   })();
 
   window.scBuildings = {
-    list, at, near, prepare: (x) => !!prepare(x),
+    list, at, near, prepare: (x) => !!prepare(x), expect,
     isSolid: (id) => solids.has(id),
     isDown: (id) => !!(solids.get(id) && solids.get(id).down),
     alive: (x) => { const bd = byId(x); if (!bd) return false; const st = solids.get(bd.id); return !(st && st.down) && !!(bd.grp && bd.grp.parent); },
     // how a building is doing: { solid, down, hits, chunks, standing } (null: not in chunks yet)
     state(x) { const id = x && typeof x === 'object' ? x.id : x, st = solids.get(id); if (!st || st.claimed) return st ? { claimed: true } : null;
-      return { solid: true, down: st.down, hits: st.hits, chunks: st.set ? st.set.frs.length : 0, standing: st.set ? st.set.frs.filter((f) => f.state === 'still').length : 0 }; },
+      const all = st.sets.flatMap((x) => x.frs).filter((f) => f.state !== 'gone');
+      return { solid: true, down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length }; },
     crater, hit, collapse, blastWave, claim,
     // low-level, for scripts with their own plans (the nuke)
     geometry: { readMasses, boxPoly, shatter, pieceTriangles, newell, bounds, isFacade, JF },

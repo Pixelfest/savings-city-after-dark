@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – rocket launcher (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.6
+// @version      1.7
 // @description  Adds a rocket launcher to walk mode (key 3). Residents and cars are blown apart, walls get holes blown in them.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -136,8 +136,9 @@
     w.scene.add(m);
     rockets.push({ m, flame: m.userData.flame, p: { ...start }, d, travelled: 0, smoke: 0, speed: ROCKET_SPEED * 0.6 });
     // the building it is going to hit: start cutting it into chunks now, while the rocket flies
-    // the building it will hit starts being cut into chunks now, while the rocket flies
-    try { const B = window.scBuildings, h = B && w.rayBuildings(start, d, RANGE); if (h) B.prepare(B.at({ x: start.x + d.x * h.t, y: start.y + d.y * h.t, z: start.z + d.z * h.t })); } catch (e) { console.warn('[rockets] prepare', e); }
+    // the building it will hit is cut into chunks now, while the rocket flies – small ones around
+    // where it will hit (buildings script: expect)
+    try { const B = window.scBuildings, h = B && w.rayBuildings(start, d, RANGE); if (h) { const p = { x: start.x + d.x * h.t, y: start.y + d.y * h.t, z: start.z + d.z * h.t }; if (B.expect) B.expect(p); else B.prepare(B.at(p)); } } catch (e) { console.warn('[rockets] prepare', e); }
     for (let k = 0; k < 5; k++) w.spawn('fire', start.x - d.x * 0.1, start.y, start.z - d.z * 0.1, { vx: -d.x * rnd(0.3, 0.8), vy: rnd(0, 0.1), vz: -d.z * rnd(0.3, 0.8), size: rnd(0.01, 0.018), life: rnd(0.06, 0.12) });   // a short flash out of the back
     w.startEffects();
     if (!loopOn) { loopOn = true; last = 0; requestAnimationFrame(loop); }

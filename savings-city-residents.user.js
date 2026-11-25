@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.17
+// @version      1.18
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -1008,23 +1008,23 @@
       const shaper = a.createWaveShaper(), curve = new Float32Array(256);   // a bit of rasp
       for (let i = 0; i < 256; i++) { const x = i / 128 - 1; curve[i] = Math.tanh(x * 2.5); }
       shaper.curve = curve;
-      const out = a.createGain(), pn = a.createStereoPanner ? a.createStereoPanner() : null;
+      const voice = a.createGain(), pn = a.createStereoPanner ? a.createStereoPanner() : null;   // (not `out`: that's the sound output)
       osc.connect(shaper);
       for (const [fr, q, g] of [[rnd(800, 1000), 5, 1], [rnd(1150, 1450), 6, 0.7], [rnd(2600, 3000), 8, 0.35]]) {   // "aaah"
         const bp = a.createBiquadFilter(), bg = a.createGain();
         bp.type = 'bandpass'; bp.frequency.value = fr; bp.Q.value = q; bg.gain.value = g;
-        shaper.connect(bp); bp.connect(bg); bg.connect(out);
+        shaper.connect(bp); bp.connect(bg); bg.connect(voice);
       }
       if (!noiseBuf) { noiseBuf = a.createBuffer(1, a.sampleRate, a.sampleRate); const ch = noiseBuf.getChannelData(0); for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1; }
       const noise = a.createBufferSource(), nf = a.createBiquadFilter(), ng = a.createGain();
       noise.buffer = noiseBuf; nf.type = 'bandpass'; nf.frequency.value = 2500; nf.Q.value = 1; ng.gain.value = 0.25;
-      noise.connect(nf); nf.connect(ng); ng.connect(out);
+      noise.connect(nf); nf.connect(ng); ng.connect(voice);
       const env = a.createGain();
       env.gain.setValueAtTime(0.0001, t);
       env.gain.exponentialRampToValueAtTime(vol, t + 0.04);
       env.gain.setValueAtTime(vol, t + len * 0.6);
       env.gain.exponentialRampToValueAtTime(0.0001, t + len);
-      out.connect(env);
+      voice.connect(env);
       if (pn) { pn.pan.value = pan; env.connect(pn); pn.connect(out(a)); } else env.connect(out(a));
       screaming++;
       osc.onended = () => { screaming--; };
