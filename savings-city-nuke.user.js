@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      2.9
+// @version      3.0
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -11,7 +11,10 @@
 /*
  * How it works
  * ------------
- * - The renderer is caught through three.js' devtools hook; the scene comes from the first render.
+ * - The scene, renderer, camera, traffic and three.js classes come from the core script
+ *   (savings-city-core); buildings are cut and their chunks moved by the solid-buildings script
+ *   (savings-city-buildings), which this script plans for: which part of each building stays, when
+ *   each chunk flies and how. Buildings already in chunks (rockets, the monster) fly with the wave too.
  *   All three.js classes are borrowed from objects already in the scene (no extra download).
  * - Nearly everything the app draws is merged geometry with a colour per vertex (city blocks of
  *   buildings, trees, lots). When the shockwave front passes, every triangle is handled by its
@@ -49,26 +52,8 @@
 (function () {
   'use strict';
 
-  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
-  // Everything this script plays goes through one gain node that copies the app's setting, also
-  // while a sound is playing (checked twice a second).
-  const appSoundLevel = () => {
-    try {
-      if (localStorage.getItem('citysaver:muted') === '1') return 0;
-      const v = parseFloat(localStorage.getItem('citysaver:volume'));
-      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
-    } catch { return 1; }
-  };
-  let soundOut = null;
-  function out(ctx) {
-    if (!soundOut || soundOut.context !== ctx) {
-      soundOut = ctx.createGain();
-      soundOut.gain.value = appSoundLevel();
-      soundOut.connect(ctx.destination);
-      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
-    }
-    return soundOut;
-  }
+  // sound through the core's output, which follows the app's own sound button (mute + volume)
+  const out = (ctx) => (window.scCore ? window.scCore.out(ctx) : ctx.destination);
 
 
   // ---- settings (distances in tiles; 1 tile ≈ 20 m) --------------------------------------
@@ -104,32 +89,18 @@
   const BOMBER_SPAN = 8;           // wingspan in tiles (a real B-2: 52 m = 2.6 tiles; bigger reads better from above)
   // -----------------------------------------------------------------------------------------
 
-  // ---------- catch the scene ----------
-  let scene = null, renderer = null, appCam = null;
-  const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
-  hook.addEventListener('observe', (e) => {
-    const r = e.detail;
-    if (!r || !r.isWebGLRenderer || r.__scNuke) return;
-    r.__scNuke = true; renderer = r;
-    const orig = r.render;
-    r.render = function (s, c) {
-      if (!scene && s && s.isScene && c && c.isOrthographicCamera) scene = s;
-      if (s === scene && c && c.isOrthographicCamera) appCam = c;
-      return orig.apply(this, arguments);
-    };
-  });
-
-  // The traffic list (same trick as the other scripts): the app moves its cars with
-  // traffic.cars.forEach(...) every frame.
-  let trafficCars = null;
-  const origForEach = Array.prototype.forEach;
-  Array.prototype.forEach = function () {
-    if (this !== trafficCars && this.length) {
-      const c = this[0];
-      if (c && typeof c === 'object' && typeof c.base === 'number' && typeof c.heading === 'number' && 'from' in c && 'to' in c) trafficCars = this;
-    }
-    return origForEach.apply(this, arguments);
-  };
+  // ---------- the scene, renderer, camera and traffic: from the core script, every frame ----------
+  let scene = null, renderer = null, appCam = null, trafficCars = null;
+  const B = () => window.scBuildings;
+  function sync() {
+    const c = window.scCore; if (!c) return;
+    scene = c.scene || scene; renderer = c.renderer || renderer; appCam = c.camera || appCam; trafficCars = c.traffic() || trafficCars;
+  }
+  (function attach() {
+    const c = window.scCore;
+    if (!c) { if ((attach.n = (attach.n || 0) + 1) < 240) setTimeout(attach, 250); else console.warn('[nuke] savings-city-core is missing'); return; }
+    c.onFrame(sync); sync();
+  })();
 
   // ---------- small helpers ----------
   const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -138,27 +109,8 @@
   const mine = (o) => { for (let p = o; p; p = p.parent) if (p.userData && p.userData.scNuke) return true; return false; };
 
   let K = null;   // borrowed three.js classes
-  function classes() {
-    if (K) return K;
-    let mesh = null, inst = null, lambert = null, color = null;
-    scene.traverse((o) => {
-      if (!mesh && o.isMesh && !o.isInstancedMesh && !o.isSkinnedMesh && o.geometry && o.geometry.attributes.position) mesh = o;
-      if (!inst && o.isInstancedMesh) inst = o;
-      const ms = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
-      for (const m of ms) { if (!lambert && m.isMeshLambertMaterial) lambert = m; if (!color && m.color && m.color.isColor) color = m.color; }
-    });
-    if (!mesh || !inst || !lambert || !color) return null;
-    let proto = Object.getPrototypeOf(mesh.geometry);
-    while (proto && !Object.prototype.hasOwnProperty.call(proto, 'translate')) proto = Object.getPrototypeOf(proto);
-    let o3 = Object.getPrototypeOf(scene);
-    while (o3 && !Object.prototype.hasOwnProperty.call(o3, 'add')) o3 = Object.getPrototypeOf(o3);
-    K = {
-      Mesh: mesh.constructor, Instanced: inst.constructor, Geometry: proto.constructor, Object3D: o3.constructor,
-      Attr: mesh.geometry.attributes.position.constructor, Lambert: lambert.constructor, Color: color.constructor,
-      M4: mesh.matrix.constructor, V3: mesh.position.constructor, Q: mesh.quaternion.constructor,
-    };
-    return K;
-  }
+  function classes() { sync(); return K || (K = window.scCore && window.scCore.classes()); }
+
 
   function geometry(pos, nor, col) {
     const g = new K.Geometry();
@@ -260,7 +212,7 @@
   let debrisChance = 1;
 
   function eligible(o) {
-    if (mine(o) || o.isInstancedMesh || o.isSkinnedMesh) return false;
+    if (mine(o) || o.isInstancedMesh || o.isSkinnedMesh || o.userData.scSolid || o.userData.scPuff) return false;
     if (!(o.isMesh || o.isPoints) || !o.geometry || !o.geometry.attributes.position) return false;
     const ms = Array.isArray(o.material) ? o.material : [o.material];
     if (o.isMesh && ms.some((m) => m && m.isShaderMaterial)) return false;
@@ -369,101 +321,32 @@
 
   // ---------- flying chunks ----------
   // Chunks (see "solid buildings" below) are prepared during the countdown, so the blast itself
-  // only has to move them: outward and up, tumbling; after landing they tip onto their largest face.
-  const fragments = [];
+  // only has to set them moving (the solid-buildings script moves them: they tumble, land and tip
+  // onto their largest face).
   let nukeRoot = null;
 
+  // how a chunk at `pivot`, `d` from ground zero, flies: away from ground zero, turned a random
+  // bit so neighbouring buildings' debris mixes, faster near the centre
+  function flight(pivot, d) {
+    const [cx, cy, cz] = pivot;
+    const turn = rnd(-1, 1) * SCATTER_DEGREES * Math.PI / 180, bx = (cx - nuke.cx) / (d || 1), bz = (cz - nuke.cz) / (d || 1);
+    const dx = bx * Math.cos(turn) - bz * Math.sin(turn), dz = bx * Math.sin(turn) + bz * Math.cos(turn);
+    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
+    const out = nuke.speed * power * rnd(0.3, 1.3) + 0.3;
+    return { v: [dx * out + rnd(-0.2, 0.2), rnd(0.4, 1.8) * power + 0.25 + cy * 0.25, dz * out + rnd(-0.2, 0.2)], spin: rnd(1.5, 7) * power + 0.6 };
+  }
   // The shockwave reached this chunk: it starts flying.
   function launch(fr) {
     if (fr.active) return;
     fr.active = true;
-    const d = fr.d || 1, [cx, cy, cz] = fr.pivot;
-    // away from ground zero, turned a random bit so neighbouring buildings' debris mixes
-    const turn = rnd(-1, 1) * SCATTER_DEGREES * Math.PI / 180, bx = (cx - nuke.cx) / d, bz = (cz - nuke.cz) / d;
-    const dx = bx * Math.cos(turn) - bz * Math.sin(turn), dz = bx * Math.sin(turn) + bz * Math.cos(turn);
-    const power = Math.pow(1 - clamp01(d / nuke.edge), 0.6);
-    const out = nuke.speed * power * rnd(0.3, 1.3) + 0.3;
-    let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
-    Object.assign(fr, {
-      R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0],
-      v: [dx * out + rnd(-0.2, 0.2), rnd(0.4, 1.8) * power + 0.25 + cy * 0.25, dz * out + rnd(-0.2, 0.2)],
-      axis: [ax / al, ay / al, az / al], w: rnd(1.5, 7) * power + 0.6, age: 0, landed: false, rest: false, minY: cy,
-    });
-    fragments.push(fr);
+    const f = flight(fr.pivot, fr.d || 1);
+    B().launch(solid.set, fr, f.v, 0, f.spin);
   }
-
-  // rotation of `angle` around a unit axis, as a 3×3 matrix (row-major)
-  function rot(x, y, z, angle) {
-    const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
-    return [t * x * x + c, t * x * y - s * z, t * x * z + s * y, t * x * y + s * z, t * y * y + c, t * y * z - s * x, t * x * z - s * y, t * y * z + s * x, t * z * z + c];
-  }
-  const mul = (A, B) => [
-    A[0] * B[0] + A[1] * B[3] + A[2] * B[6], A[0] * B[1] + A[1] * B[4] + A[2] * B[7], A[0] * B[2] + A[1] * B[5] + A[2] * B[8],
-    A[3] * B[0] + A[4] * B[3] + A[5] * B[6], A[3] * B[1] + A[4] * B[4] + A[5] * B[7], A[3] * B[2] + A[4] * B[5] + A[5] * B[8],
-    A[6] * B[0] + A[7] * B[3] + A[8] * B[6], A[6] * B[1] + A[7] * B[4] + A[8] * B[7], A[6] * B[2] + A[7] * B[5] + A[8] * B[8]];
-
-  function writeFragment(fr) {
-    const { pl, orig, n0, R, pivot, off } = fr, pos = pl.pos, nor = pl.nor;
-    let minY = Infinity;
-    for (let n = 0, k = fr.start; n < fr.count; n++, k++) {
-      const a = orig[n * 3], b = orig[n * 3 + 1], c = orig[n * 3 + 2];
-      const py = pivot[1] + off[1] + R[3] * a + R[4] * b + R[5] * c;
-      pos.setXYZ(k, pivot[0] + off[0] + R[0] * a + R[1] * b + R[2] * c, py, pivot[2] + off[2] + R[6] * a + R[7] * b + R[8] * c);
-      const p = n0[n * 3], q = n0[n * 3 + 1], r = n0[n * 3 + 2];
-      nor.setXYZ(k, R[0] * p + R[1] * q + R[2] * r, R[3] * p + R[4] * q + R[5] * r, R[6] * p + R[7] * q + R[8] * r);
-      if (py < minY) minY = py;
-    }
-    // only upload the part of the layer that moved
-    pl.lo = Math.min(pl.lo ?? Infinity, fr.start); pl.hi = Math.max(pl.hi ?? -Infinity, fr.start + fr.count);
-    fr.minY = minY;
-  }
-
-  function flushPools() {
-    for (const pl of solid.pool ? [solid.pool] : []) {
-      if (pl.lo === undefined || pl.lo === Infinity) continue;
-      for (const a of [pl.pos, pl.nor]) {
-        if (a.addUpdateRange) { a.addUpdateRange(pl.lo * 3, (pl.hi - pl.lo) * 3); }
-        a.needsUpdate = true;
-      }
-      pl.lo = pl.hi = undefined;
-    }
-  }
-
-  function stepFragments(dt) {
-    if (!dt) return;
-    stepFragmentsInner(dt);
-    flushPools();
-  }
-  function stepFragmentsInner(dt) {
-    const ground = 0.04;
-    for (const fr of fragments) {
-      if (fr.rest) continue;
-      fr.age += dt;
-      fr.v[1] -= 6 * dt;                                         // gravity
-      for (let a = 0; a < 3; a++) fr.off[a] += fr.v[a] * dt;
-      if (!fr.landed) fr.R = mul(rot(...fr.axis, fr.w * dt), fr.R);   // tumbling through the air
-      else {
-        // on the ground: tip over until the plate lies flat (its face pointing up or down)
-        const [x, y, z] = fr.normal, R = fr.R;
-        const n = [R[0] * x + R[1] * y + R[2] * z, R[3] * x + R[4] * y + R[5] * z, R[6] * x + R[7] * y + R[8] * z];
-        const up = -1;                                           // ends up lying on its largest face
-        const tilt = Math.acos(Math.min(1, Math.max(-1, n[1] * up)));
-        if (tilt > 0.01) {
-          let ax = -n[2] * up, az = n[0] * up; let l = Math.hypot(ax, az);   // n × (0, up, 0): turns n towards straight up/down
-          if (l < 1e-6) { ax = 1; az = 0; l = 1; }                 // exactly the wrong way up: any horizontal axis
-          fr.R = mul(rot(ax / l, 0, az / l, Math.min(tilt, 6 * dt)), R);
-        }
-        const k = Math.exp(-5 * dt); fr.v[0] *= k; fr.v[2] *= k;
-        if ((tilt <= 0.01 && Math.hypot(fr.v[0], fr.v[2]) < 0.05) || fr.age > 12) fr.rest = true;
-      }
-      writeFragment(fr);
-      if (fr.minY < ground) {                                    // touching the ground: stay on top of it
-        fr.off[1] += ground - fr.minY;
-        if (!fr.landed) { fr.landed = true; fr.v[0] *= 0.4; fr.v[2] *= 0.4; }
-        fr.v[1] = Math.max(0, fr.v[1]) * 0.1;
-        writeFragment(fr);
-      }
-    }
+  // buildings already in chunks before the blast (rockets, the monster): what's above the ruin's
+  // height there flies like the rest
+  function waveOverSolids(front) {
+    const b = B(); if (!b) return;
+    b.blastWave(nuke.cx, nuke.cz, Math.min(front, nuke.edge), (fr, d) => (fr.pivot[1] > keepHeight(d) ? flight(fr.pivot, d) : null));
   }
 
   // ---------- solid buildings ----------
@@ -476,127 +359,7 @@
   // as the original walls and roof; faces inside the building are broken concrete.
   // At the flash the original walls are swapped for these pieces (they look the same); when the
   // shockwave reaches a chunk it flies off, the ruin stays, scorched, with a broken concrete top.
-  const JF = [0.04, 0.96];                                       // the facade texture's plain spot (roofs use it)
-  const solid = { boxes: [], pieces: [], pool: null, next: 0, verts: 0, hiddenMeshes: [] };
-  const isFacade = (m) => m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade';
-
-  // Read the boxes of one building's facade mesh (world coordinates).
-  function readMasses(mesh) {
-    const g = mesh.geometry, pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv, col = g.attributes.color;
-    if (!pos || !nor || !uv || !col || pos.count % 4) return [];
-    mesh.updateWorldMatrix(true, false);
-    const e = mesh.matrixWorld.elements;
-    const W = (i) => [e[0] * pos.getX(i) + e[4] * pos.getY(i) + e[8] * pos.getZ(i) + e[12], e[1] * pos.getX(i) + e[5] * pos.getY(i) + e[9] * pos.getZ(i) + e[13], e[2] * pos.getX(i) + e[6] * pos.getY(i) + e[10] * pos.getZ(i) + e[14]];
-    const tops = [], walls = [];
-    for (let q = 0; q < pos.count; q += 4) {
-      const nx = nor.getX(q), ny = nor.getY(q), nz = nor.getZ(q);
-      const wn = [e[0] * nx + e[4] * ny + e[8] * nz, e[1] * nx + e[5] * ny + e[9] * nz, e[2] * nx + e[6] * ny + e[10] * nz];
-      const P = [0, 1, 2, 3].map((k) => W(q + k)), c = [col.getX(q), col.getY(q), col.getZ(q)];
-      if (wn[1] > 0.9) {
-        tops.push({ x0: Math.min(...P.map((p) => p[0])), x1: Math.max(...P.map((p) => p[0])), z0: Math.min(...P.map((p) => p[2])), z1: Math.max(...P.map((p) => p[2])), y1: P[0][1], roof: c });
-      } else if (Math.abs(wn[0]) > 0.9 || Math.abs(wn[2]) > 0.9) {
-        const ax = Math.abs(wn[0]) > 0.9 ? 0 : 2, along = ax === 0 ? 2 : 0, sign = Math.sign(wn[ax]);
-        // u depends on the position along the wall, v on the height: read both lines off the quad
-        const U = [0, 1, 2, 3].map((k) => [uv.getX(q + k), uv.getY(q + k)]);
-        let a = 0, b = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][along] - P[0][along]) > 1e-5) { b = k; break; }
-        let c2 = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][1] - P[0][1]) > 1e-5) { c2 = k; break; }
-        const du = (U[b][0] - U[a][0]) / (P[b][along] - P[a][along]), dv = (U[c2][1] - U[0][1]) / (P[c2][1] - P[0][1]);
-        walls.push({ ax, along, sign, at: P[0][ax], s0: Math.min(...P.map((p) => p[along])), s1: Math.max(...P.map((p) => p[along])),
-          y0: Math.min(...P.map((p) => p[1])), y1: Math.max(...P.map((p) => p[1])), c,
-          u: (s) => U[a][0] + (s - P[a][along]) * du, v: (y) => U[0][1] + (y - P[0][1]) * dv });
-      }
-    }
-    const near = (a, b) => Math.abs(a - b) < 1e-3;
-    const boxes = [];
-    for (const t of tops) {
-      const lim = { x: [t.x0, t.x1], z: [t.z0, t.z1] };
-      const own = walls.filter((w) => near(w.y1, t.y1) && near(w.at, w.ax === 0 ? (w.sign > 0 ? t.x1 : t.x0) : (w.sign > 0 ? t.z1 : t.z0)) &&
-        w.s0 >= (w.along === 0 ? lim.x[0] : lim.z[0]) - 1e-3 && w.s1 <= (w.along === 0 ? lim.x[1] : lim.z[1]) + 1e-3);
-      if (own.length < 1) continue;
-      const y0 = Math.min(...own.map((w) => w.y0));
-      if (t.y1 - y0 < 0.005 || t.x1 - t.x0 < 0.01 || t.z1 - t.z0 < 0.01) continue;
-      boxes.push({ x0: t.x0, x1: t.x1, z0: t.z0, z1: t.z1, y0, y1: t.y1, roof: t.roof, walls: own, wallColor: own[0].c });
-    }
-    for (const b of boxes) b.siblings = boxes;
-    return boxes;
-  }
-
-  const insideBox = (b, p, eps = 1e-4) => p[0] > b.x0 + eps && p[0] < b.x1 - eps && p[1] > b.y0 + eps && p[1] < b.y1 - eps && p[2] > b.z0 + eps && p[2] < b.z1 - eps;
-
-  // ---- convex polyhedra: a list of faces { v: [[x, y, z], …] counter-clockwise seen from outside, n, tag } ----
-  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-  function newell(v) {
-    let x = 0, y = 0, z = 0;
-    for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; x += (a[1] - b[1]) * (a[2] + b[2]); y += (a[2] - b[2]) * (a[0] + b[0]); z += (a[0] - b[0]) * (a[1] + b[1]); }
-    return [x, y, z];   // length = 2 × area
-  }
-  function face(v, n, tag) { if (dot(newell(v), n) < 0) v = v.slice().reverse(); return { v, n, tag }; }
-  function boxPoly(x0, y0, z0, x1, y1, z1, tags) {
-    return [
-      face([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], [1, 0, 0], tags['+x']),
-      face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0], tags['-x']),
-      face([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], [0, 1, 0], tags['+y']),
-      face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0], tags['-y']),
-      face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1], tags['+z']),
-      face([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], [0, 0, -1], tags['-z']),
-    ];
-  }
-  // cut a convex polyhedron by the plane n·p = d: [part behind, part in front]
-  function split(poly, n, d) {
-    const back = [], front = [], cut = [];
-    const EPS = 1e-9;
-    for (const f of poly) {
-      const b = [], fr = [], m = f.v.length;
-      for (let i = 0; i < m; i++) {
-        const a = f.v[i], c = f.v[(i + 1) % m];
-        let da = dot(n, a) - d, dc = dot(n, c) - d;
-        if (Math.abs(da) < EPS) da = 0; if (Math.abs(dc) < EPS) dc = 0;
-        if (da <= 0) b.push(a);
-        if (da >= 0) fr.push(a);
-        if (da === 0) cut.push(a);
-        if ((da < 0 && dc > 0) || (da > 0 && dc < 0)) {
-          const t = da / (da - dc), p = [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t, a[2] + (c[2] - a[2]) * t];
-          b.push(p); fr.push(p); cut.push(p);
-        }
-      }
-      if (b.length >= 3 && Math.hypot(...newell(b)) > 1e-10) back.push({ v: b, n: f.n, tag: f.tag });
-      if (fr.length >= 3 && Math.hypot(...newell(fr)) > 1e-10) front.push({ v: fr, n: f.n, tag: f.tag });
-    }
-    // the new face where the cut went through: the cut points, in order around their middle
-    const seen = new Set(), pts = [];
-    for (const p of cut) { const k = p.map((x) => Math.round(x * 1e6)).join(','); if (!seen.has(k)) { seen.add(k); pts.push(p); } }
-    if (pts.length >= 3 && back.length && front.length) {
-      const c = pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] + p[1] / pts.length, s[2] + p[2] / pts.length], [0, 0, 0]);
-      let u = cross(n, Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]); const ul = Math.hypot(...u); u = u.map((x) => x / ul);
-      const w = cross(n, u);
-      pts.sort((p, q) => Math.atan2(dot(sub(p, c), w), dot(sub(p, c), u)) - Math.atan2(dot(sub(q, c), w), dot(sub(q, c), u)));
-      back.push(face(pts, n, 'cut'));
-      front.push(face(pts.slice(), [-n[0], -n[1], -n[2]], 'cut'));
-    }
-    return [back, front];
-  }
-  function bounds(poly) {
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (const f of poly) for (const p of f.v) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
-    return { lo, hi };
-  }
-  // keep cutting the largest direction with a slightly tilted plane until pieces are about `size`
-  function shatter(poly, size, out, depth = 0) {
-    const { lo, hi } = bounds(poly), ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    const k = ext[0] >= ext[1] && ext[0] >= ext[2] ? 0 : ext[1] >= ext[2] ? 1 : 2, L = ext[k];
-    if (L <= size * rnd(0.8, 1.25) || depth > 40) { out.push(poly); return; }
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const tilt = attempt < 3 ? 0.5 : 0.1;                       // a cut that failed: try again, straighter
-      const n = [rnd(-tilt, tilt), rnd(-tilt, tilt), rnd(-tilt, tilt)]; n[k] = 1;
-      const nl = Math.hypot(...n); for (let a = 0; a < 3; a++) n[a] /= nl;
-      const c = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]; c[k] += L * rnd(-0.18, 0.18);
-      const [a, b] = split(poly, n, dot(n, c));
-      if (a.length >= 4 && b.length >= 4) { shatter(a, size, out, depth + 1); shatter(b, size, out, depth + 1); return; }
-    }
-    out.push(poly);
-  }
+  const solid = { boxes: [], pieces: [], set: null, next: 0, verts: 0, hiddenMeshes: [], claims: new Set() };
 
   // How high a column of a ruin still stands, for a building of height H: nothing near the centre,
   // a growing share of the building further out, uneven from column to column.
@@ -609,39 +372,17 @@
     return Math.max(FOUNDATION_HEIGHT, k);
   }
 
-  // Triangles (with colour and facade texture coordinates) for one piece.
-  function pieceTriangles(poly, box, concrete) {
-    const tris = [];
-    for (const f of poly) {
-      let c = concrete, uvOf = () => JF;
-      const t = f.tag;
-      if (t && t !== 'cut' && t.ext) {
-        const mid = f.v.reduce((s, p) => [s[0] + p[0] / f.v.length, s[1] + p[1] / f.v.length, s[2] + p[2] / f.v.length], [0, 0, 0]);
-        const out = [mid[0] + f.n[0] * 0.004, mid[1] + f.n[1] * 0.004, mid[2] + f.n[2] * 0.004];
-        if (!box.siblings.some((b) => insideBox(b, out, -1e-4))) {    // really on the outside of the building
-          if (t.side === '+y') c = box.roof;
-          else {
-            const ax = t.side[1] === 'x' ? 0 : 2, sign = t.side[0] === '+' ? 1 : -1;
-            const w = box.walls.find((w) => w.ax === ax && w.sign === sign && mid[1] >= w.y0 - 1e-3 && mid[1] <= w.y1 + 1e-3 && mid[w.along] >= w.s0 - 1e-3 && mid[w.along] <= w.s1 + 1e-3);
-            if (w) { c = w.c; uvOf = (p) => [w.u(p[w.along]), w.v(p[1])]; }
-          }
-        }
-      }
-      const vs = f.v.map((p) => ({ p, n: f.n, c, uv: uvOf(p) }));
-      for (let i = 1; i + 1 < vs.length; i++) tris.push([vs[0], vs[i], vs[i + 1]]);
-    }
-    return tris;
-  }
-
   function* planSolids() {
-    // all buildings' boxes, nearest first
+    if (!B()) throw new Error('savings-city-buildings is missing');
+    const { readMasses, boxPoly, shatter, pieceTriangles, newell, bounds, isFacade } = B().geometry;
+    // all buildings' boxes, nearest first (not the ones already in chunks: they fly with waveOverSolids)
     const masses = [];
     scene.traverse((o) => {
       if (!o.isMesh || o.isInstancedMesh || !o.geometry || !o.geometry.index || mine(o)) return;
       const m = Array.isArray(o.material) ? o.material[0] : o.material;
       if (!isFacade(m)) return;
       let pid = null; for (let p = o; p && pid === null; p = p.parent) if (p.userData && p.userData.projectId !== undefined) pid = p.userData.projectId;
-      if (pid !== null) masses.push(o);
+      if (pid !== null && !B().isSolid(pid)) { o.userData.scPid = pid; masses.push(o); }
     });
     let mat = null;
     for (const o of masses) {
@@ -651,6 +392,7 @@
         b.dMin = Math.hypot(dx, dz);
         if (b.dMin > nuke.edge) continue;                          // out of reach: stays as it is
         b.mesh = o; solid.boxes.push(b);
+        solid.claims.add(o.userData.scPid);                         // ours at the flash: rockets and the monster leave it alone
       }
       mat = mat || (Array.isArray(o.material) ? o.material[0] : o.material);
       yield;
@@ -737,42 +479,21 @@
     }
   }
 
-  // Write all pieces into one layer with the facade material; drawn from the flash on.
+  // Write all pieces into one layer with the facade material (the solid-buildings script's chunk
+  // set); drawn from the flash on.
   function buildSolids() {
     if (!solid.pieces.length || !solid.mat) return;
     solid.pieces.sort((a, b) => a.d - b.d);
-    const total = solid.pieces.reduce((s, p) => s + p.tris.length * 3, 0);
-    const g = new K.Geometry();
-    const attr = (w) => { const at = new K.Attr(new Float32Array(Math.max(3, total) * w), w); if (at.setUsage) at.setUsage(35048); return at; };
-    g.setAttribute('position', attr(3)); g.setAttribute('normal', attr(3)); g.setAttribute('color', attr(3)); g.setAttribute('uv', attr(2));
-    const P = g.attributes.position, N = g.attributes.normal, C = g.attributes.color, U = g.attributes.uv;
-    const pl = { g, pos: P, nor: N, col: C, drawn: total, solid: true };
-    let k = 0;
-    for (const pc of solid.pieces) {
-      let px = 0, py = 0, pz = 0, m = 0;
-      for (const t of pc.tris) for (const v of t) { px += v.p[0]; py += v.p[1]; pz += v.p[2]; m++; }
-      const pivot = [px / m, py / m, pz / m];
-      const fr = { pl, pivot, normal: pc.normal || [0, -1, 0], d: pc.d, start: k, count: m, active: false, still: pc.still, dark: pc.dark, solid: true,
-        orig: new Float32Array(m * 3), n0: new Float32Array(m * 3) };
-      let q = 0;
-      for (const t of pc.tris) for (const v of t) {
-        P.setXYZ(k, v.p[0], v.p[1], v.p[2]); N.setXYZ(k, v.n[0], v.n[1], v.n[2]); C.setXYZ(k, v.c[0], v.c[1], v.c[2]); U.setXY(k, v.uv[0], v.uv[1]);
-        fr.orig.set([v.p[0] - pivot[0], v.p[1] - pivot[1], v.p[2] - pivot[2]], q * 3); fr.n0.set(v.n, q * 3);
-        k++; q++;
-      }
-      pc.fr = fr; pc.tris = null;
-    }
-    g.setDrawRange(0, total);
-    const mesh = new K.Mesh(g, solid.mat);
-    mesh.frustumCulled = false; mesh.castShadow = mesh.receiveShadow = true; mesh.visible = false;
-    nukeRoot.add(mesh);
-    solid.mesh = mesh; solid.pool = pl;
+    const set = B().chunkSet(solid.pieces, solid.mat, { parent: nukeRoot, hidden: true, release: true });
+    solid.pieces.forEach((pc, i) => { pc.fr = set.frs[i]; });
+    solid.set = set; solid.mesh = set.mesh;
   }
 
   // The flash: original walls out, solid pieces in (they look the same).
   function showSolids() {
     if (!solid.mesh) return;
     solid.mesh.visible = true;
+    for (const pid of solid.claims) B().claim(pid);
     for (const job of jobs) {
       if (!job.solid) continue;
       const pos = job.pos;
@@ -790,8 +511,8 @@
 
   // Each frame: pieces the front has passed fly off (chunks) or get scorched (the ruin).
   function advanceSolids(f) {
-    if (!solid.pool) return;
-    const pcs = solid.pieces, C = solid.pool.col;
+    if (!solid.set) return;
+    const pcs = solid.pieces, C = solid.set.col;
     let scorched = false, lo = Infinity, hi = -Infinity;
     while (solid.next < pcs.length && pcs[solid.next].d <= f) {
       const fr = pcs[solid.next++].fr;
@@ -1225,7 +946,7 @@
     }
     // buildings as solids: boxes → ruin columns + chunks; their original triangles are swapped at the flash
     try { yield* planSolids(); yield* flagSolidTriangles(); yield; buildSolids(); }
-    catch (e) { console.warn('[nuke] solid buildings failed: buildings will only be cut off', e); solid.pieces = []; solid.pool = null; for (const j of jobs) j.solid = null; }
+    catch (e) { console.warn('[nuke] solid buildings failed: buildings will only be cut off', e); solid.pieces = []; solid.set = null; solid.mesh = null; for (const j of jobs) j.solid = null; }
     const toBreak = jobs.reduce((x, j) => x + j.breakable, 0);
     debrisChance = Math.min(1 / GRAVEL, (MAX_DEBRIS * 0.9) / Math.max(1, toBreak * GRAVEL));
     console.info('[nuke] ready · ground zero', nuke.cx.toFixed(1), nuke.cz.toFixed(1), '· city radius', nuke.R.toFixed(1),
@@ -1299,7 +1020,7 @@
     const safe = (name, fn) => { try { fn(); } catch (e) { if (!loop.warned) loop.warned = {}; if (!loop.warned[name]) { loop.warned[name] = 1; console.warn('[nuke] ' + name, e); } } };
     for (const j of jobs) safe('destroy', () => advance(j, f, true));
     safe('solids', () => advanceSolids(f));
-    safe('chunks', () => stepFragments(dt));
+    safe('chunks', () => waveOverSolids(f));
     safe('debris', () => stepDebris(dt));
     safe('cloud', () => stepCloud(t));
     safe('wave', () => stepWave(t));

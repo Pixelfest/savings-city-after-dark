@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – giant monster
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  A 👾 button releases a giant green monster with round glasses that walks into the city and smashes buildings into solid chunks. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -15,11 +15,11 @@
  *   short arms, stubby legs with claws) with mottled green colours, animated by hand: it walks
  *   with swaying body and swinging arms, blinks, and looks at what it is about to smash.
  * - It enters from outside the city, walks to the nearest building, and punches it. The building
- *   is a solid: the boxes its walls are made of (one facade mesh per building) are cut into
- *   convex chunks with the facade (windows, colours) on the outside and broken concrete inside –
- *   the same way the nuke script does it. A low, jagged stump stays. The chunks break loose
- *   starting where the fist hit, are pushed away from the monster (upper floors more), tumble,
- *   land and come to rest. Dust rolls out.
+ *   is pushed over by the solid-buildings script (needs savings-city-core and
+ *   savings-city-buildings): cut into convex chunks with the facade (windows, colours) on the
+ *   outside and broken concrete inside; a low, jagged stump stays. The chunks break loose starting
+ *   where the fist hit, are pushed away from the monster (upper floors more), tumble, land and come
+ *   to rest. Dust rolls out.
  * - Every footstep shakes the view; residents underfoot are squashed (residents script), others
  *   flee; cars underfoot are flattened.
  * - Click the button again to send the monster away. Nothing is sent to the server: reload the
@@ -28,27 +28,8 @@
 (function () {
   'use strict';
 
-  // ---------- sound follows the app's own sound button (mute + volume, kept in localStorage) ----------
-  // Everything this script plays goes through one gain node that copies the app's setting, also
-  // while a sound is playing (checked twice a second).
-  const appSoundLevel = () => {
-    try {
-      if (localStorage.getItem('citysaver:muted') === '1') return 0;
-      const v = parseFloat(localStorage.getItem('citysaver:volume'));
-      return Math.min(2.8, ((Number.isFinite(v) ? v : 0.6) / 0.6) ** 2);   // the app's level: volume², 0.6 = normal
-    } catch { return 1; }
-  };
-  let soundOut = null;
-  function out(ctx) {
-    if (!soundOut || soundOut.context !== ctx) {
-      soundOut = ctx.createGain();
-      soundOut.gain.value = appSoundLevel();
-      soundOut.connect(ctx.destination);
-      if (!out.timer) out.timer = setInterval(() => { if (soundOut) soundOut.gain.setTargetAtTime(appSoundLevel(), soundOut.context.currentTime, 0.05); }, 500);
-    }
-    return soundOut;
-  }
-
+  // sound through the core's output, which follows the app's own sound button (mute + volume)
+  const out = (ctx) => (window.scCore ? window.scCore.out(ctx) : ctx.destination);
 
   // ---- settings (tiles; 1 tile ≈ 20 m) ----
   const MONSTER_HEIGHT = 2.6;      // top of the head (≈ 50 m); the tallest buildings are ~3
@@ -56,205 +37,17 @@
   const TURN_SPEED = 1.4;          // radians per second
   const PUNCH_FORCE = 3;           // how hard the chunks are pushed away (tiles per second, top floors)
   const CRACK_SPEED = 2.5;         // how fast the break runs through a building from where it was hit
-  const CHUNK_SIZE = 0.2;          // chunk size (as in the nuke script)
-  const STUMP = 0.12;              // a stump up to this high stays standing (jagged)
-  const RUIN_COLUMN = 0.3;
   const SHAKE = 10;                // camera shake per footstep (pixels)
   const SOUND = true;
   // -------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
   const clamp01 = (x) => Math.max(0, Math.min(1, x));
-  const JF = [0.04, 0.96];
-  let scene = null, renderer = null, K = null;
-  const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
-  hook.addEventListener('observe', (e) => {
-    const r = e.detail;
-    if (!r || !r.isWebGLRenderer || r.__scMonster) return;
-    r.__scMonster = true; renderer = r;
-    const orig = r.render;
-    r.render = function (s, c) { if (!scene && s && s.isScene && c && c.isOrthographicCamera) scene = s; return orig.apply(this, arguments); };
-  });
-  // the traffic list (same trick as the other scripts)
-  let trafficCars = null;
-  const origForEach = Array.prototype.forEach;
-  Array.prototype.forEach = function () {
-    if (this !== trafficCars && this.length) { const c = this[0]; if (c && typeof c === 'object' && typeof c.base === 'number' && typeof c.heading === 'number' && 'from' in c && 'to' in c) trafficCars = this; }
-    return origForEach.apply(this, arguments);
-  };
-
-  function classes() {
-    if (K) return K;
-    let mesh = null, lambert = null, color = null;
-    scene.traverse((o) => {
-      if (!mesh && o.isMesh && !o.isInstancedMesh && o.geometry && o.geometry.attributes.position) mesh = o;
-      const ms = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
-      for (const m of ms) { if (!lambert && m.isMeshLambertMaterial) lambert = m; if (!color && m.color && m.color.isColor) color = m.color; }
-    });
-    if (!mesh || !lambert || !color) return null;
-    let proto = Object.getPrototypeOf(mesh.geometry);
-    while (proto && !Object.prototype.hasOwnProperty.call(proto, 'translate')) proto = Object.getPrototypeOf(proto);
-    let o3 = Object.getPrototypeOf(scene);
-    while (o3 && !Object.prototype.hasOwnProperty.call(o3, 'add')) o3 = Object.getPrototypeOf(o3);
-    K = { Mesh: mesh.constructor, Geometry: proto.constructor, Object3D: o3.constructor, Attr: mesh.geometry.attributes.position.constructor,
-      Lambert: lambert.constructor, Color: color.constructor, M4: mesh.matrix.constructor, V3: mesh.position.constructor };
-    return K;
-  }
-
-  const isFacade = (m) => m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade';
-
-  // Read the boxes of one building's facade mesh (world coordinates).
-  function readMasses(mesh) {
-    const g = mesh.geometry, pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv, col = g.attributes.color;
-    if (!pos || !nor || !uv || !col || pos.count % 4) return [];
-    mesh.updateWorldMatrix(true, false);
-    const e = mesh.matrixWorld.elements;
-    const W = (i) => [e[0] * pos.getX(i) + e[4] * pos.getY(i) + e[8] * pos.getZ(i) + e[12], e[1] * pos.getX(i) + e[5] * pos.getY(i) + e[9] * pos.getZ(i) + e[13], e[2] * pos.getX(i) + e[6] * pos.getY(i) + e[10] * pos.getZ(i) + e[14]];
-    const tops = [], walls = [];
-    for (let q = 0; q < pos.count; q += 4) {
-      const nx = nor.getX(q), ny = nor.getY(q), nz = nor.getZ(q);
-      const wn = [e[0] * nx + e[4] * ny + e[8] * nz, e[1] * nx + e[5] * ny + e[9] * nz, e[2] * nx + e[6] * ny + e[10] * nz];
-      const P = [0, 1, 2, 3].map((k) => W(q + k)), c = [col.getX(q), col.getY(q), col.getZ(q)];
-      if (wn[1] > 0.9) {
-        tops.push({ x0: Math.min(...P.map((p) => p[0])), x1: Math.max(...P.map((p) => p[0])), z0: Math.min(...P.map((p) => p[2])), z1: Math.max(...P.map((p) => p[2])), y1: P[0][1], roof: c });
-      } else if (Math.abs(wn[0]) > 0.9 || Math.abs(wn[2]) > 0.9) {
-        const ax = Math.abs(wn[0]) > 0.9 ? 0 : 2, along = ax === 0 ? 2 : 0, sign = Math.sign(wn[ax]);
-        // u depends on the position along the wall, v on the height: read both lines off the quad
-        const U = [0, 1, 2, 3].map((k) => [uv.getX(q + k), uv.getY(q + k)]);
-        let a = 0, b = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][along] - P[0][along]) > 1e-5) { b = k; break; }
-        let c2 = 1; for (let k = 1; k < 4; k++) if (Math.abs(P[k][1] - P[0][1]) > 1e-5) { c2 = k; break; }
-        const du = (U[b][0] - U[a][0]) / (P[b][along] - P[a][along]), dv = (U[c2][1] - U[0][1]) / (P[c2][1] - P[0][1]);
-        walls.push({ ax, along, sign, at: P[0][ax], s0: Math.min(...P.map((p) => p[along])), s1: Math.max(...P.map((p) => p[along])),
-          y0: Math.min(...P.map((p) => p[1])), y1: Math.max(...P.map((p) => p[1])), c,
-          u: (s) => U[a][0] + (s - P[a][along]) * du, v: (y) => U[0][1] + (y - P[0][1]) * dv });
-      }
-    }
-    const near = (a, b) => Math.abs(a - b) < 1e-3;
-    const boxes = [];
-    for (const t of tops) {
-      const lim = { x: [t.x0, t.x1], z: [t.z0, t.z1] };
-      const own = walls.filter((w) => near(w.y1, t.y1) && near(w.at, w.ax === 0 ? (w.sign > 0 ? t.x1 : t.x0) : (w.sign > 0 ? t.z1 : t.z0)) &&
-        w.s0 >= (w.along === 0 ? lim.x[0] : lim.z[0]) - 1e-3 && w.s1 <= (w.along === 0 ? lim.x[1] : lim.z[1]) + 1e-3);
-      if (own.length < 1) continue;
-      const y0 = Math.min(...own.map((w) => w.y0));
-      if (t.y1 - y0 < 0.005 || t.x1 - t.x0 < 0.01 || t.z1 - t.z0 < 0.01) continue;
-      boxes.push({ x0: t.x0, x1: t.x1, z0: t.z0, z1: t.z1, y0, y1: t.y1, roof: t.roof, walls: own, wallColor: own[0].c });
-    }
-    for (const b of boxes) b.siblings = boxes;
-    return boxes;
-  }
-
-  const insideBox = (b, p, eps = 1e-4) => p[0] > b.x0 + eps && p[0] < b.x1 - eps && p[1] > b.y0 + eps && p[1] < b.y1 - eps && p[2] > b.z0 + eps && p[2] < b.z1 - eps;
-
-  // ---- convex polyhedra: a list of faces { v: [[x, y, z], …] counter-clockwise seen from outside, n, tag } ----
-  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-  function newell(v) {
-    let x = 0, y = 0, z = 0;
-    for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; x += (a[1] - b[1]) * (a[2] + b[2]); y += (a[2] - b[2]) * (a[0] + b[0]); z += (a[0] - b[0]) * (a[1] + b[1]); }
-    return [x, y, z];   // length = 2 × area
-  }
-  function face(v, n, tag) { if (dot(newell(v), n) < 0) v = v.slice().reverse(); return { v, n, tag }; }
-  function boxPoly(x0, y0, z0, x1, y1, z1, tags) {
-    return [
-      face([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], [1, 0, 0], tags['+x']),
-      face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0], tags['-x']),
-      face([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], [0, 1, 0], tags['+y']),
-      face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0], tags['-y']),
-      face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1], tags['+z']),
-      face([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], [0, 0, -1], tags['-z']),
-    ];
-  }
-  // cut a convex polyhedron by the plane n·p = d: [part behind, part in front]
-  function split(poly, n, d) {
-    const back = [], front = [], cut = [];
-    const EPS = 1e-9;
-    for (const f of poly) {
-      const b = [], fr = [], m = f.v.length;
-      for (let i = 0; i < m; i++) {
-        const a = f.v[i], c = f.v[(i + 1) % m];
-        let da = dot(n, a) - d, dc = dot(n, c) - d;
-        if (Math.abs(da) < EPS) da = 0; if (Math.abs(dc) < EPS) dc = 0;
-        if (da <= 0) b.push(a);
-        if (da >= 0) fr.push(a);
-        if (da === 0) cut.push(a);
-        if ((da < 0 && dc > 0) || (da > 0 && dc < 0)) {
-          const t = da / (da - dc), p = [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t, a[2] + (c[2] - a[2]) * t];
-          b.push(p); fr.push(p); cut.push(p);
-        }
-      }
-      if (b.length >= 3 && Math.hypot(...newell(b)) > 1e-10) back.push({ v: b, n: f.n, tag: f.tag });
-      if (fr.length >= 3 && Math.hypot(...newell(fr)) > 1e-10) front.push({ v: fr, n: f.n, tag: f.tag });
-    }
-    // the new face where the cut went through: the cut points, in order around their middle
-    const seen = new Set(), pts = [];
-    for (const p of cut) { const k = p.map((x) => Math.round(x * 1e6)).join(','); if (!seen.has(k)) { seen.add(k); pts.push(p); } }
-    if (pts.length >= 3 && back.length && front.length) {
-      const c = pts.reduce((s, p) => [s[0] + p[0] / pts.length, s[1] + p[1] / pts.length, s[2] + p[2] / pts.length], [0, 0, 0]);
-      let u = cross(n, Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]); const ul = Math.hypot(...u); u = u.map((x) => x / ul);
-      const w = cross(n, u);
-      pts.sort((p, q) => Math.atan2(dot(sub(p, c), w), dot(sub(p, c), u)) - Math.atan2(dot(sub(q, c), w), dot(sub(q, c), u)));
-      back.push(face(pts, n, 'cut'));
-      front.push(face(pts.slice(), [-n[0], -n[1], -n[2]], 'cut'));
-    }
-    return [back, front];
-  }
-  function bounds(poly) {
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (const f of poly) for (const p of f.v) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
-    return { lo, hi };
-  }
-  // keep cutting the largest direction with a slightly tilted plane until pieces are about `size`
-  function shatter(poly, size, out, depth = 0) {
-    const { lo, hi } = bounds(poly), ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    const k = ext[0] >= ext[1] && ext[0] >= ext[2] ? 0 : ext[1] >= ext[2] ? 1 : 2, L = ext[k];
-    if (L <= size * rnd(0.8, 1.25) || depth > 40) { out.push(poly); return; }
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const tilt = attempt < 3 ? 0.5 : 0.1;                       // a cut that failed: try again, straighter
-      const n = [rnd(-tilt, tilt), rnd(-tilt, tilt), rnd(-tilt, tilt)]; n[k] = 1;
-      const nl = Math.hypot(...n); for (let a = 0; a < 3; a++) n[a] /= nl;
-      const c = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]; c[k] += L * rnd(-0.18, 0.18);
-      const [a, b] = split(poly, n, dot(n, c));
-      if (a.length >= 4 && b.length >= 4) { shatter(a, size, out, depth + 1); shatter(b, size, out, depth + 1); return; }
-    }
-    out.push(poly);
-  }
-
-  // Triangles (with colour and facade texture coordinates) for one piece.
-  function pieceTriangles(poly, box, concrete) {
-    const tris = [];
-    for (const f of poly) {
-      let c = concrete, uvOf = () => JF;
-      const t = f.tag;
-      if (t && t !== 'cut' && t.ext) {
-        const mid = f.v.reduce((s, p) => [s[0] + p[0] / f.v.length, s[1] + p[1] / f.v.length, s[2] + p[2] / f.v.length], [0, 0, 0]);
-        const out = [mid[0] + f.n[0] * 0.004, mid[1] + f.n[1] * 0.004, mid[2] + f.n[2] * 0.004];
-        if (!box.siblings.some((b) => insideBox(b, out, -1e-4))) {    // really on the outside of the building
-          if (t.side === '+y') c = box.roof;
-          else {
-            const ax = t.side[1] === 'x' ? 0 : 2, sign = t.side[0] === '+' ? 1 : -1;
-            const w = box.walls.find((w) => w.ax === ax && w.sign === sign && mid[1] >= w.y0 - 1e-3 && mid[1] <= w.y1 + 1e-3 && mid[w.along] >= w.s0 - 1e-3 && mid[w.along] <= w.s1 + 1e-3);
-            if (w) { c = w.c; uvOf = (p) => [w.u(p[w.along]), w.v(p[1])]; }
-          }
-        }
-      }
-      const vs = f.v.map((p) => ({ p, n: f.n, c, uv: uvOf(p) }));
-      for (let i = 1; i + 1 < vs.length; i++) tris.push([vs[0], vs[i], vs[i + 1]]);
-    }
-    return tris;
-  }
-
-  // rotation of `angle` around a unit axis, as a 3×3 matrix (row-major)
-  function rot(x, y, z, angle) {
-    const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
-    return [t * x * x + c, t * x * y - s * z, t * x * z + s * y, t * x * y + s * z, t * y * y + c, t * y * z - s * x, t * x * z - s * y, t * y * z + s * x, t * z * z + c];
-  }
-  const mul = (A, B) => [
-    A[0] * B[0] + A[1] * B[3] + A[2] * B[6], A[0] * B[1] + A[1] * B[4] + A[2] * B[7], A[0] * B[2] + A[1] * B[5] + A[2] * B[8],
-    A[3] * B[0] + A[4] * B[3] + A[5] * B[6], A[3] * B[1] + A[4] * B[4] + A[5] * B[7], A[3] * B[2] + A[4] * B[5] + A[5] * B[8],
-    A[6] * B[0] + A[7] * B[3] + A[8] * B[6], A[6] * B[1] + A[7] * B[4] + A[8] * B[7], A[6] * B[2] + A[7] * B[5] + A[8] * B[8]];
-
+  // the scene, renderer, traffic and three.js classes come from the core script
+  const core = () => window.scCore;
+  const sceneOf = () => core() && core().scene;
+  let K = null;
+  function classes() { return K || (K = core() && core().classes()); }
 
   // ---------- the creature ----------
   // Built from simple shapes in unit size (1 = top of the head without the hair tufts), then
@@ -444,236 +237,23 @@
     return { root, hips, body, eyes, arms, legs, LEG };
   }
 
-  // ---------- buildings ----------
-  // every building: its group (with userData.projectId), its facade mesh and the boxes in it
-  function buildings() {
-    const list = [];
-    scene.traverse((o) => {
-      if (!o.isMesh || o.isInstancedMesh || !o.geometry || !o.geometry.index) return;
-      if (!isFacade(Array.isArray(o.material) ? o.material[0] : o.material)) return;
-      let grp = null; for (let p = o; p && !grp; p = p.parent) if (p.userData && p.userData.projectId !== undefined) grp = p;
-      if (!grp || destroyed.has(grp.userData.projectId)) return;
-      const boxes = massesOf(o);
-      if (!boxes.length) return;
-      const x0 = Math.min(...boxes.map((b) => b.x0)), x1 = Math.max(...boxes.map((b) => b.x1)), z0 = Math.min(...boxes.map((b) => b.z0)), z1 = Math.max(...boxes.map((b) => b.z1));
-      list.push({ id: grp.userData.projectId, grp, mesh: o, boxes, x0, x1, z0, z1, top: Math.max(...boxes.map((b) => b.y1)), cx: (x0 + x1) / 2, cz: (z0 + z1) / 2 });
-    });
-    // buildings the rocket launcher already turned into chunks (they have no facade mesh any more)
-    const rs = window.scRocketSolids;
-    if (rs) for (const b of rs.list()) if (!destroyed.has(b.id)) list.push({ ...b, external: true, grp: { parent: true }, cx: (b.x0 + b.x1) / 2, cz: (b.z0 + b.z1) / 2 });
-    return list;
-  }
-  const massCache = new WeakMap();
-  function massesOf(mesh) { if (!massCache.has(mesh)) massCache.set(mesh, readMasses(mesh)); return massCache.get(mesh); }
-  const destroyed = new Map();       // projectId → footprint, to keep it gone if the app redraws the block
-
-  // Hide the building's original triangles: in the city block meshes (everything above the lot
-  // inside its footprint) and its own hidden group (so walk mode no longer bumps into it).
-  function hideBuilding(bd) {
-    const f = { x0: bd.x0 - 0.03, x1: bd.x1 + 0.03, z0: bd.z0 - 0.03, z1: bd.z1 + 0.03 };
-    destroyed.set(bd.id, f);
-    removeIn(f);
-    bd.grp.traverse((o) => { if (o.isMesh && o.geometry && !o.userData.scMonster) o.geometry = new K.Geometry(); });
-  }
-  const cleaned = new WeakMap();     // geometry → footprints already removed from it
-  function removeIn(...foot) {
-    scene.traverse((o) => {
-      if (!o.isMesh || o.isInstancedMesh || !o.geometry || o.geometry.index || o.userData.scMonster) return;
-      if (!isFacade(Array.isArray(o.material) ? o.material[0] : o.material)) return;
-      const g = o.geometry, pos = g.attributes.position; if (!pos) return;
-      const done = cleaned.get(g) || []; const todo = foot.filter((f) => !done.includes(f)); if (!todo.length) return;
-      cleaned.set(g, done.concat(todo));
-      o.updateWorldMatrix(true, false);
-      const e = o.matrixWorld.elements;
-      let lo = Infinity, hi = -1;
-      for (let i = 0; i + 2 < pos.count; i += 3) {
-        let inside = true, high = false;
-        for (let v = i; v < i + 3 && inside; v++) {
-          const x = e[0] * pos.getX(v) + e[4] * pos.getY(v) + e[8] * pos.getZ(v) + e[12], y = e[1] * pos.getX(v) + e[5] * pos.getY(v) + e[9] * pos.getZ(v) + e[13], z = e[2] * pos.getX(v) + e[6] * pos.getY(v) + e[10] * pos.getZ(v) + e[14];
-          inside = todo.some((f) => x >= f.x0 && x <= f.x1 && z >= f.z0 && z <= f.z1);
-          if (y > 0.036) high = true;
-        }
-        if (!inside || !high) continue;
-        for (let v = i; v < i + 3; v++) pos.setXYZ(v, pos.getX(i), pos.getY(i), pos.getZ(i));
-        lo = Math.min(lo, i); hi = Math.max(hi, i + 3);
-      }
-      if (hi > 0) { if (pos.addUpdateRange) { pos.addUpdateRange(lo * 3, (hi - lo) * 3); } pos.needsUpdate = true; }
-    });
-  }
-
-  // ---------- a building comes down ----------
-  // (one the rocket launcher already cut into chunks: that script brings it down the same way)
+  // ---------- buildings (the solid-buildings script breaks them) ----------
+  const B = () => window.scBuildings;
+  function buildings() { const b = B(); return b ? b.list() : []; }
+  const gone = (bd) => !B() || !B().alive(bd);
+  // a punch or a step: the building is pushed over, a crack running from where it was hit
   function smash(bd, hit, dir) {
-    if (bd.external) { destroyed.set(bd.id, { x0: 1e9, x1: -1e9, z0: 1e9, z1: -1e9 }); if (window.scRocketSolids) window.scRocketSolids.collapse(bd.id, dir, PUNCH_FORCE); sound('crash'); return; }
-    collapse(bd, hit, dir);
+    const b = B(); if (!b) return;
+    if (b.collapse(bd, { at: hit, push: dir, force: PUNCH_FORCE, spread: CRACK_SPEED })) sound('crash');
   }
-  const collapses = [];
-  function collapse(bd, hit, dir) {
-    // casualties: everyone inside, and on the street right next to it (residents script 1.10, cops)
-    setTimeout(() => {
-      const res = window.scResidents;
-      if (res && res.crush) res.crush(bd.x0, bd.z0, bd.x1, bd.z1);
-      window.dispatchEvent(new CustomEvent('sc:crush', { detail: { x0: bd.x0, z0: bd.z0, x1: bd.x1, z1: bd.z1, margin: 0.3 } }));
-    }, 700);
-    const pieces = [];
-    for (const b of bd.boxes) {
-      const nx = Math.max(1, Math.round((b.x1 - b.x0) / RUIN_COLUMN)), nz = Math.max(1, Math.round((b.z1 - b.z0) / RUIN_COLUMN));
-      const xs = [b.x0], zs = [b.z0];
-      for (let i = 1; i < nx; i++) xs.push(b.x0 + (b.x1 - b.x0) * (i + rnd(-0.25, 0.25)) / nx); xs.push(b.x1);
-      for (let i = 1; i < nz; i++) zs.push(b.z0 + (b.z1 - b.z0) * (i + rnd(-0.25, 0.25)) / nz); zs.push(b.z1);
-      const wall = b.wallColor, concrete0 = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
-      for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
-        const x0 = xs[i], x1 = xs[i + 1], z0 = zs[j], z1 = zs[j + 1];
-        const keep = Math.min(b.y1, Math.max(b.y0, 0.03 + Math.random() * STUMP));
-        const tags = (yTop) => ({
-          '+x': { side: '+x', ext: Math.abs(x1 - b.x1) < 1e-6 }, '-x': { side: '-x', ext: Math.abs(x0 - b.x0) < 1e-6 },
-          '+z': { side: '+z', ext: Math.abs(z1 - b.z1) < 1e-6 }, '-z': { side: '-z', ext: Math.abs(z0 - b.z0) < 1e-6 },
-          '+y': { side: '+y', ext: Math.abs(yTop - b.y1) < 1e-6 }, '-y': { side: '-y', ext: false },
-        });
-        const shade = rnd(0.88, 1.08), concrete = concrete0.map((v) => v * shade);
-        if (keep > b.y0 + 1e-4) pieces.push({ tris: pieceTriangles(boxPoly(x0, b.y0, z0, x1, keep, z1, tags(keep)), b, concrete), still: true });
-        if (b.y1 > keep + 1e-4) {
-          const chunks = [];
-          shatter(boxPoly(x0, keep, z0, x1, b.y1, z1, tags(b.y1)), CHUNK_SIZE, chunks);
-          for (const ch of chunks) {
-            const s2 = rnd(0.9, 1.1);
-            let big = null, area = -1;
-            for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
-            pieces.push({ tris: pieceTriangles(ch, b, concrete.map((v) => v * s2)), still: false, normal: big });
-          }
-        }
-      }
-    }
-    // one layer with the facade material; chunks wait in place until the break reaches them
-    const total = pieces.reduce((s, p) => s + p.tris.length * 3, 0);
-    const g = new K.Geometry();
-    const attr = (w) => { const at = new K.Attr(new Float32Array(Math.max(3, total) * w), w); if (at.setUsage) at.setUsage(35048); return at; };
-    g.setAttribute('position', attr(3)); g.setAttribute('normal', attr(3)); g.setAttribute('color', attr(3)); g.setAttribute('uv', attr(2));
-    const P = g.attributes.position, N = g.attributes.normal, C = g.attributes.color, U = g.attributes.uv;
-    const frs = [];
-    let k = 0;
-    const H = bd.top;
-    for (const pc of pieces) {
-      let px = 0, py = 0, pz = 0, m = 0;
-      for (const t of pc.tris) for (const v of t) { px += v.p[0]; py += v.p[1]; pz += v.p[2]; m++; }
-      const pivot = [px / m, py / m, pz / m];
-      const fr = { start: k, count: m, pivot, normal: pc.normal || [0, -1, 0], still: pc.still, orig: new Float32Array(m * 3), n0: new Float32Array(m * 3) };
-      let q = 0;
-      for (const t of pc.tris) for (const v of t) {
-        P.setXYZ(k, v.p[0], v.p[1], v.p[2]); N.setXYZ(k, v.n[0], v.n[1], v.n[2]); C.setXYZ(k, v.c[0], v.c[1], v.c[2]); U.setXY(k, v.uv[0], v.uv[1]);
-        fr.orig.set([v.p[0] - pivot[0], v.p[1] - pivot[1], v.p[2] - pivot[2]], q * 3); fr.n0.set(v.n, q * 3);
-        k++; q++;
-      }
-      if (!pc.still) {
-        // when it breaks loose (the crack runs from the fist through the building) and how it flies
-        const d = Math.hypot(pivot[0] - hit[0], (pivot[1] - hit[1]) * 0.6, pivot[2] - hit[2]);
-        const up = clamp01((pivot[1] - 0.03) / Math.max(0.1, H - 0.03));
-        const near = clamp01(1 - d / 0.8);
-        const push = PUNCH_FORCE * (0.25 + 0.75 * up + near) * rnd(0.6, 1.2);
-        const side = rnd(-0.35, 0.35);
-        let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
-        Object.assign(fr, { delay: d / CRACK_SPEED + rnd(0, 0.15) * (1 - near), R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0],
-          v: [dir[0] * push - dir[2] * side * push * 0.5, rnd(-0.2, 0.6) + near * 0.8, dir[2] * push + dir[0] * side * push * 0.5],
-          axis: [ax / al, ay / al, az / al], w: rnd(1, 5) * (0.5 + up), landed: false, rest: false, active: false, age: 0 });
-      }
-      frs.push(fr);
-    }
-    const mat = Array.isArray(bd.mesh.material) ? bd.mesh.material[0] : bd.mesh.material;
-    const mesh = new K.Mesh(g, mat);
-    mesh.userData.scMonster = true; mesh.castShadow = mesh.receiveShadow = true; mesh.frustumCulled = false;
-    scene.add(mesh);
-    hideBuilding(bd);
-    collapses.push({ g, pos: P, nor: N, frs, t: 0 });
-    // dust rolling out from the foot of the building, more on the far side
-    for (let n = 0; n < 26; n++) {
-      const a = Math.random() * Math.PI * 2, r = rnd(0, 0.6);
-      puff(bd.cx + Math.cos(a) * r + dir[0] * 0.3, 0.06, bd.cz + Math.sin(a) * r + dir[2] * 0.3, { vx: Math.cos(a) * rnd(0.2, 0.6) + dir[0] * 0.5, vy: rnd(0.05, 0.25), vz: Math.sin(a) * rnd(0.2, 0.6) + dir[2] * 0.5, size: rnd(0.18, 0.35), life: rnd(3, 6), delay: rnd(0.2, 1.2) });
-    }
-    sound('crash');
-    window.dispatchEvent(new Event('sc:geometry-changed'));    // walk mode: walls are gone
-  }
-
-  function stepCollapses(dt) {
-    for (const cl of collapses) {
-      if (cl.done) continue;
-      cl.t += dt;
-      let lo = Infinity, hi = -1, busy = false;
-      for (const fr of cl.frs) {
-        if (fr.still || fr.rest) continue;
-        busy = true;
-        if (!fr.active) { if (cl.t < fr.delay) continue; fr.active = true; }
-        fr.age += dt;
-        fr.v[1] -= 6 * dt;
-        for (let a = 0; a < 3; a++) fr.off[a] += fr.v[a] * dt;
-        if (!fr.landed) fr.R = mul(rot(...fr.axis, fr.w * dt), fr.R);
-        else {
-          const [x, y, z] = fr.normal, R = fr.R;
-          const n = [R[0] * x + R[1] * y + R[2] * z, R[3] * x + R[4] * y + R[5] * z, R[6] * x + R[7] * y + R[8] * z];
-          const tilt = Math.acos(Math.min(1, Math.max(-1, -n[1])));   // lands on its largest face
-          if (tilt > 0.01) { let ax = n[2], az = -n[0]; let l = Math.hypot(ax, az); if (l < 1e-6) { ax = 1; az = 0; l = 1; } fr.R = mul(rot(ax / l, 0, az / l, Math.min(tilt, 6 * dt)), R); }
-          const f = Math.exp(-5 * dt); fr.v[0] *= f; fr.v[2] *= f;
-          if ((tilt <= 0.01 && Math.hypot(fr.v[0], fr.v[2]) < 0.05) || fr.age > 12) fr.rest = true;
-        }
-        let minY = write(cl, fr);
-        if (minY < 0.04) {
-          fr.off[1] += 0.04 - minY;
-          if (!fr.landed) { fr.landed = true; fr.v[0] *= 0.4; fr.v[2] *= 0.4; if (Math.random() < 0.15) puff(fr.pivot[0] + fr.off[0], 0.06, fr.pivot[2] + fr.off[2], { vy: 0.08, size: rnd(0.08, 0.16), life: rnd(1.5, 3) }); }
-          fr.v[1] = Math.max(0, fr.v[1]) * 0.1;
-          minY = write(cl, fr);
-        }
-        lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count);
-      }
-      if (hi > 0) for (const a of [cl.pos, cl.nor]) { if (a.addUpdateRange) { a.addUpdateRange(lo * 3, (hi - lo) * 3); } a.needsUpdate = true; }
-      if (!busy) cl.done = true;
-    }
-  }
-  function write(cl, fr) {
-    const { orig, n0, R, pivot, off } = fr, pos = cl.pos, nor = cl.nor;
-    let minY = Infinity;
-    for (let n = 0, k = fr.start; n < fr.count; n++, k++) {
-      const a = orig[n * 3], b = orig[n * 3 + 1], c = orig[n * 3 + 2];
-      const py = pivot[1] + off[1] + R[3] * a + R[4] * b + R[5] * c;
-      pos.setXYZ(k, pivot[0] + off[0] + R[0] * a + R[1] * b + R[2] * c, py, pivot[2] + off[2] + R[6] * a + R[7] * b + R[8] * c);
-      const p = n0[n * 3], q = n0[n * 3 + 1], r = n0[n * 3 + 2];
-      nor.setXYZ(k, R[0] * p + R[1] * q + R[2] * r, R[3] * p + R[4] * q + R[5] * r, R[6] * p + R[7] * q + R[8] * r);
-      if (py < minY) minY = py;
-    }
-    return minY;
-  }
-
-  // ---------- dust ----------
-  const puffs = [];
-  let puffGeo = null, puffMat = null;
-  function puff(x, y, z, o) {
-    if (!puffGeo) {
-      const sh = shapes(); sh.colour('#ffffff', 0); sh.ellipsoid([0, 0, 0], [1, 1, 1], 8);
-      puffGeo = toMesh(sh, null).geometry;
-      puffMat = new K.Lambert({ color: '#b9aa96', transparent: true, opacity: 0.85, depthWrite: false });
-    }
-    const mat = puffMat.clone();
-    const m = new K.Mesh(puffGeo, mat);
-    m.position.set(x, y, z); m.scale.setScalar(0.001); m.visible = false; m.userData.scMonster = true; m.frustumCulled = false;
-    scene.add(m);
-    puffs.push({ m, vx: o.vx || 0, vy: o.vy || 0, vz: o.vz || 0, size: o.size, life: o.life, age: -(o.delay || 0) });
-  }
-  function stepPuffs(dt) {
-    for (let k = puffs.length - 1; k >= 0; k--) {
-      const p = puffs[k]; p.age += dt;
-      if (p.age < 0) continue;
-      const f = p.age / p.life;
-      if (f >= 1) { p.m.removeFromParent(); p.m.material.dispose(); puffs.splice(k, 1); continue; }
-      p.m.visible = true;
-      const drag = Math.exp(-1.2 * dt); p.vx *= drag; p.vz *= drag; p.vy *= drag;
-      p.m.position.x += p.vx * dt; p.m.position.y += p.vy * dt; p.m.position.z += p.vz * dt;
-      p.m.scale.set(p.size * (0.4 + f * 1.4), p.size * (0.3 + f * 0.9), p.size * (0.4 + f * 1.4));
-      p.m.material.opacity = 0.85 * (1 - f) * Math.min(1, p.age * 4);
-    }
-  }
+  function puff(x, y, z, o) { const c = core(); if (c) c.puff(x, y, z, o); }
 
   // ---------- the monster ----------
   let mon = null;
   function release() {
-    if (!scene || !classes()) { alert('De 3D-stad is nog niet geladen.'); return; }
+    if (!core()) { alert('Het monster heeft het core-script nodig (savings-city-core).'); return; }
+    if (!B()) { alert('Het monster heeft het gebouwen-script nodig (savings-city-buildings).'); return; }
+    if (!sceneOf() || !classes()) { alert('De 3D-stad is nog niet geladen.'); return; }
     const c = buildCreature();
     c.root.scale.setScalar(MONSTER_HEIGHT);
     c.root.traverse((o) => { o.userData.scMonster = true; });
@@ -684,7 +264,7 @@
     const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, R = Math.hypot(x1 - x0, z1 - z0) / 2 + 3, a = Math.random() * Math.PI * 2;
     mon = { c, x: cx + Math.cos(a) * R, z: cz + Math.sin(a) * R, yaw: 0, phase: 0, state: 'walk', target: null, t: 0, arm: 0, blink: 2, look: [0, 0], lastStep: 0, alarmAt: 0, shake: 0 };
     mon.yaw = Math.atan2(cx - mon.x, cz - mon.z);
-    scene.add(c.root);
+    sceneOf().add(c.root);
     sound('roar');
     if (!looping) { looping = true; last = 0; requestAnimationFrame(loop); }
     updateButton();
@@ -693,7 +273,7 @@
     if (!mon) return;
     mon.c.root.removeFromParent();
     mon = null;
-    const el = renderer && renderer.domElement; if (el) el.style.transform = '';
+    const el = core() && core().renderer && core().renderer.domElement; if (el) el.style.transform = '';
     updateButton();
   }
 
@@ -707,11 +287,11 @@
     if (now - nearAt > 800) { nearAt = now; nearList = buildings(); }
     const body = MONSTER_HEIGHT * 0.3;
     for (const bd of nearList) {
-      if (destroyed.has(bd.id) || bd === mon.target) continue;
+      if (gone(bd) || bd === mon.target) continue;
       const cp = closest(bd, mon.x, mon.z);
       if (cp.d > body) continue;
       const dx = bd.cx - mon.x, dz = bd.cz - mon.z, l = Math.hypot(dx, dz) || 1;
-      try { smash(bd, [cp.px, 0.15, cp.pz], [(dx / l + Math.sin(mon.yaw)) / 2, 0, (dz / l + Math.cos(mon.yaw)) / 2]); } catch (e) { console.warn('[monster] trample', e); if (!bd.external) hideBuilding(bd); }
+      try { smash(bd, [cp.px, 0.15, cp.pz], [(dx / l + Math.sin(mon.yaw)) / 2, 0, (dz / l + Math.cos(mon.yaw)) / 2]); } catch (e) { console.warn('[monster] trample', e); }
       mon.shake = Math.max(mon.shake, SHAKE * 1.5);
     }
   }
@@ -719,7 +299,7 @@
   function think(dt) {
     const m = mon;
     if (m.state === 'walk' || m.state === 'idle') {
-      if (!m.target || destroyed.has(m.target.id) || !m.target.grp.parent) {
+      if (!m.target || gone(m.target)) {
         const all = buildings();
         m.target = all.length ? all.reduce((best, b) => (closest(b, m.x, m.z).d < closest(best, m.x, m.z).d ? b : best)) : null;
         m.state = m.target ? 'walk' : 'idle';
@@ -740,10 +320,10 @@
       if (!m.hitDone && m.t >= 0.62) {
         m.hitDone = true;
         const bd = m.target;
-        if (bd && !destroyed.has(bd.id)) {
+        if (bd && !gone(bd)) {
           const cp = closest(bd, m.x, m.z), hy = Math.min(bd.top * 0.8, MONSTER_HEIGHT * 0.5);
           const dx = bd.cx - m.x, dz = bd.cz - m.z, l = Math.hypot(dx, dz) || 1;
-          try { smash(bd, [cp.px, hy, cp.pz], [dx / l, 0, dz / l]); } catch (e) { console.warn('[monster] collapse', e); if (!bd.external) hideBuilding(bd); }
+          try { smash(bd, [cp.px, hy, cp.pz], [dx / l, 0, dz / l]); } catch (e) { console.warn('[monster] collapse', e); }
           m.shake = Math.max(m.shake, SHAKE * 2.2);
         }
       }
@@ -809,11 +389,12 @@
       if (res.blast) res.blast(x, z, foot * 2.2, 0, 0);             // knocked over
     }
     // cars underfoot: flattened
+    const trafficCars = core().traffic();
     if (trafficCars) {
       let proxies = null;
       trafficCars.forEach((car, i) => {
         if (car.scFlat || Math.hypot(car.x - x, car.z - z) > foot * 1.3) return;
-        if (!proxies) { proxies = new Map(); scene.traverse((o) => { const cc = o.userData && o.userData.car; if (cc && typeof cc.index === 'number') proxies.set(cc.index, o); }); }
+        if (!proxies) { proxies = new Map(); sceneOf().traverse((o) => { const cc = o.userData && o.userData.car; if (cc && typeof cc.index === 'number') proxies.set(cc.index, o); }); }
         car.scFlat = true; car.parked = Infinity; car.speed = 0;
         const p = proxies.get(i); if (p) p.scale.set(1.15, 0.22, 1.2);
       });
@@ -821,7 +402,7 @@
   }
 
   function stepShake(dt) {
-    const el = renderer && renderer.domElement; if (!el || !mon) return;
+    const el = core() && core().renderer && core().renderer.domElement; if (!el || !mon) return;
     mon.shake *= Math.exp(-6 * dt);
     const a = mon.shake;
     if (a < 0.3) { el.style.transform = ''; return; }
@@ -841,10 +422,6 @@
       safe('shake', () => stepShake(dt));
       if (t - mon.alarmAt > 2000) { mon.alarmAt = t; const r = window.scResidents; if (r && r.alarm) r.alarm(mon.x, mon.z, MONSTER_HEIGHT * 2.5, 8); }
     }
-    safe('collapse', () => stepCollapses(dt));
-    safe('dust', () => stepPuffs(dt));
-    // the app redrew a city block: keep destroyed buildings gone
-    if (destroyed.size && t - lastCheck > 1000) { lastCheck = t; safe('keep', () => removeIn(...destroyed.values())); }
   }
 
   // ---------- sound ----------
