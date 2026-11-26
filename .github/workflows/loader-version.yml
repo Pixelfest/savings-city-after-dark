@@ -1,0 +1,24 @@
+name: Loader version
+
+# Every change to a script needs a version bump: the changed script's own @version, and the loader's
+# @version with every ?v= on its @require lines set to the same number (so Tampermonkey fetches the
+# scripts again). See AGENTS.md → "Releases" and tools/check-loader-version.js.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check the version bump
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: node tools/check-loader-version.js "$BASE"

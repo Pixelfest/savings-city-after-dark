@@ -115,10 +115,16 @@ if `require('playwright')` fails); otherwise `npm install`.
 
 ## Releases
 
-A release is one commit to `main` (via the user's usual branch/PR flow) titled
-`Release X.Y: <what changed>`, with:
+Every change to a script is a release: it needs a version bump, and CI checks it on every pull
+request and on every push to `main` (`.github/workflows/loader-version.yml`, `tools/check-loader-version.js`;
+run it locally with `npm run check:version`). It fails when a changed `savings-city-*.user.js`
+has no higher `@version`, or when the loader doesn't carry the new number. So a PR that changes a
+script must:
 
-- the changed scripts' own `@version` bumped,
-- the loader's `@version` bumped to `X.Y` **and** every `?v=` on its `@require` lines set to `X.Y`
-  (that's what makes Tampermonkey fetch the scripts again),
-- `README.md` updated (versions in the table, new features).
+- bump the changed scripts' own `@version`,
+- bump the loader's `@version` to the new version **and** set every `?v=` on its `@require` lines
+  and its console line (the one that prints the version) to the same number (that's what makes Tampermonkey fetch the scripts again),
+- update `README.md` (versions in the table, new features).
+
+Releases are commits to `main` (via the user's usual branch/PR flow); a release titled
+`Release X.Y: <what changed>` is fine but not required.

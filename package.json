@@ -8,7 +8,8 @@
     "start": "node local/server.js",
     "shot": "node local/shot.js",
     "check": "node tools/check-privacy.js",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "check:version": "node tools/check-loader-version.js"
   },
   "devDependencies": {
     "playwright": "1.48.2"
