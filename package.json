@@ -1,0 +1,17 @@
+{
+  "name": "savings-city-after-dark",
+  "private": true,
+  "description": "Tampermonkey userscripts for the Savings City app, with a local copy of the app to develop and test on.",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node local/server.js",
+    "shot": "node local/shot.js",
+    "check": "node tools/check-privacy.js",
+    "sanitize-app": "node tools/sanitize-app.js",
+    "anonymise-city": "node tools/anonymise-city.js"
+  },
+  "devDependencies": {
+    "playwright": "1.48.2"
+  }
+}

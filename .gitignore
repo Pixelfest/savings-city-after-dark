@@ -1,0 +1,8 @@
+# Private words the privacy check looks for (real host, company, people). Never commit this.
+.private-terms
+node_modules/
+# Screenshots from local/shot.js and other scratch output
+*.png
+!app/**/*.png
+/tmp/
+/incoming/
