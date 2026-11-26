@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.19
+// @version      1.20
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -91,7 +91,7 @@
   const BLOOD_SPEED = 0.7;        // how hard the drops fly (tiles per second)
   const BLOOD_POOL_SIZE = 0.065;  // final radius of the pool (a person is 0.135 tall)
   const BLOOD_POOL_SECONDS = 10;  // how long the pool keeps growing
-  const MAX_BLOOD_DROPS = 5000;   // drops + stains on the ground; the oldest stains disappear after this
+  const MAX_BLOOD_DROPS = 5000;   // drops + stains on the ground; the oldest stains disappear after this (× the blood setting, up to 4×)
   const ASPHALT_HEIGHT = 0.04;    // top of the road surface
   const HEADSHOTS = true;         // shot in the head (walk mode): the head pops off and flies on its own
   const HEAD_SPEED = 0.8;         // how hard a head is knocked away (tiles per second; 1 tile ≈ 20 m)
@@ -646,20 +646,36 @@
 
   function groundAt(x, z) { return onAsphalt(x, z) ? ASPHALT_HEIGHT : SIDEWALK_HEIGHT; }
 
+  // the blood setting (core: 1, 2, 4, 8, 16× as much) and the room for drops it gets
+  const bloodF = () => (window.scCore && window.scCore.blood ? window.scCore.blood() : 1);
+  const dropCap = () => MAX_BLOOD_DROPS * Math.min(4, bloodF());
+  function pushDrop(d) {
+    const cap = dropCap();
+    if (drops.length < cap) drops.push(d); else { dropHead %= cap; drops[dropHead] = d; dropHead = (dropHead + 1) % cap; }
+  }
   function addDrop(x, y, z, vx, vy, vz, size) {
-    const d = { x, y, z, vx, vy, vz, size, landed: false, rot: rnd(0, Math.PI) };
-    if (drops.length < MAX_BLOOD_DROPS) drops.push(d); else { drops[dropHead] = d; dropHead = (dropHead + 1) % MAX_BLOOD_DROPS; }
+    pushDrop({ x, y, z, vx, vy, vz, size, landed: false, rot: rnd(0, Math.PI) });
+  }
+  // a spray of n drops (× the blood setting) from (x, y, z) towards (dx, dz) – for other scripts (cops)
+  function spatter(x, y, z, dx, dz, n, speed = 0.5, up = 0.4) {
+    if (!BLOOD || !dropMesh) return false;
+    const l = Math.hypot(dx, dz) || 1;
+    for (let k = 0, m = Math.round(n * bloodF()); k < m; k++) {
+      const sp = speed * rnd(0, 1);
+      addDrop(x + rnd(-0.005, 0.005), y, z + rnd(-0.005, 0.005), dx / l * sp + rnd(-0.25, 0.25) * speed, rnd(0.05, 1) * up + 0.05, dz / l * sp + rnd(-0.25, 0.25) * speed, rnd(0.0025, 0.0055) * SCALE);
+    }
+    return true;
   }
 
   function bleed(p, dx, dy, dz) {
     const y0 = SIDEWALK_HEIGHT + 0.08 * SCALE;                      // chest height
-    for (let k = 0; k < BLOOD_DROPS; k++) {
+    for (let k = 0, n = Math.round(BLOOD_DROPS * bloodF()); k < n; k++) {
       const back = Math.random() < 0.25 ? -0.5 : 1;                 // a quarter sprays back towards the shooter
       const sp = BLOOD_SPEED * rnd(0.25, 1) * back;
       const d = { x: p.x + rnd(-0.008, 0.008), y: y0 + rnd(-0.015, 0.015), z: p.z + rnd(-0.008, 0.008),
         vx: dx * sp + rnd(-0.25, 0.25) * BLOOD_SPEED, vy: Math.max(0, dy) * sp + rnd(0.05, 0.6) * BLOOD_SPEED,
         vz: dz * sp + rnd(-0.25, 0.25) * BLOOD_SPEED, size: rnd(0.0025, 0.0055) * SCALE, landed: false, rot: rnd(0, Math.PI) };
-      if (drops.length < MAX_BLOOD_DROPS) drops.push(d); else { drops[dropHead] = d; dropHead = (dropHead + 1) % MAX_BLOOD_DROPS; }
+      pushDrop(d);
     }
     // the pool: under the chest/head, which lands about 0.07 away from the feet in the fall direction
     p.blood = { t: -rnd(0.4, 1.2), x: p.x + dx * 0.07 * SCALE, z: p.z + dz * 0.07 * SCALE,
@@ -682,23 +698,31 @@
       pools.setMatrixAt(i, m);
     }
     pools.count = n; pools.instanceMatrix.needsUpdate = true;
+    // flying drops move every frame; a stain is written once, when it lands (or its slot is reused)
+    const sv = stepBlood.v || (stepBlood.v = new V());
+    let lo = Infinity, hi = -1;
     for (let i = 0; i < drops.length; i++) {
       const d = drops[i];
+      if (d.written === i) continue;                              // a stain, already in place
       if (!d.landed) {
         d.vy -= GRAVITY * dt;
         d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
         const gy = groundAt(d.x, d.z);
         if (d.y <= gy + 0.0006) { d.landed = true; d.y = gy + 0.0006 + (i % 7) * 0.00005; }   // tiny offsets: no flicker between stains
-        m.makeRotationY(d.rot);
-        m.scale(new V(d.size, d.size, d.size * (1 + Math.min(2, Math.hypot(d.vx, d.vy, d.vz) * 2))));   // stretched while flying
-        if (!d.landed) m.premultiply(new M().makeRotationY(Math.atan2(d.vx, d.vz) - d.rot));
       }
       if (d.landed) {
-        if (!d.flat) { d.flat = true; d.mat = new M().makeRotationY(d.rot).scale(new V(d.size * 1.8, 0.0004, d.size * rnd(1.8, 3.2))).setPosition(d.x, d.y, d.z); }
-        dropMesh.setMatrixAt(i, d.mat);
-      } else { m.setPosition(d.x, d.y, d.z); dropMesh.setMatrixAt(i, m); }
+        m.makeRotationY(d.rot).scale(sv.set(d.size * 1.8, 0.0004, d.size * rnd(1.8, 3.2))).setPosition(d.x, d.y, d.z);
+        d.written = i;
+      } else {
+        m.makeRotationY(Math.atan2(d.vx, d.vz));
+        m.scale(sv.set(d.size, d.size, d.size * (1 + Math.min(2, Math.hypot(d.vx, d.vy, d.vz) * 2))));   // stretched while flying
+        m.setPosition(d.x, d.y, d.z);
+      }
+      dropMesh.setMatrixAt(i, m);
+      if (i < lo) lo = i; if (i > hi) hi = i;
     }
-    dropMesh.count = drops.length; dropMesh.instanceMatrix.needsUpdate = true;
+    dropMesh.count = drops.length;
+    if (hi >= 0) { if (dropMesh.instanceMatrix.addUpdateRange) dropMesh.instanceMatrix.addUpdateRange(lo * 16, (hi - lo + 1) * 16); dropMesh.instanceMatrix.needsUpdate = true; }
   }
 
   // ---------- headshots ----------
@@ -733,7 +757,7 @@
     const e = m.elements, k = HEAD_Y * SCALE * (p.k || 1);
     const nx = e[4] * k + e[12], ny = e[5] * k + e[13], nz = e[6] * k + e[14];
     const left = p.squirt / NECK_SQUIRT_SECONDS, beat = Math.max(0, Math.sin(t * 0.0001 * 2 * Math.PI * 25 + (p.x * 7)));   // ~2.5 beats per second
-    const rate = 150 * left * (0.15 + beat * beat);
+    const rate = 150 * left * (0.15 + beat * beat) * bloodF();
     p.squirtAcc = (p.squirtAcc || 0) + rate * dt;
     while (p.squirtAcc >= 1) {
       p.squirtAcc -= 1;
@@ -815,7 +839,7 @@
     p.state = 'gone'; p.squirt = 0;
     if (BLOOD) {
       const y0 = base + 0.06 * SCALE;
-      for (let k = 0; k < 60; k++) addDrop(p.x, y0, p.z, dx * rnd(-0.3, 1) * BLOOD_SPEED * 1.5 + rnd(-0.6, 0.6) * BLOOD_SPEED, rnd(0.1, 1.2) * BLOOD_SPEED, dz * rnd(-0.3, 1) * BLOOD_SPEED * 1.5 + rnd(-0.6, 0.6) * BLOOD_SPEED, rnd(0.002, 0.006) * SCALE);
+      for (let k = 0, nd = Math.round(60 * bloodF()); k < nd; k++) addDrop(p.x, y0, p.z, dx * rnd(-0.3, 1) * BLOOD_SPEED * 1.5 + rnd(-0.6, 0.6) * BLOOD_SPEED, rnd(0.1, 1.2) * BLOOD_SPEED, dz * rnd(-0.3, 1) * BLOOD_SPEED * 1.5 + rnd(-0.6, 0.6) * BLOOD_SPEED, rnd(0.002, 0.006) * SCALE);
       p.blood = { t: -0.2, x: p.x, z: p.z, a: rnd(0, Math.PI * 2), sx: rnd(0.8, 1.25), sz: rnd(0.8, 1.25), size: BLOOD_POOL_SIZE * SCALE * 1.3, y: groundAt(p.x, p.z) + 0.0008 };
     }
     return true;
@@ -941,10 +965,10 @@
       const dropGeo = geo((pp, nn, cc) => box(pp, nn, cc, -0.5, -0.5, -0.5, 1, 1, 1, W));
       const bloodMat = new Material({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
       pools = new InstancedMesh(poolGeo, bloodMat, n);
-      dropMesh = new InstancedMesh(dropGeo, bloodMat, MAX_BLOOD_DROPS);
+      dropMesh = new InstancedMesh(dropGeo, bloodMat, MAX_BLOOD_DROPS * 4);
       for (const b of [pools, dropMesh]) { b.frustumCulled = false; b.receiveShadow = true; b.count = 0; }
       for (let i = 0; i < n; i++) pools.setColorAt(i, c.set(i % 3 ? '#5c0707' : '#4a0505'));
-      for (let i = 0; i < MAX_BLOOD_DROPS; i++) dropMesh.setColorAt(i, c.set(['#8a0d0d', '#6d0909', '#a31414', '#5a0606'][i % 4]));
+      for (let i = 0; i < MAX_BLOOD_DROPS * 4; i++) dropMesh.setColorAt(i, c.set(['#8a0d0d', '#6d0909', '#a31414', '#5a0606'][i % 4]));
       group.add(pools, dropMesh);
     }
     // flames on burning people: unlit blocks (no light or shade: they glow), yellow, orange, red
@@ -1230,6 +1254,9 @@
       return n;
     },
     get burning() { return burning; },
+    spatter: (x, y, z, dx, dz, n, speed, up) => spatter(x, y, z, dx, dz, n, speed, up),   // blood (n × the blood setting)
+    // a scream at (x, z) (the cops on fire); voice: Hz, or random
+    screamAt(x, z, voice, short) { scream({ x, z, voice }, 0, !!short); },
     // people indoors within radius of (x, z) die (the nuke); returns how many
     killInside(x, z, radius) {
       let n = 0;

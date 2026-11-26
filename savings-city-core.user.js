@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -41,6 +41,7 @@
  *   get(id), set(id, v), onChange(id, fn)); kept in localStorage. A button in the menu opens a
  *   popup with all of them. The core's own: 'detail' (1 = normal … 5 = most detailed), read through
  *   detail() → { level, factor: 2^(level − 1) } – scripts multiply their piece budgets by it.
+ *   'blood' (1 … 5), read through blood() → 1, 2, 4, 8 or 16: how much blood spatters.
  * - damage(event) / onDamage(fn): the damage bus. Weapons and disasters describe what happens;
  *   whatever can break registers a handler and decides for itself:
  *     { kind: 'blast' | 'impact' | 'push' | 'crush', x, y, z, radius, power, dir: {x,y,z}, n: {x,y,z},
@@ -451,6 +452,10 @@
     format: (v) => `${v} · ${DETAIL_NAMES[v]}${v > 1 ? ` (${2 ** (v - 1)}× zoveel stukken)` : ''}`,
     help: 'Hoe fijn gebouwen in stukken breken (raket, monster, kernbom). Hoger = mooier, maar zwaarder voor de computer.' });
   const detail = () => { const level = settings.get('detail') || 1; return { level, factor: 2 ** (level - 1) }; };
+  settings.define({ id: 'blood', label: 'Bloed', min: 1, max: 5, step: 1, value: 1,
+    format: (v) => (v > 1 ? `${2 ** (v - 1)}× zoveel` : 'normaal'),
+    help: 'Hoeveel bloed er spat als iemand geraakt wordt (inwoners en agenten): 1, 2, 4, 8 of 16 keer zoveel.' });
+  const blood = () => 2 ** ((settings.get('blood') || 1) - 1);
 
   function renderPopup() {
     const list = popupEl.querySelector('.list');
@@ -524,7 +529,7 @@
   function projectOf(o) { for (let p = o; p; p = p.parent) if (p.userData && p.userData.projectId !== undefined) return p; return null; }
 
   window.scCore = {
-    version: '1.3',
+    version: '1.4',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
@@ -537,7 +542,7 @@
     onCity(fn) { if (typeof fn === 'function') { cityFns.push(fn); if (city) try { fn(city); } catch (e) { console.warn('[core] city', e); } } },
     traffic: () => trafficCars,
     out, audio, onFrame, puff, smoke, smokeStats, damage, onDamage, isFacade, projectOf,
-    settings, detail, openSettings,
+    settings, detail, blood, openSettings,
   };
   // scripts that loaded before the core and are waiting for it
   const waiting = Array.isArray(window.scCoreWaiting) ? window.scCoreWaiting : [];

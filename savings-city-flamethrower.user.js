@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – flamethrower (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Adds a flamethrower to walk mode (key 4, hold the mouse button): a roaring stream of fire that sets residents alight – they run screaming, fall and writhe, get up and run on, and set others on fire.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -20,7 +20,7 @@
  *   wall or ground it hits: whoever is in it catches fire (residents' ignite: run, writhe, get up,
  *   the fire goes out after a while; touching others sets them alight too). Cars in the stream heat
  *   up; after CAR_HEAT seconds of flame they catch fire (walk mode 1.31: igniteCar) and explode a few
- *   seconds later.
+ *   seconds later. Police officers (cops 1.6) in the stream catch fire too.
  * - Sound: a roar of filtered noise while the button is held, through the core's output (follows
  *   the app's sound button).
  */
@@ -163,8 +163,7 @@
   // ---------- setting people alight ----------
   function igniteCone(s, d, reach) {
     const res = window.scResidents;
-    if (!res || !res.ignite || !res.people) return;
-    const people = res.people;
+    const people = res && res.ignite && res.people ? res.people : [];
     for (let i = 0; i < people.length; i++) {
       const p = people[i];
       if (p.burn || p.state === 'inside' || p.state === 'gone') continue;
@@ -178,6 +177,15 @@
       if (Math.abs(py) > 0.09 + r) continue;                      // over their heads / below
       if (Math.random() < IGNITE_CHANCE) res.ignite(i, s.x, s.z);
     }
+    // police officers (cops script) in the stream
+    const cops = window.scCops;
+    if (cops && cops.ignite && cops.officers) cops.officers().forEach((o, i) => {
+      if (o.burning || o.state === 'gone') return;
+      const vx = o.x - s.x, vy = 0.1 - s.y, vz = o.z - s.z, t = vx * d.x + vy * d.y + vz * d.z;
+      if (t < 0 || t > reach + 0.05) return;
+      const r = CONE[0] + (CONE[1] - CONE[0]) * Math.min(1, t / RANGE), px = vx - d.x * t, pz = vz - d.z * t;
+      if (px * px + pz * pz <= r * r && Math.abs(vy - d.y * t) <= 0.09 + r && Math.random() < IGNITE_CHANCE) cops.ignite(i, s.x, s.z);
+    });
   }
 
   // Cars in the stream (traffic and parked ones) heat up; after CAR_HEAT seconds of flame they

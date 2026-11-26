@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.5
+// @version      1.6
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -50,11 +50,19 @@
   const RANGE = 5;                 // they fire from this distance when they can see you
   const KEEP_DISTANCE = 1.2;       // and don't come closer than this
   const SHOT_INTERVAL = [1.1, 2.0];// seconds between an officer's shots
-  const ACCURACY = 0.45;           // chance to hit at point-blank range…
-  const ACCURACY_FALLOFF = 0.08;   // …minus this per tile of distance…
-  const MIN_ACCURACY = 0.12;       // …but never below this
+  const ACCURACY = 0.32;           // chance to hit at point-blank range (was 0.45)…
+  const ACCURACY_FALLOFF = 0.07;   // …minus this per tile of distance…
+  const MIN_ACCURACY = 0.07;       // …but never below this…
+  const STEADINESS = [0.6, 1.15];  // …times how steady this officer's hand is (picked per officer)…
+  const NERVES = 0.6;              // …and their first shots are worse: × this, getting steady over 3 shots
+  const MISS_SPREAD = [0.05, 0.3]; // a miss goes this far past you (tiles), and anywhere from your knees to over your head
   const RUNNING_DODGE = 0.55;      // aim × this while you're running
   const FIRST_SHOT_DELAY = 1.2;    // seconds before a fresh officer fires the first time
+  // On fire (flamethrower, explosions, a burning person): like residents – run screaming, writhe,
+  // get up and run on until it goes out; they don't shoot while burning.
+  const BURN_RUN = [1, 5], BURN_WRITHE = 5, BURN_AFTER = 10, BURN_CORPSE = 8, BURN_TOUCH = 0.035;
+  const BLAST_FIRE_BAND = 0.25;    // tiles just outside where an explosion blows people apart…
+  const BLAST_FIRE_CHANCE = 0.5;   // …this chance to catch fire instead of being knocked down
   // No police car close by? Now and then one comes from out of sight, along the roads:
   const SPAWN_CHANCE = 0.15;       // chance per second of shooting…
   const SPAWN_MIN_GAP = 15;        // …but not within this many seconds of the last police
@@ -369,7 +377,8 @@
     for (let k = 0; k < COPS_PER_CAR; k++) {
       const side = k % 2 ? 1 : -1;
       const cop = { x: car.x - fz * 0.085 * side + fx * rnd(-0.03, 0.03), z: car.z + fx * 0.085 * side + fz * rnd(-0.03, 0.03), h: 0, state: 'exit', t: 0,
-        out: [-fz * side, fx * side], nextShot: performance.now() + (FIRST_SHOT_DELAY + rnd(0, 0.8)) * 1000, unit: c };
+        out: [-fz * side, fx * side], nextShot: performance.now() + (FIRST_SHOT_DELAY + rnd(0, 0.8)) * 1000, unit: c,
+        steady: rnd(...STEADINESS), shots: 0, voice: rnd(380, 620) };
       cop.mesh = new K.Mesh(geo, mat);
       cop.mesh.castShadow = true; cop.mesh.frustumCulled = false;
       cop.head = new K.Mesh(headGeo, mat);
@@ -404,10 +413,13 @@
     stepGore(dt);
     stepOwnCars(dt, now);
     stepBurning(dt, now);
+    burningPeopleNear(now);
     for (const c of cars) if (!c.cops.length && now >= c.exitAt && !c.car.scWrecked && !c.car.wreck) getOut(c);
     for (const cop of cops) {
+      if (cop.burn) burnStep(cop, dt);
       if (cop.state === 'down') { cop.fall = Math.min(1, cop.fall + dt / 0.45); pose(cop); continue; }
       if (cop.state === 'gone') continue;
+      if (cop.burn && cop.state === 'fight') { pose(cop); continue; }   // on fire: no fighting (burnStep moves them)
       const dx = pl.x - cop.x, dz = pl.z - cop.z, dist = Math.hypot(dx, dz) || 1e-6;
       cop.t += dt;
       if (cop.state === 'exit') {
@@ -429,6 +441,69 @@
       pose(cop);
     }
   }
+  // ---------- on fire ----------
+  function ignite(cop, fx, fz) {
+    if (!cop || cop.burn || cop.state === 'gone') return false;
+    if (cop.burnSafe && performance.now() < cop.burnSafe) return false;
+    cop.burn = { phase: 'run', t: 0, run: rnd(...BURN_RUN), from: [fx ?? cop.x + rnd(-1, 1), fz ?? cop.z + rnd(-1, 1)], fireAcc: 0, smokeAcc: 0 };
+    if (cop.state === 'exit') cop.state = 'fight';
+    if (cop.state !== 'down') yell(cop);
+    return true;
+  }
+  function yell(cop, short) { const r = window.scResidents; if (r && r.screamAt) r.screamAt(cop.x, cop.z, cop.voice, short); }
+  function burnStep(cop, dt) {
+    const b = cop.burn, w = W(); b.t += dt;
+    // flames on the body (along it when lying) and smoke
+    const lie = cop.state === 'down' ? cop.fall : cop.lie || 0, ang = (Math.PI / 2) * lie * lie;
+    const dx = cop.axis ? -cop.axis.z : 0, dz = cop.axis ? cop.axis.x : 0;
+    b.fireAcc += dt * 18;
+    while (b.fireAcc >= 1) {
+      b.fireAcc -= 1;
+      const h = rnd(0.02, 0.13);
+      w.spawn('fire', cop.x + dx * h * Math.sin(ang) + rnd(-0.01, 0.01), 0.045 + h * Math.cos(ang), cop.z + dz * h * Math.sin(ang) + rnd(-0.01, 0.01),
+        { vy: rnd(0.15, 0.35), size: rnd(0.012, 0.024), life: rnd(0.25, 0.45) });
+    }
+    w.startEffects();
+    const core = window.scCore;
+    if (core && core.smoke && (b.smokeAcc += dt * 3) >= 1) { b.smokeAcc -= 1; core.smoke('smoke', cop.x, lie > 0.5 ? 0.08 : 0.17, cop.z, { vy: rnd(0.15, 0.3), rise: 0.3, size: rnd(0.02, 0.035), grow: 3, life: rnd(1.5, 2.5) }); }
+    if (cop.state === 'down') { if ((b.dead = (b.dead || 0) + dt) > BURN_CORPSE) cop.burn = null; return; }
+    if (cop.state === 'gone') { cop.burn = null; return; }
+    // whoever they touch catches fire: other officers and residents
+    for (const o of cops) if (o !== cop && !o.burn && Math.hypot(o.x - cop.x, o.z - cop.z) < BURN_TOUCH) ignite(o, cop.x, cop.z);
+    const res = window.scResidents;
+    if (res && res.igniteAround) res.igniteAround(cop.x, cop.z, BURN_TOUCH);
+    const away = () => {                                         // running from where the fire came from
+      let ax = cop.x - b.from[0], az = cop.z - b.from[1]; const l = Math.hypot(ax, az) || 1; ax /= l; az /= l;
+      const wob = Math.sin(b.t * 3 + cop.voice) * 0.6;              // flailing, not a straight line
+      const mx = ax + -az * wob, mz = az + ax * wob;
+      move(cop, mx * COP_SPEED * 2 * dt, mz * COP_SPEED * 2 * dt);
+      cop.h = Math.atan2(mx, mz);
+    };
+    if (b.phase === 'run') {
+      away();
+      if (Math.random() < 1.3 * dt) yell(cop);
+      if (b.t >= b.run) { b.phase = 'writhe'; b.t = 0; const a = rnd(0, Math.PI * 2); cop.axis = new K.V3(Math.sin(a), 0, -Math.cos(a)); yell(cop); }
+    } else if (b.phase === 'writhe') {
+      cop.lie = Math.min(1, (cop.lie || 0) + dt / 0.45);
+      if (Math.random() < 0.8 * dt) yell(cop, true);
+      if (b.t >= BURN_WRITHE) { b.phase = 'up'; b.t = 0; }
+    } else {
+      cop.lie = Math.max(0, (cop.lie || 0) - dt / 0.6);
+      if (!cop.lie) away();
+      if (Math.random() < 0.5 * dt) yell(cop);
+      if (b.t >= BURN_AFTER) { cop.burn = null; cop.lie = 0; cop.burnSafe = performance.now() + 6000; cop.nextShot = performance.now() + 1500; }
+    }
+  }
+  // the residents on fire close to an officer set them alight (a few times a second)
+  let touchAt = 0;
+  function burningPeopleNear(now) {
+    if (now - touchAt < 200) return; touchAt = now;
+    const res = window.scResidents; if (!res || !res.people || !res.burning) return;
+    for (const p of res.people) {
+      if (!p.burn || p.state === 'inside' || p.state === 'gone') continue;
+      for (const cop of cops) if (!cop.burn && cop.state !== 'gone' && Math.abs(p.x - cop.x) < BURN_TOUCH && Math.abs(p.z - cop.z) < BURN_TOUCH) ignite(cop, p.x, p.z);
+    }
+  }
   function move(cop, mx, mz) {
     const w = W();
     if (!w.blocked(cop.x + mx, cop.z)) cop.x += mx;
@@ -437,9 +512,11 @@
   function pose(cop) {
     const m = cop.mesh;
     m.position.set(cop.x, 0.038, cop.z);
-    if (cop.state === 'down') {
-      const f = cop.fall * cop.fall;
-      m.quaternion.setFromAxisAngle(cop.axis, (Math.PI / 2) * f).multiply(new K.Q().setFromAxisAngle(new K.V3(0, 1, 0), cop.h));
+    const lie = cop.state === 'down' ? cop.fall : cop.lie || 0;
+    if (lie > 0) {
+      const f = lie * lie, t = performance.now(), shake = cop.state !== 'down' && cop.burn && cop.burn.phase === 'writhe';
+      m.quaternion.setFromAxisAngle(cop.axis, (Math.PI / 2) * f + (shake ? Math.sin(t * 0.031 + cop.voice) * 0.14 * f : 0))
+        .multiply(new K.Q().setFromAxisAngle(new K.V3(0, 1, 0), cop.h + (shake ? Math.sin(t * 0.019 + cop.voice) * 0.35 * f : 0)));
       m.position.y += 0.011 * f;
     } else m.quaternion.setFromAxisAngle(new K.V3(0, 1, 0), cop.h);
   }
@@ -452,14 +529,16 @@
     w.spawn('flash', start.x, start.y, start.z, { size: 0.02, life: 0.06, grow: 1.5 });
     w.startEffects();
     w.sound('shot');
-    let chance = Math.max(MIN_ACCURACY, ACCURACY - dist * ACCURACY_FALLOFF);
+    let chance = Math.max(MIN_ACCURACY, ACCURACY - dist * ACCURACY_FALLOFF) * (cop.steady || 1);
+    cop.shots = (cop.shots || 0) + 1;
+    if (cop.shots <= 3) chance *= NERVES + (1 - NERVES) * (cop.shots - 1) / 3;   // shaky at first
     if (plSpeed > 1.2) chance *= RUNNING_DODGE;
     const hit = Math.random() < chance;
     const aim = { x: pl.x, y: pl.y - 0.03, z: pl.z };
     if (hit) { w.tracer(start, aim, () => hurt()); return; }
     // a miss: just past you, on until it meets a wall or the ground
-    const rx = -d.z, rz = d.x, side = rnd(0.04, 0.12) * (Math.random() < 0.5 ? -1 : 1);
-    const tx = aim.x + rx * side - start.x, ty = aim.y + rnd(-0.05, 0.06) - start.y, tz = aim.z + rz * side - start.z;
+    const rx = -d.z, rz = d.x, side = rnd(...MISS_SPREAD) * (Math.random() < 0.5 ? -1 : 1);
+    const tx = aim.x + rx * side - start.x, ty = aim.y + rnd(-0.09, 0.12) - start.y, tz = aim.z + rz * side - start.z;
     const l = Math.hypot(tx, ty, tz) || 1, dir = { x: tx / l, y: ty / l, z: tz / l };
     let t = l + 4;
     if (dir.y < 0) t = Math.min(t, (start.y - 0.04) / -dir.y);
@@ -630,16 +709,20 @@
       const cols = ['#1f2a4a', '#3b5a9a', '#e0b48f', '#1f2a4a', '#3b5a9a'];
       for (let k = 0; k < 7; k++) w.spawn('debris', cop.x, rnd(0.03, 0.12), cop.z, { color: cols[k % cols.length], vx: d.x / l * rnd(0.4, 1.2) + rnd(-0.4, 0.4), vy: rnd(0.5, 1.3), vz: d.z / l * rnd(0.4, 1.2) + rnd(-0.4, 0.4), g: 3, size: rnd(0.012, 0.022), life: rnd(4, 6), land: true, spin: true });
     } else {
-      cop.state = 'down'; cop.fall = 0;
-      cop.axis = new K.V3(d.z / l, 0, -d.x / l);
+      if (cop.lie > 0.5 && cop.axis) { cop.fall = cop.lie; cop.lie = 0; }   // already on the ground (on fire)
+      else { cop.fall = 0; cop.lie = 0; cop.axis = new K.V3(d.z / l, 0, -d.x / l); }
+      cop.state = 'down';
       if (how === 'head') knockHeadOff(cop, d, l);
     }
-    for (let k = 0; k < (how === 'gib' ? 30 : 14); k++) w.spawn('debris', cop.x, rnd(0.05, 0.1), cop.z, { color: k % 3 ? '#8a0b0b' : '#5e0606', vx: d.x / l * rnd(0, 0.6) + rnd(-0.25, 0.25), vy: rnd(0.1, 0.6), vz: d.z / l * rnd(0, 0.6) + rnd(-0.25, 0.25), g: 3, size: rnd(0.003, 0.006), life: rnd(4, 8), land: true });
+    if (!bloodAt(cop.x, 0.08, cop.z, d.x, d.z, how === 'gib' ? 30 : 14, 0.6)) for (let k = 0, n = (how === 'gib' ? 30 : 14) * bloodF(); k < n; k++) w.spawn('debris', cop.x, rnd(0.05, 0.1), cop.z, { color: k % 3 ? '#8a0b0b' : '#5e0606', vx: d.x / l * rnd(0, 0.6) + rnd(-0.25, 0.25), vy: rnd(0.1, 0.6), vz: d.z / l * rnd(0, 0.6) + rnd(-0.25, 0.25), g: 3, size: rnd(0.003, 0.006), life: rnd(4, 8), land: true });
     w.startEffects();
     w.sound('hit');
     window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: cop.x, z: cop.z, cause: how === 'gib' ? 'blast' : how, who: 'cop' } }));
     return true;
   }
+  // blood: the residents' instanced drops and stains when they're there (n × the blood setting)
+  const bloodF = () => (window.scCore && window.scCore.blood ? window.scCore.blood() : 1);
+  function bloodAt(x, y, z, dx, dz, n, speed, up) { const r = window.scResidents; return !!(r && r.spatter && r.spatter(x, y, z, dx, dz, n, speed, up)); }
   // head shot: the head (with the cap) flies off on its own, blood pulses from the neck for a while
   const looseHeads = [];
   function knockHeadOff(cop, d, l) {
@@ -661,7 +744,7 @@
       h.v[1] -= 3 * dt;
       m.position.x += h.v[0] * dt; m.position.y += h.v[1] * dt; m.position.z += h.v[2] * dt;
       m.rotation.x += h.w[0] * dt; m.rotation.y += h.w[1] * dt; m.rotation.z += h.w[2] * dt;
-      if (Math.random() < 0.4) w.spawn('debris', m.position.x, m.position.y, m.position.z, { color: '#8a0b0b', vy: 0, g: 3, size: 0.003, life: 4, land: true });
+      if (Math.random() < 0.4 && !bloodAt(m.position.x, m.position.y, m.position.z, 0, 0, 1, 0.02, 0)) w.spawn('debris', m.position.x, m.position.y, m.position.z, { color: '#8a0b0b', vy: 0, g: 3, size: 0.003, life: 4, land: true });
       if (m.position.y < 0.05) {                                   // bounce, roll, then lie still
         m.position.y = 0.05;
         h.v[1] = Math.abs(h.v[1]) * 0.35; h.v[0] *= 0.55; h.v[2] *= 0.55; for (let k = 0; k < 3; k++) h.w[k] *= 0.5;
@@ -677,7 +760,7 @@
       cop.mesh.updateWorldMatrix(true, false);
       n.applyMatrix4(cop.mesh.matrixWorld); up.transformDirection(cop.mesh.matrixWorld);
       const f = Math.max(0.2, cop.squirt / 3.5);
-      for (let k = 0; k < 7; k++) w.spawn('debris', n.x, n.y, n.z, { color: k % 2 ? '#8a0b0b' : '#a31010', vx: up.x * rnd(0.3, 0.8) * f + rnd(-0.08, 0.08), vy: up.y * rnd(0.3, 0.8) * f + rnd(0, 0.15), vz: up.z * rnd(0.3, 0.8) * f + rnd(-0.08, 0.08), g: 3, size: rnd(0.003, 0.006), life: rnd(4, 8), land: true });
+      if (!bloodAt(n.x, n.y, n.z, up.x, up.z, 7, 0.6 * f, 0.6 * f)) for (let k = 0, nb = 7 * bloodF(); k < nb; k++) w.spawn('debris', n.x, n.y, n.z, { color: k % 2 ? '#8a0b0b' : '#a31010', vx: up.x * rnd(0.3, 0.8) * f + rnd(-0.08, 0.08), vy: up.y * rnd(0.3, 0.8) * f + rnd(0, 0.15), vz: up.z * rnd(0.3, 0.8) * f + rnd(-0.08, 0.08), g: 3, size: rnd(0.003, 0.006), life: rnd(4, 8), land: true });
     }
     w.startEffects();
   }
@@ -716,6 +799,7 @@
     for (const cop of cops) {
       const dx = cop.x - x, dz = cop.z - z, dist = Math.hypot(dx, dz);
       if (dist <= gib) kill(cop, { x: dx || 1e-3, y: 0, z: dz }, 'gib');
+      else if (gib > 0 && dist <= gib + BLAST_FIRE_BAND && Math.random() < BLAST_FIRE_CHANCE && ignite(cop, x, z)) continue;
       else if (dist <= knock) kill(cop, { x: dx || 1e-3, y: 0, z: dz }, 'blast');
     }
   });
@@ -752,9 +836,12 @@
     try { stepBurgers(dt); } catch (e) { console.warn('[cops] burgers', e); }
   }
   whenCore((c) => c.onFrame(frame));
-  window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head })),
+  window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head, burning: !!c.burn })),
     cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar(),
-    hurt: () => hurt(), burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };
+    hurt: () => hurt(),
+    // set officer i (as in officers()) on fire; the fire came from (fromX, fromZ)
+    ignite: (i, fromX, fromZ) => ignite(cops[i], fromX, fromZ),
+    burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };
 
   // ---------- sounds (synthesised) ----------
   let audio = null;
