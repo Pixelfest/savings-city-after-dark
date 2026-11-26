@@ -43,7 +43,8 @@ fs.mkdirSync(outDir, { recursive: true });
   await page.goto(`${base}?plugins=${plugins}`);
   await page.waitForFunction(() => window.scWalk && window.scWalk.weapon !== undefined, null, { timeout: 60000 });
   await page.waitForTimeout(9000);
-  await page.evaluate(() => document.querySelector('#sc-walk-toggle') && document.querySelector('#sc-walk-toggle').click());
+  await page.waitForSelector('#sc-walk-toggle', { timeout: 120000 });
+  await page.evaluate(() => document.querySelector('#sc-walk-toggle').click());
   await page.mouse.move(600, 375);
   await page.mouse.down(); await page.mouse.up();          // the first click takes the pointer lock
   await page.waitForTimeout(300);
@@ -95,7 +96,7 @@ fs.mkdirSync(outDir, { recursive: true });
     for (const t of times) {
       await page.waitForTimeout(t - last); last = t;
       const f = path.join(outDir, `${shot.name}-${t}ms.png`);
-      await page.screenshot({ path: f });
+      await page.screenshot({ path: f, timeout: 120000 });
       files.push(f);
     }
     const events = await page.evaluate(() => window.__events);

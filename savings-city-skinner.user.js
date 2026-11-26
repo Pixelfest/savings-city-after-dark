@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -294,10 +294,10 @@
     ['rod', 'bone', 1, 0, 0.07, -0.011, 0.038, 0.0035, 0.0035, 0, 0, 0.12],
     ['rod', 'bone', 2, 0, 0.082, -0.011, 0.038, 0.0035, 0.0035, 0, 0, -0.12],
     ['rod', 'bone', 0, 0, 0.094, -0.011, 0.038, 0.0035, 0.0035, 0, 0, 0.12],
-    ['rod', 'bone', 1, -0.032, 0.08, 0, 0.007, 0.034, 0.007],        // upper arm bones
-    ['rod', 'bone', 2, 0.032, 0.08, 0, 0.007, 0.034, 0.007],
-    ['rod', 'bone', 0, -0.036, 0.05, 0.01, 0.006, 0.03, 0.006],      // forearm bones
-    ['rod', 'bone', 1, 0.036, 0.05, 0.01, 0.006, 0.03, 0.006],
+    ['rod', 'bone', 1, -0.033, 0.08, 0, 0.006, 0.032, 0.006],        // upper arm bones
+    ['rod', 'bone', 2, 0.033, 0.08, 0, 0.006, 0.032, 0.006],
+    ['rod', 'bone', 0, -0.033, 0.075, 0, 0.005, 0.03, 0.005],        // forearm bones
+    ['rod', 'bone', 1, 0.033, 0.075, 0, 0.005, 0.03, 0.005],
     ['rod', 'bone', 2, -0.011, 0.024, 0, 0.008, 0.04, 0.008],        // thigh bones
     ['rod', 'bone', 0, 0.011, 0.024, 0, 0.008, 0.04, 0.008],
     ['rod', 'bone', 1, -0.011, 0.01, 0.004, 0.007, 0.03, 0.007],     // shin bones
@@ -321,6 +321,11 @@
   const ROLL = 0.35;   // seconds one piece of skin takes to roll back
 
   const bodies = [];
+  // local (x right, y up, z front) → world, for a body turned by b.th (its front faces the shooter)
+  function local(b, lx, ly, lz) {
+    const s = Math.sin(b.th), c = Math.cos(b.th);
+    return [b.x + lx * c + lz * s, b.y + ly, b.z - lx * s + lz * c];
+  }
   function release(b) {
     for (const p of b.parts) give(pools[p.pool], p.slot);
     for (const p of b.skin) give(pools.skin, p.slot);
@@ -343,7 +348,7 @@
     const moving = bodies.filter((b) => b.phase === 'peel' || b.phase === 'exposed' || b.phase === 'fall');
     if (moving.length >= MAX_ACTIVE) hurry(moving[0]);      // the oldest one drops straight to its fall
 
-    const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
+    const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, th: Math.atan2(-d.x, -d.z), dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
     b.ring = take(pools.ring, HEX.ring[0]);
     for (const [lx, ly, lz, sx, sy, sz, delay] of SKIN_SHELL) {
       b.skin.push({ slot: take(pools.skin, HEX.skin[0]), lx: lx * sc, ly: ly * sc, lz: lz * sc, sx: sx * sc, sy: sy * sc, sz: sz * sc, delay });
@@ -375,10 +380,11 @@
       const hex = HEX[col][ci % HEX[col].length];
       const slot = take(pools[pool], hex);
       if (slot < 0) continue;
-      const p = { pool, slot, lx: lx * b.sc, ly: ly * b.sc, lz: lz * b.sc, sx: sx * b.sc, sy: sy * b.sc, sz: sz * b.sc, rx, ry, rz,
+      const p = { pool, slot, lx: lx * b.sc, ly: ly * b.sc, lz: lz * b.sc, sx: sx * b.sc, sy: sy * b.sc, sz: sz * b.sc, rx, ry: ry + b.th, rz,
         vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0, x: 0, y: 0, z: 0, settled: false, heart: pool === 'blob' && col === 'organ' && ci === 0 && lz === 0.008 };
       b.parts.push(p);
-      put(pools[pool], slot, b.x + p.lx, b.y + p.ly, b.z + p.lz, rx, ry, rz, p.sx, p.sy, p.sz);
+      const [X, Y, Z] = local(b, p.lx, p.ly, p.lz);
+      put(pools[pool], slot, X, Y, Z, p.rx, p.ry, p.rz, p.sx, p.sy, p.sz);
     }
   }
 
@@ -386,7 +392,7 @@
   function fall(b) {
     b.phase = 'fall'; b.fallT = 0;
     for (const p of b.parts) {
-      p.x = b.x + p.lx; p.y = b.y + p.ly; p.z = b.z + p.lz;
+      [p.x, p.y, p.z] = local(b, p.lx, p.ly, p.lz);
       p.vx = b.dx * PUSH * rnd(0.3, 1.2) + rnd(-0.03, 0.03);
       p.vy = rnd(0, 0.06);
       p.vz = b.dz * PUSH * rnd(0.3, 1.2) + rnd(-0.03, 0.03);
@@ -437,8 +443,9 @@
     }
     for (const s of b.skin) {
       const q = Math.min(1, Math.max(0, (b.t - s.delay) / ROLL)), left = 1 - q;
-      const height = s.sy * left, bottom = b.y + s.ly - s.sy / 2;
-      put(pools.skin, s.slot, b.x + s.lx, bottom + height / 2, b.z + s.lz, 0, 0, 0, s.sx, Math.max(height, 1e-5), s.sz);
+      const height = s.sy * left;
+      const [X, Y, Z] = local(b, s.lx, s.ly - s.sy / 2 + height / 2, s.lz);
+      put(pools.skin, s.slot, X, Y, Z, 0, b.th, 0, s.sx, Math.max(height, 1e-5), s.sz);
     }
     for (const f of b.flaps) {
       const k = Math.max(0, 1 - p);
@@ -462,7 +469,8 @@
         if (b.t < PEEL_TIME + EXPOSED_TIME) {
           for (const p of b.parts) if (p.heart) {            // the heart keeps beating
             const k = 1 + 0.07 * Math.sin(b.t * 9) ** 2;
-            put(pools[p.pool], p.slot, b.x + p.lx, b.y + p.ly, b.z + p.lz, p.rx, p.ry, p.rz, p.sx * k, p.sy * k, p.sz * k);
+            const [X, Y, Z] = local(b, p.lx, p.ly, p.lz);
+            put(pools[p.pool], p.slot, X, Y, Z, p.rx, p.ry, p.rz, p.sx * k, p.sy * k, p.sz * k);
           }
           continue;
         }
