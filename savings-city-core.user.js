@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.5
+// @version      1.6
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -54,6 +54,10 @@
  *       source: 'rocket' | … }
  *   damage() returns the handlers' results ([] when nothing registered). Also sent as the window
  *   event 'sc:damage' (detail = the event).
+ * - lights out: lightsOut(ids) switches off a destroyed building's night glow, Christmas bulbs and
+ *   wall glows; lampsOut(x, z, r, { fell }) the street lamps within r (blasts do this by
+ *   themselves); darkFacade(material) is the facade without lit windows (for rubble); view() is
+ *   the app's city view (found through React). See "lights out" below.
  */
 (function () {
   'use strict';
@@ -590,8 +594,151 @@
   // the building (group with userData.projectId) an object belongs to, or null
   function projectOf(o) { for (let p = o; p; p = p.parent) if (p.userData && p.userData.projectId !== undefined) return p; return null; }
 
+  // ---------- lights out (destroyed buildings, broken street lamps) ----------
+  // Most of the app's night light is not in the scene graph: the light pools under the street
+  // lamps and the glow round every building are drawn into a "night map" (its own pass) from
+  // view.staticLights, which view.gatherStaticLights() rebuilds from view.placed and view.lamps
+  // whenever view.staticLightsDirty is set. Christmas bulbs and wall glows come from
+  // view.syncLights() (view.entries, per project, when view.lightsDirty is set). The view (the
+  // app's city class) is found through React: the canvas' container div belongs to a component
+  // that keeps the view in a ref. Its methods are wrapped on that one instance: while they run,
+  // the dark buildings and dead lamps are left out of the lists they read.
+  // Street lamps: view.lamps (road lamps first – one instance each in view.lampPosts' pole and
+  // head InstancedMeshes – then the highways' lamps, merged into the road mesh), their glow
+  // sprites in view.lampGlow (one point per lamp, additive, colour in `aColor`).
+  const darkIds = new Set();                                       // project ids whose lights are out
+  const deadLamps = new Map();                                     // lamp key → 'out' | 'fell'
+  const lampKey = (l) => Math.round(l.lightX * 100) + ',' + Math.round(l.lightZ * 100);
+  let view = null;
+  function findView() {
+    if (view) return view;
+    const el = renderer && renderer.domElement && renderer.domElement.parentElement;
+    if (!el) return null;
+    const key = Object.keys(el).find((k) => k.startsWith('__reactFiber$'));
+    if (!key) return null;
+    for (let f = el[key]; f; f = f.return) {
+      for (let h = f.memoizedState; h && typeof h === 'object' && 'next' in h; h = h.next) {
+        const v = h.memoizedState && h.memoizedState.current;
+        if (v && typeof v === 'object' && 'staticLights' in v && v.nightMap && typeof v.gatherStaticLights === 'function') return (view = hookView(v));
+      }
+    }
+    return null;
+  }
+  function hookView(v) {
+    const gather = v.gatherStaticLights;
+    v.gatherStaticLights = function () {
+      if (!this.staticLightsDirty || (!darkIds.size && !deadLamps.size)) return gather.apply(this, arguments);
+      const placed = this.placed, lamps = this.lamps;
+      if (Array.isArray(placed)) this.placed = placed.filter((p) => !darkIds.has(p.id));
+      if (Array.isArray(lamps)) this.lamps = lamps.filter((l) => !deadLamps.has(lampKey(l)));
+      try { return gather.apply(this, arguments); } finally { this.placed = placed; this.lamps = lamps; }
+    };
+    if (typeof v.syncLights === 'function') {
+      const sync = v.syncLights;
+      v.syncLights = function () {
+        if (!this.lightsDirty || !darkIds.size || !(this.entries instanceof Map)) return sync.apply(this, arguments);
+        const entries = this.entries;
+        this.entries = new Map([...entries].filter(([id]) => !darkIds.has(id)));
+        try { return sync.apply(this, arguments); } finally { this.entries = entries; }
+      };
+    }
+    // the app sets the lamps again when the roads change (posts first, then view.lamps, then the glow)
+    const glow = v.lampGlow;
+    if (glow && typeof glow.set === 'function') {
+      const set = glow.set;
+      glow.set = function () { const r = set.apply(this, arguments); try { darkenLamps(); } catch (e) { console.warn('[core] lamps', e); } return r; };
+    }
+    v.staticLightsDirty = true; v.lightsDirty = true;
+    return v;
+  }
+  // dead lamps: glow sprite black (it adds light), head swapped for an unlit copy, a fallen one's post gone
+  let M4 = null;
+  function darkenLamps() {
+    const v = view; if (!v || !deadLamps.size) return;
+    const lamps = Array.isArray(v.lamps) ? v.lamps : [];
+    const g = v.lampGlow && v.lampGlow.object && v.lampGlow.object.geometry, col = g && g.getAttribute('aColor');
+    if (col) {
+      let changed = false;
+      lamps.forEach((l, i) => { if (i < col.count && deadLamps.has(lampKey(l)) && (col.getX(i) || col.getY(i) || col.getZ(i))) { col.setXYZ(i, 0, 0, 0); changed = true; } });
+      if (changed) col.needsUpdate = true;
+    }
+    const posts = v.lampPosts && v.lampPosts.object; if (!posts) return;
+    const own = posts.children.filter((c) => c.isInstancedMesh && !c.userData.scDarkHeads), poles = own[0], heads = own[1];
+    if (!poles || !heads) return;
+    M4 = M4 || new heads.matrix.constructor();
+    let dark = posts.children.find((c) => c.userData.scDarkHeads);      // (view.lampPosts.set() clears the group: made again then)
+    if (!dark) {
+      const mat = heads.material.clone();                         // keeps the app's night-map shader patch (prototype)
+      mat.emissiveIntensity = 0;
+      dark = new heads.constructor(heads.geometry, mat, heads.count);
+      dark.count = 0; dark.frustumCulled = false; dark.castShadow = dark.receiveShadow = true;
+      dark.userData.scDarkHeads = true; dark.userData.slots = new Map();
+      posts.add(dark);
+    }
+    const isZero = (mesh, i) => { mesh.getMatrixAt(i, M4); const e = M4.elements; return !e[0] && !e[1] && !e[2] && !e[5] && !e[10]; };
+    const zero = (mesh, i) => { mesh.setMatrixAt(i, M4.makeScale(0, 0, 0)); mesh.instanceMatrix.needsUpdate = true; };
+    const n = Math.min(heads.count, poles.count, lamps.length);
+    for (let i = 0; i < n; i++) {
+      const k = lampKey(lamps[i]), state = deadLamps.get(k);
+      if (!state) continue;
+      if (!isZero(heads, i)) {
+        if (state === 'out' && dark.count < heads.count) { heads.getMatrixAt(i, M4); dark.setMatrixAt(dark.count, M4); dark.userData.slots.set(k, dark.count++); dark.instanceMatrix.needsUpdate = true; }
+        zero(heads, i);
+      }
+      if (state === 'fell') {
+        if (!isZero(poles, i)) zero(poles, i);
+        const s = dark.userData.slots.get(k);
+        if (s !== undefined) { zero(dark, s); dark.userData.slots.delete(k); }
+      }
+    }
+  }
+  // lightsOut(id | [ids]): those buildings' night glow, Christmas bulbs and wall glows go out
+  function lightsOut(ids) {
+    let n = 0;
+    for (const id of [].concat(ids)) if (id !== undefined && id !== null && !darkIds.has(id)) { darkIds.add(id); n++; }
+    const v = findView();
+    if (n && v) { v.staticLightsDirty = true; v.lightsDirty = true; }
+    return n;
+  }
+  // lampsOut(x, z, r, { fell }): street lamps within r tiles go out; fell (true, or fn(distance,
+  // lamp) → true) knocks the post down as well (it vanishes). Returns how many changed.
+  function lampsOut(x, z, r, opts = {}) {
+    const v = findView(); if (!v || !Array.isArray(v.lamps)) return 0;
+    let n = 0;
+    for (const l of v.lamps) {
+      const d = Math.hypot(l.lightX - x, l.lightZ - z);
+      if (!(d <= r)) continue;
+      const k = lampKey(l), was = deadLamps.get(k);
+      const fell = typeof opts.fell === 'function' ? !!opts.fell(d, l) : !!opts.fell;
+      if (was === 'fell' || (was && !fell)) continue;
+      deadLamps.set(k, fell ? 'fell' : 'out'); n++;
+    }
+    if (n) { v.staticLightsDirty = true; darkenLamps(); }
+    return n;
+  }
+  // darkFacade(material): a copy of the facade material without the lit windows (rubble, ruins)
+  const darkMats = new WeakMap();
+  function darkFacade(m) {
+    if (!isFacade(m) || (m.userData && m.userData.scDark)) return m;
+    let d = darkMats.get(m);
+    if (!d) {
+      d = m.clone();
+      d.userData = Object.assign({}, m.userData, { scDark: true });
+      const compile = m.onBeforeCompile;
+      d.onBeforeCompile = function (sh, r) { compile.call(this, sh, r); sh.uniforms.uNight = { value: 0 }; };   // windows light up only when uNight > 0
+      d.customProgramCacheKey = m.customProgramCacheKey;                 // same shader code; uniforms are per material
+      darkMats.set(m, d);
+    }
+    return d;
+  }
+  // explosions break the bulbs of street lamps within their radius (the nuke does its own)
+  onDamage((ev) => {
+    if (ev && ev.kind === 'blast' && ev.source !== 'nuke' && ev.x !== undefined && ev.radius > 0) lampsOut(ev.x, ev.z, ev.radius);
+    return null;
+  });
+
   window.scCore = {
-    version: '1.5',
+    version: '1.6',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
@@ -606,6 +753,7 @@
     onCity(fn) { if (typeof fn === 'function') { cityFns.push(fn); if (city) try { fn(city); } catch (e) { console.warn('[core] city', e); } } },
     traffic: () => trafficCars,
     out, audio, onFrame, puff, smoke, smokeStats, damage, onDamage, isFacade, projectOf,
+    view: findView, lightsOut, lampsOut, darkFacade, isDark: (id) => darkIds.has(id),
     settings, detail, blood, openSettings,
   };
   // scripts that loaded before the core and are waiting for it

@@ -57,6 +57,39 @@ placeholder `https://your-savings-city-host.example/`.
   camera's 1…400 range – then an AO pass and a blurred composite with tone mapping; classes
   borrowed from the sun's shadow map). `window.scGraphics.ao.U.show.value = 1` shows the AO buffer.
 
+## Night lights and lights out (core 1.6, buildings 1.5, nuke 3.5)
+
+Most night light is not in the scene graph, so breaking geometry doesn't switch it off (before
+these versions a nuke left halos of light where buildings had stood):
+
+- **Night map:** light pools drawn into a texture (`view.nightMap`, its own pass) that the
+  materials sample. Static entries (`view.staticLights`) come from `gatherStaticLights()`, which
+  runs when `view.staticLightsDirty` is set and reads `view.placed` (per finished building: a
+  `Rect` + a `Glow` per footprint rect) and `view.lamps` (per lamp: a `Lamp` pool + a `Glow`).
+  Car lights are added every frame.
+- **Christmas:** bulbs (`view.lights`, Points) and wall glows (`view.wallGlows`, an additive Mesh)
+  from `syncLights()` when `view.lightsDirty` is set, per project from `view.entries` (Map by id).
+- **Street lamps:** `view.lamps` = road lamps (also in `view.lampPosts.object`: pole and head
+  InstancedMeshes, instance i = lamp i; the heads' emissive follows the night) followed by the
+  highway lamps (merged into the road mesh). Glow sprites: `view.lampGlow` (Points, one per lamp
+  in the same order, colour in `aColor`, additive). All set again when the roads change.
+- **Lit windows:** the facade shader lights random panes when its `uNight` uniform is > 0.
+
+`view` is the app's city class, found through React (`scCore.view()`): the canvas' container div's
+`__reactFiber$…` → up the fibers → a hook whose ref holds an object with `staticLights`, `nightMap`
+and `gatherStaticLights`. The core wraps `gatherStaticLights` and `syncLights` on that instance and,
+while they run, swaps in `placed` / `lamps` / `entries` without the dark buildings and dead lamps;
+`lampGlow.set` is wrapped to darken again after the app resets the lamps.
+
+- `scCore.lightsOut(id | ids)` – a building's glow, bulbs and wall glows go out (buildings calls it
+  when a building comes down or is claimed by the nuke).
+- `scCore.lampsOut(x, z, r, { fell })` – lamps within r: glow sprite black, head swapped into an
+  unlit copy of the heads mesh (`userData.scDarkHeads`); `fell` (bool or `fn(d, lamp)`) also
+  removes the post. Every `blast` on the damage bus (except `source: 'nuke'`) does this for its radius;
+  the nuke does it as its front passes, `fell` where `keepHeight(d)` < 0.47.
+- `scCore.darkFacade(mat)` – a cached clone of the facade material whose `uNight` is its own 0
+  (same shader program). Chunks of a building that is down, and the nuke's chunk set, use it.
+
 ## Scale
 
 - 1 tile = 1 unit ≈ 20 m. Floor height `hf = 0.22`. Building base at y = 0.03.
