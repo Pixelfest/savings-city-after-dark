@@ -51,7 +51,7 @@
   const AVOID = 0.035;             // people keep this far (tiles) from a heap
   const ENERGY = '#5ff3ff';        // the cyan energy of the skinner and the ring
   const VOLUME = 0.35;
-  const CAP_BLOBS = 1200, CAP_RODS = 720, CAP_SKIN = 220, CAP_RINGS = 40;
+  const CAP_BLOBS = 4000, CAP_RODS = 720, CAP_SKIN = 220, CAP_RINGS = 40;
   // --------------------------------------------------------------
 
   const H_PERSON = 0.135;          // a standing person (residents' scale)
@@ -316,15 +316,15 @@
   const bodies = [];
   // Extra red blobs filling the torso and legs. Test hook: window.scSkinnerFill = how many (default 0).
   function fillers() {
-    const n = Math.max(0, Math.min(60, (window.scSkinnerFill | 0)));
+    const n = Math.max(0, Math.min(120, (window.scSkinnerFill | 0)));
     const out = [];
     for (let k = 0; k < n; k++) {
-      const g = (k * 0.618034 + 0.31) % 1, h = (k * 0.381966 + 0.7) % 1, z = (k * 0.7549) % 1;
-      const r = 0.008 + 0.004 * ((k * 0.41) % 1), ci = k % 5;   // radius: 8–12 thousandths of a tile
+      const g = (k * 0.618034 + 0.31) % 1, h = (k * 0.381966 + 0.7) % 1;
+      const r = 0.0035 + 0.002 * ((k * 0.41) % 1), ci = k % 5;   // small: 3.5–5.5 thousandths of a tile
       if (k % 3 === 0) {                                          // legs: x ±0.013, z ±0.008
-        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.013 - r), 0.004 + r + h * (0.044 - 2 * r), (z - 0.5) * 2 * (0.008 - r), 2 * r, 2 * r, 2 * r]);
+        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.013 - r), 0.004 + r + h * (0.044 - 2 * r), ((k * 0.7549) % 1 - 0.5) * 2 * (0.008 - r), 2 * r, 2 * r, 2 * r]);
       } else {                                                    // torso: x ±0.016, z ±0.01, y 0.052–0.1
-        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.016 - r), 0.052 + r + h * (0.048 - 2 * r), (z - 0.5) * 2 * (0.01 - r), 2 * r, 2 * r, 2 * r]);
+        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.016 - r), 0.052 + r + h * (0.048 - 2 * r), ((k * 0.7549) % 1 - 0.5) * 2 * (0.01 - r), 2 * r, 2 * r, 2 * r]);
       }
     }
     return out;
