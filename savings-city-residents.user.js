@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.21
+// @version      1.22
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -1252,6 +1252,16 @@
         }
       });
       return best;
+    },
+    // Skinned (the skinner script): the person is taken out of the city and their place is returned
+    // ({ x, z, y, h, k }) so the skinner can draw the body; null when there's nobody to skin.
+    skin(i) {
+      const p = people[i];
+      if (!p || p.state === 'inside' || p.state === 'gone') return null;
+      if (p.state !== 'down') died(p, 'skinned');
+      p.state = 'gone'; p.squirt = 0; p.burn = null;
+      const k = p.k || 1;
+      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE };
     },
     // An explosion at (x, z): everyone within knockRadius falls over (away from it), everyone
     // within panicRadius runs away for about panicSeconds. People indoors notice nothing.

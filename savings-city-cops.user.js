@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.6
+// @version      1.7
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -720,6 +720,14 @@
     window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: cop.x, z: cop.z, cause: how === 'gib' ? 'blast' : how, who: 'cop' } }));
     return true;
   }
+  // skinned (the skinner script): the officer is taken out of the city; returns their place or null
+  function skinOfficer(i) {
+    const cop = cops[i];
+    if (!cop || !alive(cop)) return null;
+    cop.state = 'gone'; cop.mesh.removeFromParent();
+    window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: cop.x, z: cop.z, cause: 'skinned', who: 'cop' } }));
+    return { x: cop.x, z: cop.z, y: 0.04, k: 1, h: 0.135 };
+  }
   // blood: the residents' instanced drops and stains when they're there (n × the blood setting)
   const bloodF = () => (window.scCore && window.scCore.blood ? window.scCore.blood() : 1);
   function bloodAt(x, y, z, dx, dz, n, speed, up) { const r = window.scResidents; return !!(r && r.spatter && r.spatter(x, y, z, dx, dz, n, speed, up)); }
@@ -838,7 +846,7 @@
   whenCore((c) => c.onFrame(frame));
   window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head, burning: !!c.burn })),
     cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar(),
-    hurt: () => hurt(),
+    hurt: () => hurt(), skin: (i) => skinOfficer(i),
     // set officer i (as in officers()) on fire; the fire came from (fromX, fromZ)
     ignite: (i, fromX, fromZ) => ignite(cops[i], fromX, fromZ),
     burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };

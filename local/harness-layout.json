@@ -1,0 +1,7 @@
+{
+  "note": "Fixed shots: stand at 'from', look exactly at 'at' (world tiles; 1 tile ≈ 20 m). Residents and officers are placed by the game, so shots at people need a 'freeze' placement first (not built yet).",
+  "shots": [
+    { "name": "skinner-ground", "weapon": "5", "from": { "x": 66.0, "z": -8.0 }, "at": { "x": 66.0, "y": 0.0, "z": -7.0 }, "wait": 1200 },
+    { "name": "skinner-air", "weapon": "5", "from": { "x": 66.0, "z": -8.0 }, "at": { "x": 66.0, "y": 0.12, "z": -6.0 }, "wait": 1200 }
+  ]
+}

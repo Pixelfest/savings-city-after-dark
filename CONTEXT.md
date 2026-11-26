@@ -406,3 +406,17 @@ Older approach, still useful for unit-level checks:
 - Triangle counts that aren't a multiple of 3 broke typed-array lengths – always `Math.floor`.
 - Several scripts hooking the same thing (prototype trap, `forEach`) must chain, not replace.
 - Don't search all city triangles per hit/frame – use bounding boxes and caches.
+
+## Skinner (savings-city-skinner 1.0, residents 1.22, cops 1.7)
+
+- A walk-mode weapon (key 5, `scWalkWeapons.push`). Its beam takes the nearest resident
+  (`scResidents.hit`) or officer (a cylinder test over `scCops.officers()`) before a wall or car.
+  On arrival it calls `scResidents.skin(i)` or `scCops.skin(i)`: the person or officer leaves the
+  city (state `gone`, `sc:kill` cause `skinned`) and their place `{ x, z, y, h, k }` is returned.
+- The script draws the body itself: one InstancedMesh per kind (blobs, rods, skin, rings), with
+  slot pools. Phases: peel (0.4 s, ring + swelling skin), exposed (1 s, interior), fall (gravity,
+  bounce, push, spin), pile (20 s, then fade). At most 6 bodies are moving and 30 in all.
+- The fall calls `scResidents.spatter` for blood and `scResidents.avoid` around the heap.
+- `local/harness.js` + `local/harness-layout.json`: fixed shots (stand at a point, aim at a point,
+  fire, report events, screenshot). Residents and officers still need a placement hook for fixed
+  targets.
