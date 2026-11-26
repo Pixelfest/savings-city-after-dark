@@ -1,0 +1,14 @@
+{
+  "name": "savings-city-after-dark",
+  "private": true,
+  "description": "Userscripts that add mayhem to the Savings City web app, with a local copy of the app for development and testing.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "sync": "node tools/sync-app.mjs",
+    "dev": "node tools/dev-server.mjs",
+    "build": "node tools/build-loader.mjs",
+    "check": "node tools/check-privacy.mjs"
+  }
+}

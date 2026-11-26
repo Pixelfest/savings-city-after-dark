@@ -1,0 +1,6 @@
+# Release output: built with the release address, so it is never committed
+dist/
+node_modules/
+# Local-only privacy terms (see tools/check-privacy.mjs); never committed
+.privacy-denylist
+.DS_Store

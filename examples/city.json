@@ -1,0 +1,15 @@
+{
+  "revision": 1,
+  "projects": [
+    { "id": "demo-1", "gx": 1, "gy": 1, "facing": 2, "fp": { "w": 2, "d": 2 }, "time_estimated_no_ai": 120, "time_spent_ai": 40 },
+    { "id": "demo-2", "gx": 4, "gy": 1, "facing": 2, "fp": { "w": 2, "d": 2 }, "time_estimated_no_ai": 60, "time_spent_ai": null },
+    { "id": "demo-3", "gx": 8, "gy": 1, "facing": 2, "fp": { "w": 2, "d": 3 }, "time_estimated_no_ai": 200, "time_spent_ai": 90 },
+    { "id": "demo-4", "gx": 1, "gy": 6, "facing": 0, "fp": { "w": 3, "d": 2 }, "time_estimated_no_ai": 30, "time_spent_ai": 10 },
+    { "id": "demo-5", "gx": 8, "gy": 6, "facing": 0, "fp": { "w": 2, "d": 2 }, "time_estimated_no_ai": 80, "time_spent_ai": 25 },
+    { "id": "demo-6", "gx": 4, "gy": 8, "facing": 0, "fp": { "w": 2, "d": 2 }, "time_estimated_no_ai": 45, "time_spent_ai": 45 }
+  ],
+  "roads": [
+    "0,4,h", "1,4,h", "2,4,h", "3,4,h", "4,4,h", "5,4,h", "6,4,h", "7,4,h", "8,4,h", "9,4,h", "10,4,h",
+    "6,0,v", "6,1,v", "6,2,v", "6,3,v", "6,4,v", "6,5,v", "6,6,v", "6,7,v", "6,8,v", "6,9,v", "6,10,v"
+  ]
+}

@@ -6,14 +6,53 @@ back, a nuke, a giant monster, cars you can steal and drive, a billboard to shoo
 bodycount. They hook into the app's three.js scene from the outside (no changes to the app itself);
 everything happens only in your own browser – reload the page and the city is back as it was.
 
+## Running the app locally (development and testing)
+
+The repo holds its own copy of the Savings City web app in `app/` and an anonymous example city in
+`examples/city.json`. Nothing in the repo points to the app's original address.
+
+Requirements: Node.js 18 or newer. No packages to install.
+
+1. **Get the newest app files.** Point the sync at a folder that holds the app's html, js and css:
+   ```bash
+   npm run sync -- /path/to/original/app
+   ```
+   This copies those files into `app/` (files that were removed from the original are removed here too)
+   and runs the privacy check. Source maps are not copied.
+2. **Start the dev server:**
+   ```bash
+   npm run dev
+   ```
+   It serves `app/` at <http://localhost:8080> and answers `/api/city` with `examples/city.json`.
+   Use `npm run dev -- --port 9000` for another port, or `npm run dev -- --city <file.json>` for other city data
+   (keep such files out of the repo unless they are anonymous).
+3. **Install the scripts** in Tampermonkey (see below) and set their address to `http://localhost:8080/*`
+   under the loader's *User matches*.
+
+Before committing, run `npm run check`. It fails if a file contains a web address, an email address,
+a local file path or a term from your local `.privacy-denylist` (never committed; one term per line).
+
+## Releasing
+
+Releases are built here and uploaded to a folder you host yourself. The address of that folder is given
+when building and is never stored in the repo:
+
+```bash
+npm run build -- --base https://<folder where the files will be hosted>
+```
+
+This writes `dist/`: the loader `savings-city-after-dark.user.js` (its update and `@require` addresses filled
+in) and every script. Upload the contents of `dist/` to that folder. `dist/` is not committed.
+Bump the loader's `@version` in `tools/loader-template.user.js` for every release, and each changed script's
+`@version` in its header.
+
 ## Installing
 
 ### All scripts at once (recommended)
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
-2. Install the loader: open
-   [`savings-city-after-dark.user.js`](https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-after-dark.user.js)
-   and Tampermonkey offers to install it.
+2. Install the loader: open the `savings-city-after-dark.user.js` from your release folder (built with
+   `npm run build`, see *Releasing*) and Tampermonkey offers to install it.
 3. **Set the app's address once:** in the loader, replace
    `// @match        https://your-savings-city-host.example/*` with the address of your Savings City
    app (keep the `/*` at the end), or add the address under the loader's *Settings →
@@ -21,7 +60,7 @@ everything happens only in your own browser – reload the page and the city is 
 4. **Updates:** every new release gets a new loader version, and the loader then fetches all
    scripts fresh. Tampermonkey checks for script updates on its own (Settings → *Script Update* →
    *Check Interval*); to get a release right away, use **Check for userscript updates** in the
-   Tampermonkey menu, or open the loader link above again and install it over the old one.
+   Tampermonkey menu, or install the loader from your release folder again over the old one.
    The browser console shows which loader version is running: `[Savings City After Dark] loader x.y`.
    Remove the scripts you installed one by one, or they run twice.
 
