@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.0
+// @version      1.1
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -16,10 +16,11 @@
  * - The shot: a beam from the skinner. It hits the nearest resident or officer on the line before
  *   a wall or car; the beam's arrival skins them (residents' and cops' skin(): they leave the city
  *   and get counted as "skinned" by the bodycount).
- * - Peel (0.4 s): an energy ring rises through the body, the pale skin swells, lifts off and fades
- *   away in pieces.
- * - Exposed (1 s): the insides: a red heart that pulses, lungs, liver, stomach, intestines, muscle,
- *   brain under a bone skull, ribs, spine, arm and leg bones.
+ * - Peel (0.9 s): an energy ring rises through the body; the pale skin rolls back piece by piece
+ *   (head first, then torso, arms and legs), so the insides show through.
+ * - Inside (from the start, under the skin): a red heart that pulses, lungs, liver, stomach,
+ *   intestines, muscle, a bone skull with eye sockets, jaw and teeth, ribs, spine, arm and leg bones.
+ *   Exposed (1 s): the insides, after the skin is gone.
  * - Fall: every part falls from where it sits (gravity, a bounce or two, a little push along the
  *   shot, spinning), lands and comes to rest in a heap. Blood spatters on the way down.
  * - Pile: the heap stays for PILE_TIME seconds, then fades. People keep away from it (avoid).
@@ -35,7 +36,7 @@
   const KEY = 'Digit5';            // select with 5 (or Q / the scroll wheel)
   const INTERVAL = 0.35;           // seconds between two shots
   const RANGE = 1.3;               // tiles (≈ 26 m)
-  const PEEL_TIME = 0.4;           // seconds the skin takes to lift off
+  const PEEL_TIME = 0.9;           // seconds the skin takes to peel back
   const EXPOSED_TIME = 1.0;        // seconds the insides are shown before everything falls
   const FALL_MAX = 2.0;            // seconds after which every part has landed, whatever happened
   const PILE_TIME = 20;            // seconds a heap stays on the floor…
@@ -65,6 +66,7 @@
     gut: ['#9c2a2a', '#b3383b', '#7e1d1d'],
     bone: ['#f1ead8', '#e2d8bf', '#fbf6e6'],
     skin: ['#eedbcc', '#e6cfbe'],
+    socket: ['#2a1a14', '#3a2620'],
     ring: [ENERGY],
   };
 
@@ -176,10 +178,10 @@
     for (const [a, b, c] of f) P.push(...v[a], ...v[b], ...v[c], ...v[a], ...v[c], ...v[b]);
     return P;
   }
-  function blobTris() {  // icosahedron of radius 1 (a lumpy organ once it's scaled)
+  function blobTris() {  // icosahedron of radius 0.5: the scale is the full size of an organ
     const t = (1 + Math.sqrt(5)) / 2;
     const V = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]]
-      .map((v) => { const l = Math.hypot(...v); return v.map((x) => x / l); });
+      .map((v) => { const l = Math.hypot(...v) * 2; return v.map((x) => x / l); });
     const F = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]];
     const P = [];
     for (const [a, b, c] of F) P.push(...V[a], ...V[b], ...V[c], ...V[a], ...V[c], ...V[b]);
@@ -254,7 +256,7 @@
     scene = c.scene;
     pools.blob = makePool('blob', blobTris(), CAP_BLOBS, new K.Basic({ color: '#ffffff' }));
     pools.rod = makePool('rod', boxTris(), CAP_RODS, new K.Basic({ color: '#ffffff' }));
-    pools.skin = makePool('skin', boxTris(), CAP_SKIN, new K.Basic({ color: '#ffffff', transparent: true, opacity: 0.85 }));
+    pools.skin = makePool('skin', boxTris(), CAP_SKIN, new K.Basic({ color: '#ffffff' }));
     pools.ring = makePool('ring', ringTris(), CAP_RINGS, new K.Basic({ color: '#ffffff', transparent: true, opacity: 0.9, depthWrite: false, blending: 2 }));
     ready = true;
     c.onFrame(step);
@@ -265,8 +267,16 @@
   // Interior, in person-local units (x, y up from the floor, z; a person is 0.135 tall). Each entry:
   // [pool, colour list, colour index or -1, x, y, z, sx, sy, sz, rx, ry, rz]. Sizes are full sizes.
   const INSIDE = [
-    ['blob', 'bone', 0, 0, 0.122, 0.001, 0.03, 0.024, 0.03],           // skull (a bone cap)
-    ['blob', 'organ', 2, 0, 0.12, 0, 0.017, 0.014, 0.018],           // brain
+    ['blob', 'bone', 1, 0, 0.124, 0, 0.026, 0.024, 0.026],           // cranium
+    ['blob', 'socket', 0, -0.0065, 0.118, 0.01, 0.0075, 0.0075, 0.005],   // eye sockets
+    ['blob', 'socket', 1, 0.0065, 0.118, 0.01, 0.0075, 0.0075, 0.005],
+    ['rod', 'socket', 0, 0, 0.112, 0.012, 0.004, 0.006, 0.004],           // nose hole
+    ['rod', 'bone', 0, 0, 0.106, 0.006, 0.018, 0.006, 0.012],             // jaw
+    ['rod', 'bone', 1, -0.006, 0.109, 0.0115, 0.0025, 0.004, 0.002],      // teeth
+    ['rod', 'bone', 2, -0.003, 0.109, 0.0115, 0.0025, 0.004, 0.002],
+    ['rod', 'bone', 0, 0, 0.109, 0.0115, 0.0025, 0.004, 0.002],
+    ['rod', 'bone', 1, 0.003, 0.109, 0.0115, 0.0025, 0.004, 0.002],
+    ['rod', 'bone', 2, 0.006, 0.109, 0.0115, 0.0025, 0.004, 0.002],
     ['blob', 'organ', 0, -0.004, 0.08, 0.008, 0.018, 0.02, 0.016],   // heart
     ['blob', 'lung', 0, -0.013, 0.082, -0.002, 0.018, 0.04, 0.02],   // lungs
     ['blob', 'lung', 1, 0.013, 0.082, -0.002, 0.018, 0.04, 0.02],
@@ -299,14 +309,16 @@
     ['rod', 'gut', 1, 0.006, 0.055, 0, 0.02, 0.006, 0.006, 0, 0, 0.4],
   ];
   // the skin: pale shells over the body, peeled off in the first 0.4 s
+  // [x, y, z, sx, sy, sz, delay]: the head peels first, then the torso, arms and legs
   const SKIN_SHELL = [
-    [-0.011, 0.024, 0, 0.017, 0.048, 0.018],     // legs
-    [0.011, 0.024, 0, 0.017, 0.048, 0.018],
-    [0, 0.076, 0, 0.044, 0.056, 0.03],           // torso
-    [-0.033, 0.08, 0, 0.016, 0.05, 0.016],       // arms
-    [0.033, 0.08, 0, 0.016, 0.05, 0.016],
-    [0, 0.12, 0, 0.032, 0.034, 0.032],           // head
+    [-0.011, 0.024, 0, 0.017, 0.048, 0.018, 0.4],     // legs
+    [0.011, 0.024, 0, 0.017, 0.048, 0.018, 0.4],
+    [0, 0.076, 0, 0.044, 0.056, 0.03, 0.2],           // torso
+    [-0.033, 0.08, 0, 0.016, 0.05, 0.016, 0.3],       // arms
+    [0.033, 0.08, 0, 0.016, 0.05, 0.016, 0.3],
+    [0, 0.12, 0, 0.032, 0.034, 0.032, 0],             // head
   ];
+  const ROLL = 0.35;   // seconds one piece of skin takes to roll back
 
   const bodies = [];
   function release(b) {
@@ -333,14 +345,15 @@
 
     const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
     b.ring = take(pools.ring, HEX.ring[0]);
-    for (const [lx, ly, lz, sx, sy, sz] of SKIN_SHELL) {
-      b.skin.push({ slot: take(pools.skin, HEX.skin[0]), lx: lx * sc, ly: ly * sc, lz: lz * sc, sx: sx * sc, sy: sy * sc, sz: sz * sc });
+    for (const [lx, ly, lz, sx, sy, sz, delay] of SKIN_SHELL) {
+      b.skin.push({ slot: take(pools.skin, HEX.skin[0]), lx: lx * sc, ly: ly * sc, lz: lz * sc, sx: sx * sc, sy: sy * sc, sz: sz * sc, delay });
     }
     for (let k = 0; k < 4; k++) {                           // flakes of skin that fly off
       b.flaps.push({ slot: take(pools.skin, HEX.skin[1]), lx: rnd(-0.02, 0.02) * sc, ly: rnd(0.03, 0.12) * sc, lz: rnd(-0.015, 0.015) * sc,
         vx: b.dx * 0.06 + rnd(-0.05, 0.05), vy: rnd(0.08, 0.2), vz: b.dz * 0.06 + rnd(-0.05, 0.05),
         rx: rnd(0, 6), ry: rnd(0, 6), rz: rnd(0, 6), sx: 0.02 * sc, sy: 0.03 * sc, sz: 0.002 * sc });
     }
+    showInside(b);                                          // the insides are there from the start, under the skin
     bodies.push(b);
     return true;
   }
@@ -414,21 +427,18 @@
     if (all || force) { b.phase = 'pile'; b.pileT = 0; }
   }
 
-  // the peel: the energy ring rises, the skin swells, lifts and goes
+  // the peel: the energy ring rises; each piece of skin shrinks towards its bottom edge (rolls back),
+  // the head first, so the insides show through from the top down
   function peel(b) {
-    const p = Math.min(1, b.t / PEEL_TIME), ease = p * p * (3 - 2 * p);
-    const sc = b.sc, h = H_PERSON * sc;
+    const p = Math.min(1, b.t / PEEL_TIME), sc = b.sc, h = H_PERSON * sc;
     if (b.ring >= 0) {
-      const r = (0.012 + 0.05 * ease) * sc;
-      put(pools.ring, b.ring, b.x, b.y + h * ease * 0.95 + 0.002, b.z, 0, 0, 0, r, 1, r);
+      const r = (0.012 + 0.05 * p) * sc;
+      put(pools.ring, b.ring, b.x, b.y + h * p * 0.95 + 0.002, b.z, 0, 0, 0, r, 1, r);
     }
-    const fade = 1 - Math.min(1, Math.max(0, (p - 0.4) / 0.6));
-    const swell = 1 + 0.25 * ease;
-    for (let i = 0; i < b.skin.length; i++) {
-      const s = b.skin[i], [, , , sx, sy, sz] = SKIN_SHELL[i];
-      const lift = 0.06 * sc * ease * ease;
-      put(pools.skin, s.slot, b.x + s.lx, b.y + s.ly + lift, b.z + s.lz, 0, 0, 0,
-        sx * sc * swell * fade, sy * sc * swell * fade, sz * sc * swell * fade);
+    for (const s of b.skin) {
+      const q = Math.min(1, Math.max(0, (b.t - s.delay) / ROLL)), left = 1 - q;
+      const height = s.sy * left, bottom = b.y + s.ly - s.sy / 2;
+      put(pools.skin, s.slot, b.x + s.lx, bottom + height / 2, b.z + s.lz, 0, 0, 0, s.sx, Math.max(height, 1e-5), s.sz);
     }
     for (const f of b.flaps) {
       const k = Math.max(0, 1 - p);
@@ -447,7 +457,6 @@
         if (b.t < PEEL_TIME) { peel(b); continue; }
         releaseSkin(b);                                      // the skin is gone
         b.phase = 'exposed';
-        showInside(b);
       }
       if (b.phase === 'exposed') {
         if (b.t < PEEL_TIME + EXPOSED_TIME) {

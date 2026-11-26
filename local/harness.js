@@ -51,9 +51,13 @@ fs.mkdirSync(outDir, { recursive: true });
   // place the test subjects first: { name, kind: "resident" | "officer", x, z }
   const placed = {};
   for (const sub of layout.place || []) {
-    const r = await page.evaluate(({ kind, x, z }) => (kind === 'officer'
-      ? window.scCops.placeAt(x, z, 0)
-      : window.scResidents.freeze(x, z, 0)), sub);
+    let r = -1;
+    for (let tries = 0; tries < 15 && r < 0; tries++) {        // the scene may still be building
+      r = await page.evaluate(({ kind, x, z }) => {
+        try { return kind === 'officer' ? window.scCops.placeAt(x, z, 0) : window.scResidents.freeze(x, z, 0); } catch (e) { return -1; }
+      }, sub);
+      if (r < 0) await page.waitForTimeout(1000);
+    }
     placed[sub.name] = { ...sub, index: r };
     console.log('placed', sub.name, sub.kind, 'index', r);
   }
@@ -61,10 +65,11 @@ fs.mkdirSync(outDir, { recursive: true });
 
   const report = [];
   for (const shot of layout.shots) {
-    // a shot may name a placed subject: stand 0.12 tiles west of it, look at its chest
+    // a shot may name a placed subject: stand `distance` (default 0.12) tiles west of it, look at its chest
     if (shot.target) {
       const t = placed[shot.target];
-      shot.from = { x: t.x - 0.12, z: t.z };
+      const dist = shot.distance || 0.12;                  // tiles from the subject
+      shot.from = { x: t.x - dist, z: t.z };
       shot.at = { x: t.x, y: 0.1, z: t.z };
     }
     await page.evaluate(({ from, eye, at, key }) => {

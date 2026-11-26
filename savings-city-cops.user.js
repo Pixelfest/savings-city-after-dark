@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.9
+// @version      1.10
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -723,7 +723,7 @@
   }
   // test hook: an officer that stands still at (x, z) and can be shot (returns its index, or -1)
   function placeOfficer(x, z, h = 0) {
-    if (!geo && !model()) return -1;
+    try { if (!geo && !model()) return -1; } catch (e) { return -1; }   // the scene isn't ready yet
     if (!geo || !K || !mat) return -1;
     const cop = { x, z, h, state: 'fight', t: 0, out: [1, 0], nextShot: Infinity, unit: null, steady: 0.5, shots: 0, voice: 500,
       still: true, fall: 0, lie: 0, axis: null };
