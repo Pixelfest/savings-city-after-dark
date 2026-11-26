@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -51,7 +51,7 @@
   const AVOID = 0.035;             // people keep this far (tiles) from a heap
   const ENERGY = '#5ff3ff';        // the cyan energy of the skinner and the ring
   const VOLUME = 0.35;
-  const CAP_BLOBS = 320, CAP_RODS = 720, CAP_SKIN = 220, CAP_RINGS = 40;
+  const CAP_BLOBS = 1200, CAP_RODS = 720, CAP_SKIN = 220, CAP_RINGS = 40;
   // --------------------------------------------------------------
 
   const H_PERSON = 0.135;          // a standing person (residents' scale)
@@ -314,6 +314,18 @@
   const ROLL = 0.35;   // seconds one piece of skin takes to roll back
 
   const bodies = [];
+  // Extra red blobs filling the torso and legs. Test hook: window.scSkinnerFill = how many (default 0).
+  function fillers() {
+    const n = Math.max(0, Math.min(60, (window.scSkinnerFill | 0)));
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const g = (k * 0.618034 + 0.31) % 1, h = (k * 0.381966 + 0.7) % 1, z = (k * 0.7549) % 1;
+      const r = 0.0045 + 0.0035 * ((k * 0.41) % 1), ci = k % 5;
+      if (k % 3 === 0) out.push(['blob', 'organ', ci, (g - 0.5) * 0.02, 0.006 + h * 0.036, (z - 0.5) * 0.008, 2 * r, 2 * r, 2 * r]);   // legs
+      else out.push(['blob', 'organ', ci, (g - 0.5) * 0.026, 0.054 + h * 0.042, (z - 0.5) * 0.014, 2 * r, 2 * r, 2 * r]);            // torso
+    }
+    return out;
+  }
   // local (x right, y up, z front) → world, for a body turned by b.th (its front faces the shooter)
   function local(b, lx, ly, lz) {
     const s = Math.sin(b.th), c = Math.cos(b.th);
@@ -370,12 +382,12 @@
   // the insides appear as the skin goes
   function showInside(b) {
     b.parts = [];
-    for (const [pool, col, ci, lx, ly, lz, sx, sy, sz, rx = 0, ry = 0, rz = 0] of INSIDE) {
+    for (const [pool, col, ci, lx, ly, lz, sx, sy, sz, rx = 0, ry = 0, rz = 0] of INSIDE.concat(fillers())) {
       const hex = HEX[col][ci % HEX[col].length];
       const slot = take(pools[pool], hex);
       if (slot < 0) continue;
       const p = { pool, slot, lx: lx * b.sc, ly: ly * b.sc, lz: lz * b.sc, sx: sx * b.sc, sy: sy * b.sc, sz: sz * b.sc, rx, ry: ry + b.th, rz,
-        vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0, x: 0, y: 0, z: 0, settled: false, heart: pool === 'blob' && col === 'organ' && ci === 0 && lz === 0.008 };
+        vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0, x: 0, y: 0, z: 0, settled: false, heart: pool === 'blob' && col === 'organ' && ci === 0 && lx === -0.003 && ly === 0.08 };
       b.parts.push(p);
       const [X, Y, Z] = local(b, p.lx, p.ly, p.lz);
       put(pools[pool], slot, X, Y, Z, p.rx, p.ry, p.rz, p.sx, p.sy, p.sz);
