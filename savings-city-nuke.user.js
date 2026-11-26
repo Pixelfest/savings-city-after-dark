@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.4
+// @version      3.5
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -344,6 +344,15 @@
     const f = flight(fr.pivot, fr.d || 1);
     B().launch(solid.set, fr, f.v, 0, f.spin, true);              // (slides on along the ground: blown away)
   }
+  // street lamps the front has passed go out; where the blast leaves less than a lamp post standing it's gone
+  const LAMP_TOP = 0.47;
+  function lampsOut(front) {
+    const c = window.scCore; if (!c || !c.lampsOut || front <= 0) return;
+    const r = Math.min(front, nuke.edge);
+    if (r <= (nuke.lampsAt || 0)) return;
+    nuke.lampsAt = r;
+    c.lampsOut(nuke.cx, nuke.cz, r, { fell: (d) => keepHeight(d) < LAMP_TOP });
+  }
   // buildings already in chunks before the blast (rockets, the monster): what's above the ruin's
   // height there flies like the rest
   function waveOverSolids(front) {
@@ -488,7 +497,8 @@
   function buildSolids() {
     if (!solid.pieces.length || !solid.mat) return;
     solid.pieces.sort((a, b) => a.d - b.d);
-    const set = B().chunkSet(solid.pieces, solid.mat, { parent: nukeRoot, hidden: true, release: true });
+    const c = window.scCore, mat = c && c.darkFacade ? c.darkFacade(solid.mat) : solid.mat;   // no power: no lit windows in the ruins
+    const set = B().chunkSet(solid.pieces, mat, { parent: nukeRoot, hidden: true, release: true });
     solid.pieces.forEach((pc, i) => { pc.fr = set.frs[i]; });
     solid.set = set; solid.mesh = set.mesh;
   }
@@ -1044,6 +1054,7 @@
     const safe = (name, fn) => { try { fn(); } catch (e) { if (!loop.warned) loop.warned = {}; if (!loop.warned[name]) { loop.warned[name] = 1; console.warn('[nuke] ' + name, e); } } };
     for (const j of jobs) safe('destroy', () => advance(j, f, true));
     safe('solids', () => advanceSolids(f));
+    safe('lamps', () => lampsOut(f));
     if (waving(t)) safe('chunks', () => waveOverSolids(f));      // (buildings broken after the blast are left alone)
     safe('debris', () => stepDebris(dt));
     safe('cloud', () => stepCloud(t));

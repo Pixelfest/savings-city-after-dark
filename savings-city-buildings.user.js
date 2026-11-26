@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -376,6 +376,7 @@
     const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, center: [st.bd.cx, st.bd.cz] });
     st.sets.push(set);
     set.down = st.down;
+    if (st.down) lightsOut(st);
     const collapse = (owner, fr) => {
       fr.state = 'gone';
       for (let k = fr.start; k < fr.start + fr.count; k++) owner.pos.setXYZ(k, fr.pivot[0], fr.pivot[1], fr.pivot[2]);
@@ -469,6 +470,7 @@
   function collapse(x, opts = {}) {
     const st = prepare(x); if (!st || st.claimed || st.down) return false;
     st.down = true;                                                // down from now on (also while the cutting finishes)
+    lightsOut(st);
     avoidRubble(st.bd);
     if (busy(st)) { hurry(st); st.pending.push(() => fall(st, opts)); return true; }
     fall(st, opts);
@@ -481,6 +483,7 @@
   }
   function fall(st, opts) {
     swapIn(st);
+    lightsOut(st);
     for (const set of st.sets) set.down = true;
     const bd = st.bd, cx = bd.cx, cz = bd.cz;
     const P = (v) => (Array.isArray(v) ? { x: v[0], y: v[1], z: v[2] } : v);
@@ -583,10 +586,18 @@
         if (r) launch(set, fr, r.v, 0, r.spin ?? rnd(1, 5), true);
       }
       if (!st.down) { st.down = true; goneAfter(st, 200, 3000); }
+      lightsOut(st);
     }
   }
   // a building another script takes care of (the nuke's own pieces): left alone from now on
-  function claim(id) { if (!solids.has(id)) solids.set(id, { claimed: true, down: true, bd: null }); }
+  function claim(id) { if (!solids.has(id)) solids.set(id, { claimed: true, down: true, bd: null }); if (C() && C().lightsOut) C().lightsOut(id); }
+  // a building that's down has no power: its night glow and Christmas lights go out (core) and
+  // its chunks get the facade without lit windows
+  function lightsOut(st) {
+    const c = C(); if (!c || !c.lightsOut) return;
+    c.lightsOut(st.bd.id);
+    for (const set of st.sets) set.mesh.material = c.darkFacade(set.mesh.material);
+  }
 
   // ---------- the frame loop and the damage bus (as soon as the core is there) ----------
   function step(dt) {
