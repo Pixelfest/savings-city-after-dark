@@ -136,6 +136,12 @@ placeholder `https://your-savings-city-host.example/`.
   brown trunk box `#8a5a3b` + two green icosahedron balls. Christmas trees (winter) are cones.
 - **Street lamps:** merged into the squares/junctions mesh: post `#4b5058` (0.024 × 0.32 from
   y 0.03) + head `#f3e3a6` (0.06 × 0.03 × 0.06).
+- **Road boxes:** asphalt is one instanced box per segment (normal roads 1 × 0.04 × 0.32 with
+  sidewalk blocks 0.5 wide beside them; **highway** segments 1 × 0.04 × 0.48 and no sidewalks;
+  junction squares 0.48 × 0.48). Highway segments are merged with their **highway lamps** (post 0.024 ×
+  0.42 from y 0, head 0.08 × 0.06 × 0.08 at y 0.42) into one **indexed** mesh (`Yp` keeps the index of
+  box geometry), unlike the other merged meshes. Walk mode 1.32 flattens such a mesh (only if it holds a
+  prop colour) before it cuts props out of it; residents find highways by the 0.48 boxes.
 - Colours in vertex attributes are **linear** (three.js colour management converts hex sRGB).
 
 ## Scripts and how they talk to each other
@@ -289,6 +295,14 @@ flames are walk mode's fire cubes – at most 4 officers), from the flamethrower
 band (`sc:blast` gib … gib + 0.25) and touching burning residents (checked 5×/s) or officers; a
 burning officer sets residents alight (`igniteAround`). Aim: `ACCURACY` 0.32 (was 0.45), min 0.07,
 × a per-officer `steady` (0.6–1.15), × 0.6…1 over the first 3 shots; misses 0.05–0.3 tiles wide.
+
+Walk mode 1.32: the scan of trees, lamps, benches and fountains skipped indexed meshes, so the
+highways' tall lamps never broke when shot. Indexed meshes that hold a prop colour are now flattened once.
+
+Residents 1.21: nobody walks on highways (their asphalt covers where the sidewalk line is), on a road
+that touches a highway junction, or through a door onto either. `buildNetwork()` builds the walking
+network from the roads that are not highway or next to one; the asphalt cells still include highways.
+`highwayKeys()` reads the drawn road boxes (0.48 wide = highway); `frame` rebuilds the network when that set changes (checked once a second).
 
 Car tyres 1.5: route 2 (repairing car models built without the fix, a walk through the scene)
 stops for good once route 1 has fixed a tyre, and otherwise runs every 10 s instead of 2 s.

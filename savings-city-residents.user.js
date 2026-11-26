@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.20
+// @version      1.21
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -22,6 +22,9 @@
  * - At every junction they pick a way on (only turning back at a dead end) and which side of that
  *   street to take: normally the one that needs the fewest crossings, now and then (CROSS_CHANCE)
  *   the other one: they cross. Decided once, in advance, so nobody turns back halfway.
+ * - Highways (the app draws them as wider asphalt, 0.48 across, and without sidewalks) are not
+ *   walked on at all: no path along them, no door onto them, and no road that runs into one (a
+ *   junction with one is a dead end for people). Found from the drawn road boxes, once a second.
  * - Someone in front of you on the sidewalk: oncoming people both step to their right, someone
  *   slower (or lying there) is passed on the free side.
  * - Places to stay away from (avoid(x, z, r, seconds): ground zero, a collapsed building's rubble):
@@ -125,33 +128,64 @@
   const tk = (x, y) => x + ',' + y;
   const NORMALS = [[0, -1], [1, 0], [0, 1], [-1, 0]];   // door facing 0=N 1=E 2=S 3=W → outward
   let net = null;   // { adj: Map(node → [node]), nodes: [[x,y]], edges: [[a,b,key]], doors: Map(edgeKey → n), doorList }
+  let hwSig = null, hwCheckedAt = -Infinity;   // which roads are highways (rechecked each second)
+
+  // Highways: the app draws each highway segment as one box 1 long and 0.48 wide (normal roads are
+  // 0.32 wide, with sidewalks beside them; highways have none). Their asphalt reaches into where a
+  // sidewalk would be, so nobody walks on a highway, nor onto a road that runs into one.
+  const HIGHWAY_WIDTH = 0.48;
+  function highwayKeys() {
+    const out = new Set();
+    if (!scene) return out;
+    const near = (v, t) => Math.abs(v - t) < 0.002;
+    scene.traverse((o) => {
+      if (!o.isInstancedMesh || !o.instanceMatrix) return;
+      const e = o.instanceMatrix.array;
+      for (let i = 0; i < o.count; i++) {
+        const b = i * 16;
+        const sx = Math.hypot(e[b], e[b + 1], e[b + 2]), sy = Math.hypot(e[b + 4], e[b + 5], e[b + 6]), sz = Math.hypot(e[b + 8], e[b + 9], e[b + 10]);
+        if (!near(sy, ASPHALT_HEIGHT)) continue;
+        const cx = e[b + 12], cz = e[b + 14];                       // the box's centre: the middle of its road segment
+        if (near(sx, 1) && near(sz, HIGHWAY_WIDTH)) out.add(`${Math.round(cx - 0.5)},${Math.round(cz)},h`);
+        else if (near(sz, 1) && near(sx, HIGHWAY_WIDTH)) out.add(`${Math.round(cx)},${Math.round(cz - 0.5)},v`);
+      }
+    });
+    return out;
+  }
 
   function buildNetwork() {
-    const adj = new Map(), edges = [], xy = new Map();
+    const adj = new Map(), edges = [], xy = new Map(), all = [];
     const add = (a, b) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push(b); };
+    const highways = highwayKeys(), hwNodes = new Set();
     for (const k of city.roads) {
       const [x, y, t] = String(k).split(','); const X = +x, Y = +y;
       if (!Number.isFinite(X) || !Number.isFinite(Y)) continue;
       const a = tk(X, Y), b = t === 'h' ? tk(X + 1, Y) : tk(X, Y + 1);
       xy.set(a, [X, Y]); xy.set(b, t === 'h' ? [X + 1, Y] : [X, Y + 1]);
-      add(a, b); add(b, a); edges.push([a, b, k]);
+      all.push([a, b, k]);
+      if (highways.has(String(k))) { hwNodes.add(a); hwNodes.add(b); }
     }
-    const roadSet = new Set(city.roads.map(String));
+    // people walk only on the roads that don't touch a highway
+    const walkKeys = new Set();
+    for (const [a, b, k] of all) {
+      if (highways.has(String(k)) || hwNodes.has(a) || hwNodes.has(b)) continue;
+      add(a, b); add(b, a); edges.push([a, b, k]); walkKeys.add(String(k));
+    }
     const doors = new Map(), doorList = [];
     if (appModule) {
       try {
         for (const b of appModule.v(city.projects)) {
           const n = NORMALS[b.facing]; if (!n) continue;
           for (const k of appModule.a(b.gx, b.gy, b.fp.base ?? b.fp, b.facing)) {
-            if (!roadSet.has(k)) continue;
+            if (!walkKeys.has(k)) continue;                          // no door onto a highway
             doors.set(k, n); doorList.push(k);
           }
         }
       } catch (e) { console.warn('[residents] no doors:', e); }
     }
-    // road segments per tile, to tell quickly whether a point is on the asphalt
+    // road segments per tile, to tell quickly whether a point is on the asphalt (highways too)
     const cells = new Map();
-    for (const [a, b] of edges) {
+    for (const [a, b] of all) {
       const [ax, ay] = xy.get(a), [bx, by] = xy.get(b);
       for (let x = Math.min(ax, bx) - 1; x <= Math.max(ax, bx); x++) for (let y = Math.min(ay, by) - 1; y <= Math.max(ay, by); y++) {
         const k = tk(x, y); (cells.get(k) || cells.set(k, []).get(k)).push([ax, ay, bx, by]);
@@ -990,6 +1024,12 @@
     if (!scene || !city) return;
     if (!built) { built = buildMeshes(); if (!built) return; }
     if (!group.parent) scene.add(group);                       // in case the app rebuilt its scene
+    // the app redraws its roads a moment after the city changes: check which roads are highways once a second
+    if (t - hwCheckedAt > 1000) {
+      hwCheckedAt = t;
+      const sig = [...highwayKeys()].sort().join(';');
+      if (sig !== hwSig) { hwSig = sig; seenVersion = -1; }
+    }
     if (seenVersion !== cityVersion || (appModule && net && !net.doorList.length && city.projects.length && !net.triedDoors)) {
       seenVersion = cityVersion;
       buildNetwork();
