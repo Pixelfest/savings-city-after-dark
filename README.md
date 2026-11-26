@@ -6,6 +6,10 @@ back, a nuke, a giant monster, cars you can steal and drive, a billboard to shoo
 bodycount. They hook into the app's three.js scene from the outside (no changes to the app itself);
 everything happens only in your own browser – reload the page and the city is back as it was.
 
+Want to try them without the real app, or work on them? The repository also holds a copy of the
+app and a local server: see [Running the app locally](#running-the-app-locally) and
+[Development](#development).
+
 ## Installing
 
 ### All scripts at once (recommended)
@@ -66,3 +70,91 @@ Every script needs the core except the bodycount and the billboard; the rocket
 launcher, the monster and the nuke also need buildings. Some work together (walk mode + residents + rocket launcher + flamethrower + cops + helicopter/cranes + billboard + drive;
 the rocket launcher, the monster and the nuke share damaged buildings; the bodycount counts what the others
 report). Each script's header comment explains how it works.
+
+## Running the app locally
+
+This repository contains a copy of the Savings City app (`app/`) and a small local server
+(`local/`), so you can run the city with all scripts on your own machine – no Tampermonkey and no
+access to the real app needed. The city comes from `local/city.json`, an anonymous example city.
+
+**Needs:** [Node.js](https://nodejs.org/) 18 or newer. Nothing to install for the server itself.
+
+```bash
+git clone https://github.com/Pixelfest/savings-city-after-dark.git
+cd savings-city-after-dark
+node local/server.js
+```
+
+(or `npm start`). Then open:
+
+- http://localhost:8080/ – the city with all scripts,
+- http://localhost:8080/plugins – tick the scripts you want and open the city,
+- or choose them in the address: `http://localhost:8080/?plugins=walk-mode,residents`
+  (`?plugins=` = no scripts at all, the plain app).
+
+Options:
+
+| Option | What it does |
+|---|---|
+| `--port 9000` | Another port (default 8080, or `$PORT`). |
+| `--city other.json` | Another city file (the `/api/city` format). |
+| `--plugins nuke,monster` | The scripts loaded when the address has no `?plugins=` (default: all). |
+| `?date=2026-07-01`, `?time=22:00`, `?timelapse=60` | In the address: date, time and clock speed, as in the real app (the graphics script sets these itself for winter and day/night). |
+
+Edits you make in the app (placing projects, roads, …) are kept in memory until the server stops;
+`city.json` is never written. The scripts are served straight from the repository, so after editing
+a script just reload the page. The loading-screen images aren't in the copy (shown blank), and the
+font comes from Google Fonts when you're online.
+
+### Screenshots without a browser
+
+`local/shot.js` opens the local city in headless Chromium and saves a PNG – handy for checking a
+change (and for agents). It needs Playwright: `npm install` and `npx playwright install chromium`
+once (or use a global Playwright install).
+
+```bash
+node local/server.js --port 8123 &
+node local/shot.js 'http://localhost:8123/?plugins=core,graphics' city.png --wait 15000
+```
+
+`--eval "js"` runs code in the page before the screenshot, e.g.
+`--eval "document.querySelector('[title*=Nuke]')?.click()"`.
+
+## Development
+
+- `CONTEXT.md` – how the app works internally and how the scripts hook into it. Read this first.
+- `AGENTS.md` (and `CLAUDE.md`) – instructions for coding agents: conventions, releases, and how to
+  bring in a newer version of the app.
+- `app/` – an anonymised copy of the app (`Savings City.html` and `Savings City_files/`: minified JS
+  bundles, including the lazily loaded 3D code `CityCanvas-*.js`, CSS, logo). It's all in the
+  repository; the local runner serves it. Reference only – don't edit the bundles.
+- `local/city.json` – the anonymous test city.
+
+When the real app changes, a developer can hand the newest app files to an agent; how to bring
+them in (anonymised) is described in `AGENTS.md` → "Updating the app files".
+
+### Privacy
+
+This repository is public. It must never contain the real app's address or anything that could
+identify a person or the organisation behind it (only public libraries and placeholder addresses
+such as `example.com`). A guard checks this on every push and pull request (GitHub Actions). Turn on
+the same check before every `git push` from your own clone (`npm install` does this too):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Or run it by hand:
+
+```bash
+node tools/check-privacy.js
+```
+
+To also check for the real address and names, list them in a file `.private-terms` (one per line)
+in your own copy; it's git-ignored and never leaves your machine.
+
+### Releases
+
+Bump the changed scripts' `@version`, then the loader's `@version` and every `?v=` on its
+`@require` lines to the new release number, update the table above, and commit as
+`Release X.Y: …`. Tampermonkey then picks up the new loader and fetches all scripts again.

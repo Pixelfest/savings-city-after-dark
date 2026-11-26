@@ -1,0 +1,4 @@
+#!/bin/sh
+# Guard: refuse to push when the privacy check fails (this repository is public).
+# Enable once per clone:  git config core.hooksPath .githooks
+exec node "$(git rev-parse --show-toplevel)/tools/check-privacy.js"
