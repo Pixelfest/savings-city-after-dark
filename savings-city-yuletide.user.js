@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – yuletide grenade (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.0
-// @description  Adds a yuletide grenade to walk mode (key 6, click to throw): a little Christmas tree that bounces, then goes off. A Christmas tree grows out of everyone within 10 m and tears them apart: their organs hang in it as baubles, their bowels are the garland, their head goes on top, and the blood splatters on the ground.
+// @version      1.1
+// @description  Adds a yuletide grenade to walk mode (key 6, click to throw): a little Christmas tree that goes off the moment it hits the ground, throwing out a ring of green sprinkles that shows how far it reaches. A Christmas tree grows out of everyone within 10 m and tears them apart: their organs hang in it as baubles, their bowels are the garland, their head goes on top, and the blood splatters on the ground.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -14,8 +14,11 @@
  * colours, spatter, avoid, alarm). Police officers get a tree too when cops (1.13 or newer) is loaded.
  *
  * - The throw: a little Christmas tree leaves your hand along the crosshair (a bit upwards),
- *   tumbles, bounces off the ground and walls, and goes off FUSE seconds after the throw.
+ *   tumbles, bounces off walls and goes off the moment it hits the ground (so nobody gets the
+ *   time to run); one that never lands (MAX_FLIGHT) goes off in the air.
  * - The blast: a flash, tinsel and pine needles, a puff of snow and a few bars of a Christmas tune.
+ *   A ring of bright green sprinkles shoots out over the ground and stops exactly at RADIUS, where
+ *   it lies for a moment: everyone inside that ring changes.
  *   Everyone outside within RADIUS (≈ 10 m) is taken (residents' and cops' skin(i, 'tree'): they
  *   leave the city and count as "tree" in the bodycount); people further away run.
  * - Each victim (nearest first, a little later the further out): the body swells and shakes as a
@@ -38,10 +41,15 @@
   const INTERVAL = 1.0;            // seconds between two throws
   const THROW_SPEED = 2.6;         // tiles/s along the crosshair…
   const THROW_UP = 0.6;            // …plus this much upwards
-  const FUSE = 2.0;                // seconds from the throw to the blast
+  const MAX_FLIGHT = 4;            // seconds: a grenade that hasn't landed by then goes off anyway
   const RADIUS = 0.5;              // tiles: everyone this close gets a tree (≈ 10 m)
   const PANIC_RADIUS = 2.5;        // people within this distance run away
   const RIPPLE = 0.35;             // seconds: the furthest victim starts this much after the nearest
+  const SPRINKLES = 160;           // green sprinkles in the ring that marks the blast radius
+  const SPRINKLE_OUT = 0.35;       // seconds they take to fly out to the edge…
+  const SPRINKLE_STAY = 1.6;       // …how long they lie there…
+  const SPRINKLE_FADE = 0.5;       // …and how fast they shrink away
+  const SPRINKLE_GREENS = ['#3ddc5a', '#7cf07a', '#1fae3c', '#b6ff8a'];
   const SWELL = 0.4;               // seconds the body swells before it tears
   const GROW = 0.65;               // seconds the tree takes to shoot up after that
   const TREE_SIZE = 1;             // × the tree's size (≈ 0.27 tiles tall, twice a person)
@@ -55,7 +63,7 @@
   const GRAVITY = 3;               // tiles/s² for the thrown tree
   const BOUNCE = 0.35;             // how much of its speed the grenade keeps on a bounce
   const VOLUME = 0.3;
-  const CAP_CONES = 320, CAP_BLOBS = 6000, CAP_BOXES = 1600;
+  const CAP_CONES = 320, CAP_BLOBS = 6000, CAP_BOXES = 2400;
   // --------------------------------------------------------------
 
   const H_PERSON = 0.135;
@@ -288,7 +296,7 @@
     m.position.set(start.x, start.y, start.z);
     scene.add(m);
     grenades.push({ m, p: { ...start }, v: { x: d.x * THROW_SPEED, y: d.y * THROW_SPEED + THROW_UP, z: d.z * THROW_SPEED },
-      t: 0, spin: { x: rnd(-9, 9), y: rnd(-6, 6), z: rnd(-9, 9) }, rest: false });
+      t: 0, spin: { x: rnd(-9, 9), y: rnd(-6, 6), z: rnd(-9, 9) } });
     whoosh();
     if (w && w.note) void 0;
   }
@@ -298,8 +306,7 @@
     for (let k = grenades.length - 1; k >= 0; k--) {
       const g = grenades[k];
       g.t += dt;
-      if (g.t >= FUSE) { g.m.removeFromParent(); grenades.splice(k, 1); detonate(g.p); continue; }
-      if (g.rest) continue;
+      if (g.t >= MAX_FLIGHT) { g.m.removeFromParent(); grenades.splice(k, 1); detonate(g.p, false); continue; }
       g.v.y -= GRAVITY * dt;
       const len = Math.hypot(g.v.x, g.v.y, g.v.z) * dt;
       if (len > 1e-6 && w && w.rayBuildings) {                       // a wall in the way: bounce off it
@@ -317,16 +324,10 @@
         }
       }
       g.p.x += g.v.x * dt; g.p.y += g.v.y * dt; g.p.z += g.v.z * dt;
-      if (g.p.y <= FLOOR) {                                           // the ground: bounce, then roll to a stop upright
+      if (g.p.y <= FLOOR) {                                           // the ground: it goes off right there
         g.p.y = FLOOR;
-        if (g.v.y < -0.25) { g.v.y = -g.v.y * BOUNCE; g.v.x *= 0.6; g.v.z *= 0.6; g.spin.x *= 0.5; g.spin.z *= 0.5; thud(); }
-        else {
-          g.v.y = 0;
-          const f = Math.exp(-6 * dt); g.v.x *= f; g.v.z *= f;
-          g.m.rotation.x *= Math.exp(-10 * dt); g.m.rotation.z *= Math.exp(-10 * dt);
-          g.spin.x = g.spin.z = 0; g.spin.y *= f;
-          if (Math.hypot(g.v.x, g.v.z) < 0.01) g.rest = true;
-        }
+        g.m.removeFromParent(); grenades.splice(k, 1); detonate(g.p, true);
+        continue;
       }
       g.m.rotation.x += g.spin.x * dt; g.m.rotation.y += g.spin.y * dt; g.m.rotation.z += g.spin.z * dt;
       g.m.position.set(g.p.x, g.p.y, g.p.z);
@@ -334,7 +335,7 @@
   }
 
   // ---------- the blast ----------
-  function detonate(p) {
+  function detonate(p, landed = true) {
     const w = W(), res = RES(), cx = p.x, cz = p.z, y = Math.max(p.y, FLOOR) + 0.02;
     if (w && w.spawn) {
       w.spawn('flash', cx, y, cz, { size: 0.18, life: 0.2, grow: 2 });
@@ -349,6 +350,7 @@
       w.startEffects();
     }
     pop(); jingle();
+    sprinkle(cx, cz);
     // everyone outside within RADIUS: nearest first
     const found = [];
     if (res && res.people) {
@@ -373,7 +375,40 @@
       if (info) plant(info, f.dist / RADIUS * RIPPLE, cx, cz);
     }
     if (res && typeof res.alarm === 'function') res.alarm(cx, cz, PANIC_RADIUS, 15);
-    window.dispatchEvent(new CustomEvent('sc:blast', { detail: { x: cx, z: cz, source: 'yuletide' } }));
+    window.dispatchEvent(new CustomEvent('sc:blast', { detail: { x: cx, z: cz, source: 'yuletide', landed } }));
+  }
+
+  // ---------- the ring of green sprinkles: shows how far the blast reaches ----------
+  // Little green rods that shoot out over the ground from the blast (fast, then slowing down),
+  // hop a little, and stop exactly on the RADIUS circle; a few land inside it. They lie there for
+  // SPRINKLE_STAY seconds, then shrink away.
+  const rings = [];
+  function sprinkle(cx, cz) {
+    if (!ensure()) return;
+    const bits = [];
+    for (let k = 0; k < SPRINKLES; k++) {
+      const edge = k % 5 !== 0;                               // most on the edge, every fifth inside
+      const slot = take(pools.box, SPRINKLE_GREENS[k % SPRINKLE_GREENS.length]);
+      if (slot < 0) break;
+      bits.push({ slot, a: (k / SPRINKLES) * Math.PI * 2 + rnd(-0.02, 0.02), r: edge ? RADIUS * rnd(0.985, 1.01) : RADIUS * rnd(0.15, 0.95),
+        hop: rnd(0.015, 0.05), rx: rnd(0, 6), ry: rnd(0, 6), rz: rnd(0, 6), w: rnd(-14, 14), len: rnd(0.012, 0.018) });
+    }
+    rings.push({ x: cx, z: cz, t: 0, bits });
+  }
+  function stepRings(dt) {
+    for (let k = rings.length - 1; k >= 0; k--) {
+      const R = rings[k];
+      R.t += dt;
+      const u = Math.min(1, R.t / SPRINKLE_OUT), out = 1 - Math.pow(1 - u, 3);        // fast, then slowing down
+      const fade = Math.max(0, 1 - Math.max(0, R.t - SPRINKLE_OUT - SPRINKLE_STAY) / SPRINKLE_FADE);
+      for (const b of R.bits) {
+        const r = b.r * out, y = FLOOR + 0.003 + b.hop * Math.sin(Math.PI * u);
+        const spin = (1 - u) * b.w * R.t;
+        put(pools.box, b.slot, R.x + Math.cos(b.a) * r, y, R.z + Math.sin(b.a) * r, u < 1 ? b.rx + spin : Math.PI / 2, b.ry, u < 1 ? b.rz + spin : 0,
+          b.len * fade, 0.005 * fade, 0.005 * fade);
+      }
+      if (fade <= 0) { for (const b of R.bits) give(pools.box, b.slot); rings.splice(k, 1); }
+    }
   }
 
   // ---------- the trees ----------
@@ -560,6 +595,7 @@
     dt = Math.min(dt || 0, 0.05);
     if (grenades.length) stepGrenades(dt);
     if (!ready) return;
+    if (rings.length) stepRings(dt);
     for (const T of trees.slice()) {
       if (T.gone) continue;
       T.t += dt;
@@ -656,6 +692,8 @@
     const s = a.createBufferSource(); s.buffer = noiseBuf; s.loop = len > 1; return s;
   }
 
-  // test hook: a grenade straight at (x, z), going off at once (local/harness, by hand in the console)
-  window.scYuletide = { detonate: (x, z) => { if (ensure()) detonate({ x, y: FLOOR, z }); }, get trees() { return trees.length; } };
+  // test hooks (local/harness, by hand in the console): detonate(x, z) sets one off there at once;
+  // throw(start, dir) throws one as the weapon does ({ x, y, z }, a unit direction)
+  window.scYuletide = { detonate: (x, z) => { if (ensure()) detonate({ x, y: FLOOR, z }); }, throw: (start, d) => throwTree(start, d),
+    get trees() { return trees.length; }, get flying() { return grenades.length; } };
 })();

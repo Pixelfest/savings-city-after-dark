@@ -431,12 +431,15 @@ Older approach, still useful for unit-level checks:
 - Headless Chromium runs the simulation slowly: the frame time step is clamped to 0.05 s, so
   "1.8 s" on screen is less game time. Give the skinner's fall about 4 s before judging it.
 
-## Yuletide grenade (savings-city-yuletide 1.0, residents 1.25, cops 1.13)
+## Yuletide grenade (savings-city-yuletide 1.1, residents 1.25, cops 1.13)
 
 - A walk-mode weapon (key 6, `scWalkWeapons.push`); the model in your hand pushes its cones
   straight into the builder's `P`/`C` arrays (the builder only has boxes and prisms along z).
 - The throw is a plain `K.Mesh` (vertex colours, Lambert) with gravity, bouncing off the ground
-  (y 0.038) and walls (`rayBuildings` normal); it goes off `FUSE` s after the throw.
+  bouncing off walls (`rayBuildings` normal); it goes off the moment it reaches the ground (y 0.038),
+  or after `MAX_FLIGHT` s in the air. `sc:blast` carries `source: 'yuletide'` and `landed`.
+- The blast radius is shown by a ring of green sprinkles (box-pool slots): they fly out with an
+  ease-out to exactly `RADIUS` (a fifth land inside), lie there 1.6 s, then shrink away.
 - The blast takes everyone outside within `RADIUS` (0.5 tiles ≈ 10 m): residents from
   `scResidents.people`, officers from `scCops.officers()`, both through `skin(i, 'tree')` (the
   `cause` argument is new in residents 1.25 / cops 1.13; residents' `skin()` now also returns
@@ -453,5 +456,6 @@ Older approach, still useful for unit-level checks:
   materials of our own that must keep their colour set `defines.SNOW_COVER = '-0.50'` (the
   yuletide pools and grenade; residents' blood drops since 1.25 – before that, stains on snow
   came out white).
-- Test hook: `scYuletide.detonate(x, z)` sets one off at once (with `scResidents.freeze` to put
-  people there first).
+- Test hooks: `scYuletide.detonate(x, z)` sets one off at once (with `scResidents.freeze` to put
+  people there first); `scYuletide.throw(start, dir)` throws one as the weapon does (synthetic
+  clicks in headless runs don't fire reliably).
