@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -17,9 +17,9 @@
  *   a wall or car; the beam's arrival skins them (residents' and cops' skin(): they leave the city
  *   and get counted as "skinned" by the bodycount).
  * - Peel (0.9 s): an energy ring rises through the body; the pale skin rolls back piece by piece
- *   (head first, then torso, arms and legs), so the insides show through.
+ *   (head first, then torso and legs), so the insides show through.
  * - Inside (from the start, under the skin): a red heart that pulses, lungs, liver, stomach,
- *   intestines, muscle, a bone skull with eye sockets, jaw and teeth, ribs, spine, arm and leg bones.
+ *   intestines, muscle, a bone skull with eye sockets, jaw and teeth, ribs, spine and leg bones.
  *   Exposed (1 s): the insides, after the skin is gone.
  * - Fall: every part falls from where it sits (gravity, a bounce or two, a little push along the
  *   shot, spinning), lands and comes to rest in a heap. Blood spatters on the way down.
@@ -267,56 +267,49 @@
   // Interior, in person-local units (x, y up from the floor, z; a person is 0.135 tall). Each entry:
   // [pool, colour list, colour index or -1, x, y, z, sx, sy, sz, rx, ry, rz]. Sizes are full sizes.
   const INSIDE = [
-    ['blob', 'bone', 1, 0, 0.124, 0, 0.026, 0.024, 0.026],           // cranium
-    ['blob', 'socket', 0, -0.0065, 0.118, 0.01, 0.0075, 0.0075, 0.005],   // eye sockets
-    ['blob', 'socket', 1, 0.0065, 0.118, 0.01, 0.0075, 0.0075, 0.005],
-    ['rod', 'socket', 0, 0, 0.112, 0.012, 0.004, 0.006, 0.004],           // nose hole
-    ['rod', 'bone', 0, 0, 0.106, 0.006, 0.018, 0.006, 0.012],             // jaw
-    ['rod', 'bone', 1, -0.006, 0.109, 0.0115, 0.0025, 0.004, 0.002],      // teeth
-    ['rod', 'bone', 2, -0.003, 0.109, 0.0115, 0.0025, 0.004, 0.002],
-    ['rod', 'bone', 0, 0, 0.109, 0.0115, 0.0025, 0.004, 0.002],
-    ['rod', 'bone', 1, 0.003, 0.109, 0.0115, 0.0025, 0.004, 0.002],
-    ['rod', 'bone', 2, 0.006, 0.109, 0.0115, 0.0025, 0.004, 0.002],
-    ['blob', 'organ', 0, -0.004, 0.08, 0.008, 0.018, 0.02, 0.016],   // heart
-    ['blob', 'lung', 0, -0.013, 0.082, -0.002, 0.018, 0.04, 0.02],   // lungs
-    ['blob', 'lung', 1, 0.013, 0.082, -0.002, 0.018, 0.04, 0.02],
-    ['blob', 'organ', 1, 0.01, 0.068, 0.006, 0.024, 0.012, 0.016],   // liver
-    ['blob', 'gut', 0, -0.01, 0.064, 0.009, 0.014, 0.014, 0.014],    // stomach
-    ['blob', 'organ', 3, -0.012, 0.03, 0.01, 0.014, 0.03, 0.014],    // muscle on the legs
-    ['blob', 'organ', 4, 0.012, 0.03, 0.01, 0.014, 0.03, 0.014],
-    ['rod', 'bone', 0, 0, 0.075, -0.012, 0.005, 0.05, 0.005],        // spine
-    ['rod', 'bone', 1, 0, 0.108, 0.006, 0.02, 0.005, 0.012],         // jaw
-    ['rod', 'bone', 2, 0, 0.058, 0.011, 0.038, 0.0035, 0.0035, 0, 0, 0.12],   // ribs, front and back
-    ['rod', 'bone', 0, 0, 0.07, 0.011, 0.038, 0.0035, 0.0035, 0, 0, -0.12],
-    ['rod', 'bone', 1, 0, 0.082, 0.011, 0.038, 0.0035, 0.0035, 0, 0, 0.12],
-    ['rod', 'bone', 2, 0, 0.094, 0.011, 0.038, 0.0035, 0.0035, 0, 0, -0.12],
-    ['rod', 'bone', 0, 0, 0.058, -0.011, 0.038, 0.0035, 0.0035, 0, 0, -0.12],
-    ['rod', 'bone', 1, 0, 0.07, -0.011, 0.038, 0.0035, 0.0035, 0, 0, 0.12],
-    ['rod', 'bone', 2, 0, 0.082, -0.011, 0.038, 0.0035, 0.0035, 0, 0, -0.12],
-    ['rod', 'bone', 0, 0, 0.094, -0.011, 0.038, 0.0035, 0.0035, 0, 0, 0.12],
-    ['rod', 'bone', 1, -0.033, 0.08, 0, 0.006, 0.032, 0.006],        // upper arm bones
-    ['rod', 'bone', 2, 0.033, 0.08, 0, 0.006, 0.032, 0.006],
-    ['rod', 'bone', 0, -0.033, 0.075, 0, 0.005, 0.03, 0.005],        // forearm bones
-    ['rod', 'bone', 1, 0.033, 0.075, 0, 0.005, 0.03, 0.005],
-    ['rod', 'bone', 2, -0.011, 0.024, 0, 0.008, 0.04, 0.008],        // thigh bones
-    ['rod', 'bone', 0, 0.011, 0.024, 0, 0.008, 0.04, 0.008],
-    ['rod', 'bone', 1, -0.011, 0.01, 0.004, 0.007, 0.03, 0.007],     // shin bones
-    ['rod', 'bone', 2, 0.011, 0.01, 0.004, 0.007, 0.03, 0.007],
-    ['rod', 'gut', 0, -0.008, 0.052, 0.012, 0.022, 0.006, 0.006, 0, 0.4, 0],   // intestines
-    ['rod', 'gut', 1, 0.008, 0.047, 0.013, 0.02, 0.006, 0.006, 0, -0.5, 0],
-    ['rod', 'gut', 2, 0, 0.058, 0.011, 0.018, 0.005, 0.005, 0, 0.1, 0],
-    ['rod', 'gut', 0, -0.004, 0.044, 0.009, 0.016, 0.006, 0.006, 0, 0.9, 0],
-    ['rod', 'gut', 1, 0.006, 0.055, 0, 0.02, 0.006, 0.006, 0, 0, 0.4],
+    ['blob', 'bone', 1, 0, 0.117, 0, 0.017, 0.016, 0.017],                  // cranium
+    ['blob', 'socket', 0, -0.0045, 0.115, 0.0075, 0.0045, 0.0045, 0.003],   // eye sockets
+    ['blob', 'socket', 1, 0.0045, 0.115, 0.0075, 0.0045, 0.0045, 0.003],
+    ['rod', 'socket', 0, 0, 0.111, 0.0085, 0.002, 0.003, 0.002],            // nose
+    ['rod', 'bone', 0, 0, 0.106, 0.004, 0.013, 0.003, 0.008],               // jaw
+    ['rod', 'bone', 1, -0.004, 0.1085, 0.0085, 0.0015, 0.003, 0.0015],      // teeth
+    ['rod', 'bone', 2, -0.002, 0.1085, 0.0085, 0.0015, 0.003, 0.0015],
+    ['rod', 'bone', 0, 0, 0.1085, 0.0085, 0.0015, 0.003, 0.0015],
+    ['rod', 'bone', 1, 0.002, 0.1085, 0.0085, 0.0015, 0.003, 0.0015],
+    ['rod', 'bone', 2, 0.004, 0.1085, 0.0085, 0.0015, 0.003, 0.0015],
+    ['blob', 'organ', 0, -0.003, 0.08, 0.004, 0.009, 0.011, 0.008],         // heart
+    ['blob', 'lung', 0, -0.007, 0.082, -0.001, 0.007, 0.02, 0.01],          // lungs
+    ['blob', 'lung', 1, 0.007, 0.082, -0.001, 0.007, 0.02, 0.01],
+    ['blob', 'organ', 1, 0.006, 0.066, 0.002, 0.012, 0.006, 0.01],          // liver
+    ['blob', 'gut', 0, -0.006, 0.064, 0.003, 0.007, 0.007, 0.007],          // stomach
+    ['rod', 'bone', 0, 0, 0.075, -0.007, 0.003, 0.05, 0.003],               // spine
+    ['rod', 'bone', 1, 0, 0.06, 0.007, 0.024, 0.002, 0.002, 0, 0, 0.12],    // ribs
+    ['rod', 'bone', 2, 0, 0.07, 0.007, 0.024, 0.002, 0.002, 0, 0, -0.12],
+    ['rod', 'bone', 0, 0, 0.08, 0.007, 0.024, 0.002, 0.002, 0, 0, 0.12],
+    ['rod', 'bone', 1, 0, 0.09, 0.007, 0.024, 0.002, 0.002, 0, 0, -0.12],
+    ['rod', 'bone', 2, 0, 0.06, -0.007, 0.024, 0.002, 0.002, 0, 0, -0.12],
+    ['rod', 'bone', 0, 0, 0.07, -0.007, 0.024, 0.002, 0.002, 0, 0, 0.12],
+    ['rod', 'bone', 1, 0, 0.08, -0.007, 0.024, 0.002, 0.002, 0, 0, -0.12],
+    ['rod', 'bone', 2, 0, 0.09, -0.007, 0.024, 0.002, 0.002, 0, 0, 0.12],
+    ['rod', 'gut', 0, -0.005, 0.055, 0.005, 0.014, 0.004, 0.004, 0, 0.4, 0],   // intestines
+    ['rod', 'gut', 1, 0.005, 0.052, 0.006, 0.013, 0.004, 0.004, 0, -0.5, 0],
+    ['rod', 'gut', 2, 0, 0.06, 0.004, 0.012, 0.004, 0.004, 0, 0.1, 0],
+    ['rod', 'gut', 0, -0.003, 0.05, 0.002, 0.012, 0.004, 0.004, 0, 0.9, 0],
+    ['rod', 'gut', 1, 0.004, 0.058, 0.002, 0.012, 0.004, 0.004, 0, 0, 0.4],
+    ['blob', 'organ', 3, -0.007, 0.03, 0.003, 0.008, 0.024, 0.008],        // muscle of the legs
+    ['blob', 'organ', 4, 0.007, 0.03, 0.003, 0.008, 0.024, 0.008],
+    ['rod', 'bone', 0, -0.006, 0.024, 0, 0.005, 0.04, 0.005],               // thigh bones
+    ['rod', 'bone', 1, 0.006, 0.024, 0, 0.005, 0.04, 0.005],
+    ['rod', 'bone', 2, -0.006, 0.015, 0.002, 0.004, 0.026, 0.004],          // shin bones
+    ['rod', 'bone', 0, 0.006, 0.015, 0.002, 0.004, 0.026, 0.004],
   ];
   // the skin: pale shells over the body, peeled off in the first 0.4 s
-  // [x, y, z, sx, sy, sz, delay]: the head peels first, then the torso, arms and legs
+  // [x, y, z, sx, sy, sz, delay]: the resident figure's own boxes (legs, torso, head), a little bigger.
+  // The head peels first, then the torso, then the legs.
   const SKIN_SHELL = [
-    [-0.011, 0.024, 0, 0.017, 0.048, 0.018, 0.4],     // legs
-    [0.011, 0.024, 0, 0.017, 0.048, 0.018, 0.4],
-    [0, 0.076, 0, 0.044, 0.056, 0.03, 0.2],           // torso
-    [-0.033, 0.08, 0, 0.016, 0.05, 0.016, 0.3],       // arms
-    [0.033, 0.08, 0, 0.016, 0.05, 0.016, 0.3],
-    [0, 0.12, 0, 0.032, 0.034, 0.032, 0],             // head
+    [0, 0.024, 0, 0.030, 0.048, 0.020, 0.4],          // legs
+    [0, 0.076, 0, 0.036, 0.055, 0.024, 0.2],          // torso
+    [0, 0.116, 0, 0.026, 0.024, 0.026, 0],            // head
   ];
   const ROLL = 0.35;   // seconds one piece of skin takes to roll back
 
@@ -348,7 +341,8 @@
     const moving = bodies.filter((b) => b.phase === 'peel' || b.phase === 'exposed' || b.phase === 'fall');
     if (moving.length >= MAX_ACTIVE) hurry(moving[0]);      // the oldest one drops straight to its fall
 
-    const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, th: Math.atan2(-d.x, -d.z), dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
+    const th = typeof info.th === 'number' ? info.th : Math.atan2(-d.x, -d.z);   // their own front, else towards the shooter
+    const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, th, dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
     b.ring = take(pools.ring, HEX.ring[0]);
     for (const [lx, ly, lz, sx, sy, sz, delay] of SKIN_SHELL) {
       b.skin.push({ slot: take(pools.skin, HEX.skin[0]), lx: lx * sc, ly: ly * sc, lz: lz * sc, sx: sx * sc, sy: sy * sc, sz: sz * sc, delay });

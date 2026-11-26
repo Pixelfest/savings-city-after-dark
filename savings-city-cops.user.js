@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.10
+// @version      1.11
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -743,7 +743,7 @@
     if (!cop || !alive(cop)) return null;
     cop.state = 'gone'; cop.mesh.removeFromParent();
     window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: cop.x, z: cop.z, cause: 'skinned', who: 'cop' } }));
-    return { x: cop.x, z: cop.z, y: 0.04, k: 1, h: 0.135 };
+    return { x: cop.x, z: cop.z, y: 0.04, k: 1, h: 0.135, th: cop.h };
   }
   // blood: the residents' instanced drops and stains when they're there (n × the blood setting)
   const bloodF = () => (window.scCore && window.scCore.blood ? window.scCore.blood() : 1);

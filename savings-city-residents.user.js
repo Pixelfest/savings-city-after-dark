@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.23
+// @version      1.24
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -1262,7 +1262,7 @@
       if (p.state !== 'down') died(p, 'skinned');
       p.state = 'gone'; p.squirt = 0; p.burn = null;
       const k = p.k || 1;
-      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE };
+      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE, th: p.h };
     },
     // Test hooks: freeze(x, z, facing) pins the walking adult nearest to (x, z) at exactly that
     // spot (returns their index, or -1); unfreeze(i) lets them walk again.
