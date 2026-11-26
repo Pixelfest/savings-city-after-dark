@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -21,6 +21,10 @@
  *   render() is wrapped once: the scene and camera of the app's own (orthographic) render are kept.
  *   onRender(fn(scene, camera, render) → true when handled): every render call goes past these
  *   first; one that returns true has drawn the frame itself with `render` (walk mode: its own camera).
+ *   onDraw(fn(scene, camera, draw) → true when handled): the last step of every render call, also
+ *   the ones the onRender hooks make (graphics: ambient occlusion draws the frame there; `draw` is
+ *   three.js' own render). onRenderer(fn(renderer)): called as soon as the renderer exists, before
+ *   the app sets it up (graphics wraps setPixelRatio there).
  * - overlay: the app adds all its layers in one call, scene.add(greenery, …, overlayGroup); the last
  *   one holds the selection and hover highlights.
  * - onGeometryProto(fn(proto)): BufferGeometry's prototype, revealed by a one-time setter on the
@@ -38,7 +42,9 @@
  *   puffs, one InstancedMesh per kind (see "smoke and dust" below); walk mode's smoke goes here too.
  *   puff(x, y, z, opts): the older dust puff (vx, vy, vz, size, life, delay, color), now one of those.
  * - settings: sliders other scripts add (define({ id, label, min, max, step, value, format?, help? }),
- *   get(id), set(id, v), onChange(id, fn)); kept in localStorage. A button in the menu opens a
+ *   get(id), set(id, v), onChange(id, fn)); kept in localStorage. type: 'toggle' (value true/false)
+ *   is an on/off switch, options: ['a', 'b', …] a row of buttons (value = index); reload: true
+ *   means it only applies after reloading the page (the popup offers that). A button in the menu opens a
  *   popup with all of them. The core's own: 'detail' (1 = normal … 5 = most detailed), read through
  *   detail() → { level, factor: 2^(level − 1) } – scripts multiply their piece budgets by it.
  *   'blood' (1 … 5), read through blood() → 1, 2, 4, 8 or 16: how much blood spatters.
@@ -55,7 +61,7 @@
 
   // ---------- renderer, scene, camera ----------
   let renderer = null, scene = null, camera = null, overlay = null;
-  const renderFns = [];
+  const renderFns = [], drawFns = [], rendererFns = [];
   const hook = window.__THREE_DEVTOOLS__ || (window.__THREE_DEVTOOLS__ = new EventTarget());
   hook.addEventListener('observe', (e) => {
     const o = e.detail;
@@ -70,7 +76,16 @@
     r.__scCore = true;
     renderer = renderer || r;
     const orig = r.render;
-    const render = (s, c) => orig.call(r, s, c);
+    const raw = (s, c) => orig.call(r, s, c);
+    const render = (s, c) => {
+      for (const fn of drawFns) {
+        let done = false;
+        try { done = fn(s, c, raw); } catch (e) { console.warn('[core] draw', e); }
+        if (done) return;
+      }
+      return orig.call(r, s, c);
+    };
+    if (renderer === r) for (const fn of rendererFns) { try { fn(r); } catch (e) { console.warn('[core] renderer', e); } }
     r.render = function (s, c) {
       if (s && s.isScene && c && c.isOrthographicCamera && (!scene || s === scene)) { scene = s; camera = c; }
       for (const fn of renderFns) {
@@ -78,7 +93,7 @@
         try { done = fn(s, c, render); } catch (e) { console.warn('[core] render', e); }
         if (done) return;
       }
-      return orig.apply(this, arguments);
+      return render(s, c);
     };
   });
 
@@ -427,6 +442,7 @@
   const defs = [], values = (() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; } })();
   const changeFns = new Map();
   let popupEl = null;                                            // the open popup, if any
+  let needReload = false;                                        // a setting changed that applies after a reload
   const settings = {
     // { id, label, min, max, step, value (default), format(v) → text, help }
     define(d) {
@@ -437,9 +453,14 @@
     get(id) {
       const d = defs.find((x) => x.id === id), v = values[id];
       if (v === undefined || v === null) return d ? d.value : undefined;
-      return d ? Math.min(d.max, Math.max(d.min, v)) : v;
+      if (!d) return v;
+      if (d.type === 'toggle') return !!v;
+      if (d.options) return Math.min(d.options.length - 1, Math.max(0, Math.round(v))) || 0;
+      return Math.min(d.max, Math.max(d.min, v));
     },
     set(id, v) {
+      const d = defs.find((x) => x.id === id);
+      if (d && d.reload && settings.get(id) !== v) needReload = true;
       values[id] = v;
       try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(values)); } catch {}
       for (const fn of changeFns.get(id) || []) { try { fn(v); } catch (e) { console.warn('[core] setting', id, e); } }
@@ -464,14 +485,42 @@
       const row = document.createElement('div');
       row.className = 'set';
       const v = settings.get(d.id), fmt = (x) => (d.format ? d.format(x) : String(x));
-      row.innerHTML = `<div class="head"><label for="sc-set-${d.id}">${d.label}</label><b></b></div>
-        <input id="sc-set-${d.id}" type="range" min="${d.min}" max="${d.max}" step="${d.step || 1}" value="${v}">
-        ${d.help ? `<div class="help">${d.help}</div>` : ''}`;
-      const out = row.querySelector('b'), input = row.querySelector('input');
-      out.textContent = fmt(v);
-      input.addEventListener('input', () => { const x = parseFloat(input.value); out.textContent = fmt(x); settings.set(d.id, x); });
+      const help = (d.help ? d.help : '') + (d.reload ? (d.help ? ' ' : '') + '<i>Na herladen.</i>' : '');
+      const helpHtml = help ? `<div class="help">${help}</div>` : '';
+      if (d.type === 'toggle') {
+        row.innerHTML = `<div class="head tg"><label for="sc-set-${d.id}">${d.label}</label>
+          <input id="sc-set-${d.id}" class="sw" type="checkbox" role="switch"${v ? ' checked' : ''}></div>${helpHtml}`;
+        const input = row.querySelector('input');
+        input.addEventListener('change', () => { settings.set(d.id, input.checked); renderButtons(); });
+      } else if (d.options) {
+        row.innerHTML = `<div class="head"><label>${d.label}</label></div><div class="opts" role="radiogroup"></div>${helpHtml}`;
+        const opts = row.querySelector('.opts');
+        d.options.forEach((name, i) => {
+          const b = document.createElement('button');
+          b.type = 'button'; b.textContent = name; b.setAttribute('role', 'radio');
+          b.setAttribute('aria-checked', String(i === v)); if (i === v) b.className = 'on';
+          b.addEventListener('click', () => {
+            settings.set(d.id, i);
+            for (const x of opts.children) { const on = x === b; x.className = on ? 'on' : ''; x.setAttribute('aria-checked', String(on)); }
+            renderButtons();
+          });
+          opts.appendChild(b);
+        });
+      } else {
+        row.innerHTML = `<div class="head"><label for="sc-set-${d.id}">${d.label}</label><b></b></div>
+          <input id="sc-set-${d.id}" type="range" min="${d.min}" max="${d.max}" step="${d.step || 1}" value="${v}">${helpHtml}`;
+        const out = row.querySelector('b'), input = row.querySelector('input');
+        out.textContent = fmt(v);
+        input.addEventListener('input', () => { const x = parseFloat(input.value); out.textContent = fmt(x); settings.set(d.id, x); renderButtons(); });
+      }
       list.appendChild(row);
     }
+    renderButtons();
+  }
+  // "Klaar" reloads the page when a setting changed that only applies after a reload
+  function renderButtons() {
+    if (!popupEl) return;
+    popupEl.querySelector('.close').textContent = needReload ? 'Klaar · herladen' : 'Klaar';
   }
   function openSettings() {
     if (popupEl) { closeSettings(); return; }
@@ -492,6 +541,15 @@
         #sc-settings-popup .buttons{display:flex;gap:10px;justify-content:space-between;margin-top:16px}
         #sc-settings-popup .buttons button{border:0;border-radius:10px;padding:10px 18px;font:800 15px system-ui,sans-serif;cursor:pointer;background:#3a4160;color:#fff}
         #sc-settings-popup .buttons .close{background:#ffd23f;color:#223}
+        #sc-settings-popup .head.tg{align-items:center}
+        #sc-settings-popup .head input.sw{appearance:none;-webkit-appearance:none;flex:none;width:44px;height:24px;margin:0;border-radius:12px;background:#3a4160;position:relative;cursor:pointer;transition:background .15s}
+        #sc-settings-popup .head input.sw::after{content:'';position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .15s}
+        #sc-settings-popup .head input.sw:checked{background:#ffd23f}
+        #sc-settings-popup .head input.sw:checked::after{left:23px;background:#223}
+        #sc-settings-popup .head input.sw:focus-visible,#sc-settings-popup .opts button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+        #sc-settings-popup .opts{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
+        #sc-settings-popup .opts button{flex:1 1 auto;border:0;border-radius:8px;padding:6px 10px;font:700 13px system-ui,sans-serif;cursor:pointer;background:#3a4160;color:#fff}
+        #sc-settings-popup .opts button.on{background:#ffd23f;color:#223}
       </style>
       <div class="box" role="dialog" aria-label="Instellingen">
         <h2>Instellingen</h2>
@@ -503,10 +561,14 @@
     renderPopup();
     popupEl.querySelector('.close').addEventListener('click', closeSettings);
     popupEl.querySelector('.reset').addEventListener('click', () => { for (const d of defs) settings.set(d.id, d.value); renderPopup(); });
+    popupEl.tabIndex = -1; popupEl.focus();
     popupEl.addEventListener('click', (e) => { if (e.target === popupEl) closeSettings(); });
     popupEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
   }
-  function closeSettings() { if (popupEl) { popupEl.remove(); popupEl = null; } }
+  function closeSettings() {
+    if (popupEl) { popupEl.remove(); popupEl = null; }
+    if (needReload) { needReload = false; location.reload(); }
+  }
   // the button in the app's menu (next to the other scripts' buttons)
   const SVG = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="g-ico" aria-hidden="true"';
   const ICON = `<svg ${SVG}><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></svg>`;
@@ -529,12 +591,14 @@
   function projectOf(o) { for (let p = o; p; p = p.parent) if (p.userData && p.userData.projectId !== undefined) return p; return null; }
 
   window.scCore = {
-    version: '1.4',
+    version: '1.5',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
     get overlay() { return overlay; },
     onRender(fn) { if (typeof fn === 'function') renderFns.push(fn); },
+    onDraw(fn) { if (typeof fn === 'function') drawFns.push(fn); },
+    onRenderer(fn) { if (typeof fn !== 'function') return; rendererFns.push(fn); if (renderer) try { fn(renderer); } catch (e) { console.warn('[core] renderer', e); } },
     onGeometryProto, app,
     classes,
     get city() { return city; },

@@ -26,7 +26,7 @@ everything happens only in your own browser – reload the page and the city is 
    Remove the scripts you installed one by one, or they run twice.
 
 The loader contains every script below. To leave one out, delete its `@require` line in the loader.
-Keep the core and buildings: almost every script needs the core (only the bodycount, season toggle and billboard don't), and the rocket launcher, the monster and the nuke also need buildings.
+Keep the core and buildings: almost every script needs the core (only the bodycount and billboard don't), and the rocket launcher, the monster and the nuke also need buildings.
 
 Set the address under *User matches* rather than editing the loader: once you edit the loader,
 Tampermonkey stops updating it, and then the scripts it loads don't update either.
@@ -35,19 +35,19 @@ Tampermonkey stops updating it, and then the scripts it loads don't update eithe
 
 Add each `.user.js` file separately (Dashboard → `+` → paste, or drag the file in) and set the
 `@match` address in every one. They don't update by themselves. Always install the core (every script
-except the bodycount, season toggle and billboard needs it), and the buildings script too for the
+except the bodycount and billboard needs it), and the buildings script too for the
 rocket launcher, the monster or the nuke. The order in Tampermonkey's list doesn't matter.
 
 Settings are constants at the top of each script; the most useful ones are also sliders in the
 settings popup (the menu button with the sliders icon): detail when things break (5 steps, each
-doubles the pieces – prettier, heavier), blood (1–16× as much spatter), rockets before a building collapses, residents per street
-and the car's top speed. All sounds follow the app's own sound button (mute and volume).
+doubles the pieces – prettier, heavier), blood (1–16× as much spatter), rockets before a building collapses, residents per street,
+the car's top speed, and the graphics settings: winter, day and night, shadows, ambient occlusion and pixel size. All sounds follow the app's own sound button (mute and volume).
 
 | Script | Version | What it does |
 |---|---|---|
-| `savings-city-core.user.js` | 1.4 | Shared base, install it first. Adds a settings button (sliders icon) to the menu: a popup with sliders the scripts add – detail when things break (5 steps, each doubles the pieces: prettier, heavier), blood (1, 2, 4, 8 or 16× as much spatter), rockets before a building collapses, residents per street, the car's top speed – remembered in the browser. Also: the app's scene, renderer and camera, three.js classes, city data, traffic, sound (follows the app's sound button), one frame loop, smoke and dust (solid low-poly puffs, one draw call per kind: car fires, rockets, collapsing buildings, the monster; also the app's own exhaust puffs) that shrink away by 30 m up, and the damage bus (`scCore.damage(...)`) that weapons and disasters use to break things. Nothing visible on its own. |
+| `savings-city-core.user.js` | 1.5 | Shared base, install it first. Adds a settings button (sliders icon) to the menu: a popup with sliders, on/off switches and choice buttons the scripts add (settings that only apply after a reload turn the Klaar button into "Klaar · herladen") – detail when things break (5 steps, each doubles the pieces: prettier, heavier), blood (1, 2, 4, 8 or 16× as much spatter), rockets before a building collapses, residents per street, the car's top speed – remembered in the browser. Also: the app's scene, renderer and camera, three.js classes, city data, traffic, sound (follows the app's sound button), one frame loop, smoke and dust (solid low-poly puffs, one draw call per kind: car fires, rockets, collapsing buildings, the monster; also the app's own exhaust puffs) that shrink away by 30 m up, and the damage bus (`scCore.damage(...)`) that weapons and disasters use to break things. Nothing visible on its own. |
 | `savings-city-buildings.user.js` | 1.4 | Solid buildings, shared by the rocket launcher, the monster and the nuke (needs the core): buildings turn into chunks with the facade outside and concrete inside (at most ~800 per building: big buildings get bigger chunks), get craters, collapse from an impact or are pushed over, with dust rolling out; cutting runs in a background worker (the page doesn't stutter), a hit that arrives earlier waits for it. Where a rocket is about to hit, the chunks on the side facing you are cut again much smaller (a crater of many small pieces, a fixed maximum that follows the detail setting), and rockets at the same spot dig deeper. People keep away from the rubble. |
-| `savings-city-season-toggle.user.js` | 1.0 | Button to switch between winter (snow, Christmas trees) and the normal season. |
+| `savings-city-graphics.user.js` | 1.1 | Needs core. Graphics settings in the settings popup: **winter** (by date / on / off; snow and Christmas), **day and night** (real time / always day / always night; the page reloads for these two), **shadows** on/off, **ambient occlusion** on/off (added by this script – the app has none; darker corners where walls, roofs and the ground meet; daytime only, costs GPU), **pixel size** (normal, 2×, 3×, 4×: bigger, blocky pixels like an old game, and lighter for the GPU). Replaces the season toggle (the app no longer reads `?winter=`). |
 | `savings-city-auto-layout.user.js` | 2.4 | Needs core. Organic city layout: tall buildings in the centre, smaller ones outside, roads between them; optionally (`RING_ROAD`, off by default) a ring road connecting loose ends. |
 | `savings-city-car-tyres.user.js` | 1.5 | Needs core. Wider, optionally round tyres (no more flickering). Lighter: the fallback that repairs car models built without the fix stops once the fix is known to work. |
 | `savings-city-walk-mode.user.js` | 1.31 | Needs core. First-person walk mode (WASD + mouse, `,`/`.` slower/faster, Esc to stop), start from a building's door (double-click it), or double-click open ground outside the city to start there, facing the city centre. You start with empty hands; scroll wheel (or Q, 0–4) picks a weapon: pistol, minigun, plus plugin weapons. Bullet holes; shot cars flee, or stop while the driver jumps out and runs; they explode (big blast, chain reactions, 1–2 dead inside, a column of black smoke rising and thinning out before 30 m). Destructible trees, street lamps, benches and fountains. |
@@ -62,7 +62,7 @@ and the car's top speed. All sounds follow the app's own sound button (mute and 
 | `savings-city-nuke.user.js` | 3.4 | Needs core and buildings. Lighter: fewer, bigger chunks and rubble; people and cars are hit only while the shockwave passes. The blast throws buildings hard outward, away from ground zero (chunks slide on along the ground). The middle of the mushroom cloud keeps boiling (no frozen puffs). ☢ button: a popup to pick the yield in tonnes of TNT (hand grenade … Tsar Bomba; blast radius, force and mushroom cloud follow it), aim with the crosshair (red rings show the reach), then a countdown while a B-2 bomber flies over and drops the bomb, which lands on ground zero as it goes off; flash, shockwave, buildings breaking into solid chunks that fly outward, ruins, mushroom cloud, camera shake. |
 | `savings-city-monster.user.js` | 1.4 | Button that releases a giant green monster with round glasses: it walks into the city, punches and tramples buildings, which collapse into solid chunks (needs core and buildings). |
 
-Every script needs the core except the bodycount, the season toggle and the billboard; the rocket
+Every script needs the core except the bodycount and the billboard; the rocket
 launcher, the monster and the nuke also need buildings. Some work together (walk mode + residents + rocket launcher + flamethrower + cops + helicopter/cranes + billboard + drive;
 the rocket launcher, the monster and the nuke share damaged buildings; the bodycount counts what the others
 report). Each script's header comment explains how it works.
