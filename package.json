@@ -3,9 +3,7 @@
   "private": true,
   "description": "Tampermonkey userscripts for the Savings City app, with a local copy of the app to develop and test on.",
   "license": "UNLICENSED",
-  "engines": {
-    "node": ">=18"
-  },
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node local/server.js",
     "shot": "node local/shot.js",
