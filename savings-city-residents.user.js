@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.24
+// @version      1.25
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -999,6 +999,7 @@
       });
       const dropGeo = geo((pp, nn, cc) => box(pp, nn, cc, -0.5, -0.5, -0.5, 1, 1, 1, W));
       const bloodMat = new Material({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      bloodMat.defines = { ...(bloodMat.defines || {}), SNOW_COVER: '-0.50' };   // no winter snow over the blood (the app's snow shader, 0.9 when not set)
       pools = new InstancedMesh(poolGeo, bloodMat, n);
       dropMesh = new InstancedMesh(dropGeo, bloodMat, MAX_BLOOD_DROPS * 4);
       for (const b of [pools, dropMesh]) { b.frustumCulled = false; b.receiveShadow = true; b.count = 0; }
@@ -1214,6 +1215,16 @@
     } catch (e) { /* no audio */ }
   }
 
+  // resident i's own colours, as hex strings (null when the figures aren't built yet)
+  function colorsOf(i) {
+    try {
+      const Col = torsos && torsos.material && torsos.material.color && torsos.material.color.constructor;
+      if (!Col) return null;
+      const c = new Col(), hex = (m) => { m.getColorAt(i, c); return '#' + c.getHexString(); };
+      return { shirt: hex(torsos), trousers: hex(legs), skin: hex(heads), hair: hex(hairs), bald: !!(bald && bald[i]) };
+    } catch (e) { return null; }
+  }
+
   // ---------- for other scripts (walk mode shoots with this) ----------
   // hit(origin, direction, maxDistance) → { index, t } of the nearest standing resident on that line.
   // knockDown(index, direction) → makes them fall over (away from the shot) and stay down.
@@ -1254,15 +1265,17 @@
       });
       return best;
     },
-    // Skinned (the skinner script): the person is taken out of the city and their place is returned
-    // ({ x, z, y, h, k }) so the skinner can draw the body; null when there's nobody to skin.
-    skin(i) {
+    // Skinned (the skinner script) or torn apart by a tree (the yuletide grenade): the person is
+    // taken out of the city and their place is returned ({ x, z, y, h, k, th, colors }) so the
+    // weapon can draw the body itself; null when there's nobody to take. cause: for the sc:kill
+    // event (default 'skinned'). colors: their own shirt, trousers, skin and hair (hex), and bald.
+    skin(i, cause) {
       const p = people[i];
       if (!p || p.state === 'inside' || p.state === 'gone') return null;
-      if (p.state !== 'down') died(p, 'skinned');
+      if (p.state !== 'down') died(p, cause || 'skinned');
       p.state = 'gone'; p.squirt = 0; p.burn = null;
       const k = p.k || 1;
-      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE, th: p.h };
+      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE, th: p.h, colors: colorsOf(i) };
     },
     // Test hooks: freeze(x, z, facing) pins the walking adult nearest to (x, z) at exactly that
     // spot (returns their index, or -1); unfreeze(i) lets them walk again.

@@ -430,3 +430,28 @@ Older approach, still useful for unit-level checks:
   `scCops.placeAt(x, z)` creates a still officer that can be shot (cops 1.9).
 - Headless Chromium runs the simulation slowly: the frame time step is clamped to 0.05 s, so
   "1.8 s" on screen is less game time. Give the skinner's fall about 4 s before judging it.
+
+## Yuletide grenade (savings-city-yuletide 1.0, residents 1.25, cops 1.13)
+
+- A walk-mode weapon (key 6, `scWalkWeapons.push`); the model in your hand pushes its cones
+  straight into the builder's `P`/`C` arrays (the builder only has boxes and prisms along z).
+- The throw is a plain `K.Mesh` (vertex colours, Lambert) with gravity, bouncing off the ground
+  (y 0.038) and walls (`rayBuildings` normal); it goes off `FUSE` s after the throw.
+- The blast takes everyone outside within `RADIUS` (0.5 tiles ≈ 10 m): residents from
+  `scResidents.people`, officers from `scCops.officers()`, both through `skin(i, 'tree')` (the
+  `cause` argument is new in residents 1.25 / cops 1.13; residents' `skin()` now also returns
+  `colors` – shirt, trousers, skin, hair as hex, read from the instanced figures – and cops' `cop: true`).
+- Each victim is a "tree": three InstancedMesh pools (cones, blobs, boxes; Lambert, normals from
+  `computeVertexNormals` on both-winding triangles). Parts are groups of instances that sit in the
+  body, fly an arc from `t0` to `t1`, and then stay at a target that follows the growing tree
+  (`onTree`) or lies on the ground; an item's `end` size lets clothes go flat as they land.
+  Timeline: wait (ripple by distance), swell 0.4 s, burst (spatter in 8 directions + a pool,
+  clothes slump into a heap at the foot, organs → baubles at the tier rims, bowels → spiral
+  garland, head → the tip), grow 0.65 s with overshoot, stand 30 s (head drips 5 s), shrink.
+- Winter: the app patches three.js' Lambert shader (`pf()` in CityCanvas) to lay snow on every
+  upward-facing surface, per material by the `SNOW_COVER` define (0.9 when unset). Lambert
+  materials of our own that must keep their colour set `defines.SNOW_COVER = '-0.50'` (the
+  yuletide pools and grenade; residents' blood drops since 1.25 – before that, stains on snow
+  came out white).
+- Test hook: `scYuletide.detonate(x, z)` sets one off at once (with `scResidents.freeze` to put
+  people there first).
