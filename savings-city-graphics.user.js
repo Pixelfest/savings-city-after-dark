@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – graphics
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Graphics settings in the settings popup (needs the core): winter on/off, day and night or always day/night, shadows, ambient occlusion and bigger pixels.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -42,8 +42,8 @@
 (function () {
   'use strict';
 
-  const AO_RADIUS = 0.25;          // world units (1 tile ≈ 20 m) – how far corners darken
-  const AO_INTENSITY = 1.4;        // how dark a corner gets
+  const AO_RADIUS = 0.45;          // world units (1 tile ≈ 20 m) – how far corners darken (was 0.25: hardly visible)
+  const AO_INTENSITY = 2.0;        // how dark a corner gets (was 1.4)
   const AO_STRENGTH = 0.85;        // 0…1, how much of it is applied
   const DAY_FROM = 10, DAY_TO = 15; // "always day": keep the current time if it's in this window (hours)
   const DAY_DEFAULT = '12:00', NIGHT_TIME = '23:00';
@@ -193,7 +193,7 @@
           vec3 v = viewPos( uv ) - p;
           float vv = dot( v, v );
           // how far above the tangent plane the neighbour is (cosine), less with distance
-          sum += max( dot( v, n ) * inversesqrt( vv + 1e-10 ) - 0.15, 0.0 ) * max( 1.0 - vv / r2, 0.0 );
+          sum += max( dot( v, n ) * inversesqrt( vv + 1e-10 ) - 0.3, 0.0 ) * max( 1.0 - vv / r2, 0.0 );   // 0.3: flat ground seen at a grazing angle doesn't shade itself
         }
         float ao = clamp( 1.0 - intensity * 5.0 * sum / 16.0, 0.0, 1.0 );
         gl_FragColor = vec4( vec3( ao ), 1.0 );

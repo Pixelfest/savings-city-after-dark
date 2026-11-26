@@ -56,6 +56,9 @@ placeholder `https://your-savings-city-host.example/`.
   HalfFloat MSAA target with a FloatType depth texture – 24-bit depth was too coarse over the
   camera's 1…400 range – then an AO pass and a blurred composite with tone mapping; classes
   borrowed from the sun's shadow map). `window.scGraphics.ao.U.show.value = 1` shows the AO buffer.
+  Graphics 1.2: the AO was there but too faint to see (radius 0.25, intensity 1.4); now radius 0.45,
+  intensity 2.0 and an angle bias of 0.3 (was 0.15) so flat ground seen at a grazing angle in walk
+  mode doesn't shade itself. `show.value = 2` shows the normals (cyan/pink), not the raw AO.
 
 ## Night lights and lights out (core 1.6, buildings 1.5, nuke 3.5)
 
@@ -340,6 +343,16 @@ night: near black with twinkling stars. Scene background and the walk fog follow
 colour. Palette hex values are converted to linear (the renderer converts back). Note: the core's
 borrowed `Attr` class copies the array you give it – write into `attr.array`. Test hook:
 `scWalk.skyAltitude(deg)` forces the sun's altitude (null: the real sun again).
+
+Walk mode 1.34: the app's light doesn't say how low the sun is – `fv()` builds `sunDirection`
+from `max(0, altitude)`, so it sits at the horizon all night – and walk mode used to move the light
+to a fixed spot above you anyway. Now the sky takes the altitude from the app's clock
+(`view.clock()`, the same low-precision solar formula as the app's `L_`, at a generic place in the
+middle of the Netherlands), and the light is placed along `view.sunDirection` around you, so
+shadows follow the time of day. Road lamps (`view.lampPosts`, instanced pole + head, instance i =
+`view.lamps[i]`) are props now too (`prop.inst`, like the instanced trees); before only the
+merged lamps (squares, highways) could be shot down. A lamp that lands calls `scCore.lampsOut` for
+itself (glow, light pool and lit head go out).
 
 Residents 1.21: nobody walks on highways (their asphalt covers where the sidewalk line is), on a road
 that touches a highway junction, or through a door onto either. `buildNetwork()` builds the walking

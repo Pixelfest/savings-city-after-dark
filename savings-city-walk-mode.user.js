@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.33
+// @version      1.34
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -360,7 +360,11 @@
   function followView() {
     // sun shadows around you instead of around the app's view
     if (sun) {
-      sun.position.set(pos.x - 18, 40, pos.z + 26);
+      const d = appSunDir();                    // the app's sun direction, so shadows follow the clock
+      if (d) {
+        const k = 48 / Math.hypot(d.x, d.y, d.z);
+        sun.position.set(pos.x + d.x * k, d.y * k, pos.z + d.z * k);
+      } else sun.position.set(pos.x - 18, 40, pos.z + 26);
       sun.target.position.set(pos.x, 0, pos.z);
       sun.target.updateMatrixWorld();
       const sc = sun.shadow.camera;
@@ -410,9 +414,39 @@
     return mixRGB(c, mixRGB(PAL.glow, PAL.duskTop, up), tw * (0.3 + 0.7 * hz));
   }
 
-  // the sun's altitude in degrees (the sun is the app's directional light)
+  // the app's real sun direction (a unit vector towards the sun, updated by the app's clock every
+  // 250 ms); null until the core has found the app's city view
+  function appSunDir() {
+    try {
+      const v = window.scCore && typeof window.scCore.view === 'function' && window.scCore.view();
+      const d = v && v.sunDirection;
+      return d && typeof d.x === 'number' && Math.hypot(d.x, d.y, d.z) > 1e-6 ? d : null;
+    } catch (e) { return null; }
+  }
+
+  // The sun's real altitude for the app's clock (the same low-precision formula the app uses). The
+  // app's sunDirection can't be used for this: it keeps the light at the horizon all night (y ≥ 0).
+  const SKY_LAT = 52.2, SKY_LON = 5.3;   // somewhere in the middle of the Netherlands: close enough for the sky
+  function solarAltitude(ms) {
+    const r = (ms - Date.UTC(2000, 0, 1, 12)) / 864e5;
+    const M = (357.529 + 0.98560028 * r) * DEG;
+    const L = (280.459 + 0.98564736 * r + 1.915 * Math.sin(M) + 0.02 * Math.sin(2 * M)) * DEG;
+    const e = (23.439 - 3.6e-7 * r) * DEG;
+    const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)), dec = Math.asin(Math.sin(e) * Math.sin(L));
+    const H = (280.46061837 + 360.98564736629 * r) * DEG + SKY_LON * DEG - ra, lat = SKY_LAT * DEG;
+    return Math.asin(Math.sin(lat) * Math.sin(dec) + Math.cos(lat) * Math.cos(dec) * Math.cos(H)) / DEG;
+  }
+
+  // the sun's altitude in degrees. Not from the light itself: walk mode moves that around you.
   function sunAltitude() {
     if (skyOverride !== null) return skyOverride;
+    try {
+      const v = window.scCore && typeof window.scCore.view === 'function' && window.scCore.view();
+      const ms = v && typeof v.clock === 'function' ? +v.clock() : NaN;
+      if (Number.isFinite(ms)) return solarAltitude(ms);
+    } catch (e) { /* fall back below */ }
+    const d = appSunDir();
+    if (d) return Math.asin(Math.max(-1, Math.min(1, d.y / Math.hypot(d.x, d.y, d.z)))) / DEG;
     if (!skySun || !skySun.target) return 40;
     const p = skySun.position, t = skySun.target.position;
     const dx = p.x - t.x, dy = p.y - t.y, dz = p.z - t.z, l = Math.hypot(dx, dy, dz);
@@ -1603,7 +1637,8 @@
   // - trees on open land: separate instanced trunks + crowns (one instance per tree);
   // - trees on lots and squares: a brown trunk block with two green crown balls, merged into a
   //   bigger mesh (a city block, a square) – and again in the building's own hidden copy;
-  // - street lamps: a grey post with a light-yellow lamp head, merged into the squares' mesh;
+  // - street lamps: a grey post with a light-yellow lamp head, merged into the squares' mesh (and the
+  //   highways' road mesh); the road lamps are the app's own instanced posts (view.lampPosts);
   // - benches (wooden seat and back on two grey legs) and fountains (stone basin with water),
   //   also merged into the squares' mesh.
   // First hit: the prop shakes. PROP_HITS hits: it snaps at the foot and falls over, away from you,
@@ -1641,7 +1676,10 @@
       if (o.geometry.index) { if (!holdsProps(o.geometry)) return; const old = o.geometry; o.geometry = old.toNonIndexed(); old.dispose(); }
       meshes.push(o);
     });
-    const sig = meshes.map((m) => m.geometry.uuid).join() + '|' + inst.map((m) => m.uuid).join();
+    const lampView = window.scCore && typeof window.scCore.view === 'function' ? window.scCore.view() : null;
+    const lampPosts = lampView && lampView.lampPosts && lampView.lampPosts.object;
+    const sig = meshes.map((m) => m.geometry.uuid).join() + '|' + inst.map((m) => m.uuid).join()
+      + '|' + (lampPosts ? lampPosts.children.map((c) => c.uuid + ':' + c.count).join() : '');
     if (sig === propSig) return;
     propSig = sig;
     const old = props; const next = new Map();
@@ -1747,6 +1785,30 @@
         const prop = add(key, () => ({ kind: 'itree', key, x, z, y0: 0, hits: 0, state: 'up',
           parts: [{ cyl: true, r: 0.032 * s, y0: 0, y1: 0.12 * s }, { c: [x, 0.21 * s, z], r: 0.115 * s }, { c: [x + 0.014 * s, 0.32 * s, z - 0.012 * s], r: 0.078 * s }], hc: 0.21 * s, rc: 0.11 * s * 0.85 }));
         prop.inst = [trunk, crown, top].filter(Boolean).map((im) => ({ im, i, m0: orig(im, i) }));
+      }
+    }
+    // --- road lamps: the app's own instanced posts (view.lampPosts: a pole and a head mesh, instance
+    // i = lamp i). The other lamps (squares, highways) are merged into bigger meshes, found above.
+    const view = window.scCore && typeof window.scCore.view === 'function' ? window.scCore.view() : null;
+    const posts = view && view.lampPosts && view.lampPosts.object;
+    if (posts) {
+      const own = posts.children.filter((c) => c.isInstancedMesh && !c.userData.scDarkHeads);
+      const pole = own.find((c) => c.geometry.parameters && c.geometry.parameters.radiusBottom), head = own.find((c) => c !== pole);
+      const H = pole && pole.geometry.parameters.height;
+      if (pole && H) {
+        const origM = (im, i) => {
+          const o = im.userData.scOrig || (im.userData.scOrig = []);
+          if (!o[i]) { o[i] = new M4(); im.getMatrixAt(i, o[i]); }
+          return o[i];
+        };
+        for (let i = 0; i < pole.count; i++) {
+          const el = origM(pole, i).elements;
+          if (!el[5]) continue;                                  // knocked flat by a blast (core lampsOut 'fell')
+          const x = el[12], z = el[14], y0 = el[13], h = H * Math.hypot(el[4], el[5], el[6]), key = propKey('lamp', x, z);
+          const prop = add(key, () => ({ kind: 'lamp', key, x, z, y0, hits: 0, state: 'up',
+            parts: [{ cyl: true, r: 0.02, y0, y1: y0 + h }, { c: [x, y0 + h + 0.02, z], r: 0.042 }], hc: h + 0.02, rc: 0.03 }));
+          prop.inst = [pole, head].filter((im) => im && i < im.count).map((im) => ({ im, i, m0: origM(im, i) }));
+        }
       }
     }
     props.clear();
@@ -1916,10 +1978,19 @@
     }
     if (busy) requestAnimationFrame(stepProps); else propsOn = false;
   }
+  // a lamp that went down: its light goes out (glow, light pool, lit head – the core's lampsOut)
+  function lampOut(p) {
+    try {
+      const c = window.scCore, v = c && typeof c.view === 'function' && c.view();
+      if (!v || !Array.isArray(v.lamps) || typeof c.lampsOut !== 'function') return;
+      const l = v.lamps.find((q) => Math.hypot(q.x - p.x, q.z - p.z) < 0.06);
+      if (l) c.lampsOut(l.lightX, l.lightZ, 0.001);
+    } catch (e) { /* no core lights: fine */ }
+  }
   function landEffects(p, f) {
     // where the top lands: the point straight above the foot, turned by the fall (axis × up)
     const h = p.hc, a = f.angle, tx = p.x - f.axis[2] * Math.sin(a) * h, tz = p.z + f.axis[0] * Math.sin(a) * h;
-    if (p.kind === 'lamp') { sound('glass'); for (let k = 0; k < 12; k++) spawn('glass', tx, 0.06, tz, { vx: rnd(-0.6, 0.6), vy: rnd(0.2, 0.9), vz: rnd(-0.6, 0.6), g: 3, size: rnd(0.003, 0.007), life: rnd(1.5, 3), land: true, spin: true }); }
+    if (p.kind === 'lamp') { lampOut(p); sound('glass'); for (let k = 0; k < 12; k++) spawn('glass', tx, 0.06, tz, { vx: rnd(-0.6, 0.6), vy: rnd(0.2, 0.9), vz: rnd(-0.6, 0.6), g: 3, size: rnd(0.003, 0.007), life: rnd(1.5, 3), land: true, spin: true }); }
     else { sound('thud'); for (let k = 0; k < 10; k++) spawn('leaf', tx, 0.08, tz, { vx: rnd(-0.4, 0.4), vy: rnd(0.1, 0.5), vz: rnd(-0.4, 0.4), g: 1.2, size: rnd(0.005, 0.01), life: rnd(1.5, 3), land: true, spin: true }); }
     startEffects();
   }
