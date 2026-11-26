@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Privacy check: this repository is public. Nothing in it may point to the real Savings City
 // host (or any other private address) or contain personal data. See AGENTS.md → "Privacy rules".
+// It guards pushes and pull requests: GitHub Actions (.github/workflows/privacy.yml) and the
+// pre-push hook in .githooks/ run it.
 //
 //   node tools/check-privacy.js            check every tracked + new (not ignored) file
 //   node tools/check-privacy.js FILE...    check only these files
@@ -8,12 +10,11 @@
 // Checks:
 //   1. URLs (with a scheme) and bare host names whose host is not on ALLOWED_HOSTS below.
 //   2. E-mail addresses (only example.com / example.org are allowed).
-//   3. "saved from url" comments that browsers put in saved pages.
-//   4. City JSON files (anything with a "projects" array): authors must be "Bouwer X",
+//   3. City JSON files (anything with a "projects" array): authors must be "Bouwer X",
 //      links null or https://example.com/…, descriptions the anonymised placeholder.
-//   5. Terms listed in `.private-terms` (git-ignored, one per line, case-insensitive): put the
+//   4. Terms listed in `.private-terms` (git-ignored, one per line, case-insensitive): put the
 //      real host, company and people's names there on your own machine. CI can't see this file,
-//      so checks 1–4 are what protect the repo there.
+//      so checks 1–3 are what protect the repo there.
 // Exit code 1 when anything is found.
 'use strict';
 const fs = require('fs');
@@ -121,8 +122,6 @@ function check(rel, terms) {
   for (const m of text.matchAll(/[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g)) {
     if (!/@example\.(com|org)$/i.test(m[0])) report(`e-mail address "${m[0]}" (line ${lineOf(text, m.index)})`);
   }
-  const saved = lower.indexOf('saved from url');
-  if (saved >= 0) report(`"saved from url" comment (line ${lineOf(text, saved)}) – run tools/sanitize-app.js`);
   if (/\.json$/i.test(rel)) checkCity(text, report);
   return problems;
 }

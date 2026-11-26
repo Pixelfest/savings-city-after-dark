@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Local Savings City: serves the saved app copy (../app: index.html + assets/), answers the /api calls from a city JSON
+// Local Savings City: serves the saved app copy (../app), answers the /api calls from a city JSON
 // file (in memory: edits in the app work until you restart) and injects the chosen userscripts
 // before the app starts, like Tampermonkey at document-start.
 //
@@ -13,9 +13,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const APP_DIR = path.join(ROOT, 'app');
-const APP = path.join(APP_DIR, 'assets');
-const APP_HTML = path.join(APP_DIR, 'index.html');
+const APP = path.join(ROOT, 'app', 'Savings City_files');
 
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? args[i + 1] : def; };
@@ -93,24 +91,15 @@ const INDEX_CSS = fs.readdirSync(APP).find((f) => /^index-.*\.css$/.test(f));
 
 const TRANSPARENT_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 
-// The page: app/index.html (the real app's HTML, cleaned by tools/sanitize-app.js) with the
-// userscripts as classic scripts at the very start of <head>, before the app's module script
-// (= document-start). Without an index.html, a minimal page with the index-*.js/css is made.
 function page(plugins) {
   const tags = plugins.map((p) => `<script src="/plugins/${p.file}"></script>`).join('\n    ');
-  const comment = `<!-- userscripts (document-start): ${plugins.map((p) => p.id).join(', ') || 'none'} -->`;
-  if (fs.existsSync(APP_HTML)) {
-    return fs.readFileSync(APP_HTML, 'utf8')
-      .replace(/<head([^>]*)>/i, (m) => `${m}\n    ${comment}\n    ${tags}`)
-      .replace(/<title>([^<]*)<\/title>/i, '<title>$1 (lokaal)</title>');
-  }
   return `<!DOCTYPE html>
 <html lang="nl"><head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="/assets/css2" rel="stylesheet">
     <title>Savings City (lokaal)</title>
-    ${comment}
+    <!-- userscripts (document-start): ${plugins.map((p) => p.id).join(', ') || 'none'} -->
     ${tags}
     <script type="module" src="/assets/${INDEX_JS}"></script>
     <link rel="stylesheet" href="/assets/${INDEX_CSS}">
@@ -157,8 +146,7 @@ http.createServer((req, res) => {
   else if (p.startsWith('/assets/')) file = path.join(APP, path.basename(p));
   else if (p === '/logo.webp') file = path.join(APP, 'logo.webp');
   if (file && fs.existsSync(file)) return send(res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || (p.endsWith('css2') ? 'text/css' : 'application/octet-stream'));
-  else if (/^\/logo\/[\w.-]+$/.test(p) && fs.existsSync(path.join(APP, path.basename(p)))) file = path.join(APP, path.basename(p));
-  // Loading-screen images (logo/*.png) and the favicon aren't in the saved copy (unless added to app/assets).
+  // Loading-screen images (logo/*.png) and the favicon aren't in the saved copy.
   if (/\.(png|ico)$/.test(p)) return send(res, 200, TRANSPARENT_PNG, 'image/png');
   send(res, 404, 'not found', 'text/plain');
 }).listen(PORT, () => {

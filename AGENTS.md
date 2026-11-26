@@ -28,12 +28,14 @@ request, issue and comment.
   public and unrelated to the real app's owner.
 - **City data must be anonymous:** project names made up, description
   `Voorbeeldproject (geanonimiseerd).`, authors `Bouwer A`, `Bouwer B`, …, links `null` or
-  `https://example.com/`, fresh UUIDs, figures scrambled. Use `tools/anonymise-city.js`.
-- **App files must be cleaned before they're committed:** use `tools/sanitize-app.js` (below).
-  Never commit a "Save page as" HTML as it is: it contains the real host and the rendered page with
-  real project data.
-- **Run `node tools/check-privacy.js` before every commit** (CI runs it too, see
-  `.github/workflows/privacy.yml`). If it fails, fix the content – don't silence the check.
+  `https://example.com/`, fresh UUIDs, figures scrambled.
+- **App files are anonymised before they're committed** (see "Updating the app files"). Never
+  commit files from the real app as they are: a saved page contains the real host and real data.
+- **The guard:** `tools/check-privacy.js` runs on every push and pull request (GitHub Actions,
+  `.github/workflows/privacy.yml`) and before every `git push` from a clone with the hook enabled
+  (`git config core.hooksPath .githooks`; `npm install` does this). Enable the hook in your
+  clone and run `node tools/check-privacy.js` before committing. If it fails, fix the content –
+  don't silence, skip (`--no-verify`) or weaken the check.
 - Locally, put the real host, company and people's names in `.private-terms` (one per line;
   git-ignored, never commit it) and the check looks for those too. CI doesn't have this file.
 - If something private was given to you (in a prompt, an uploaded file, a log or screenshot), use
@@ -46,13 +48,12 @@ request, issue and comment.
 |---|---|
 | `savings-city-<feature>.user.js` | One userscript per feature (see the table in `README.md`). |
 | `savings-city-after-dark.user.js` | The loader users install: `@require`s every script from this repo's `main` branch. |
-| `app/index.html`, `app/assets/` | Cleaned copy of the real app: HTML shell, minified JS bundles, CSS, logo, font CSS. Read-only reference + what the local runner serves. Never edit the bundles. |
+| `app/Savings City.html`, `app/Savings City_files/` | Anonymised copy of the real app (browser "Save page as" + the lazily loaded `CityCanvas-*.js`): minified JS bundles, CSS, logo, Google Fonts CSS. Reference + what the local runner serves. Never edit the bundles' code. |
 | `local/server.js` | Serves `app/` with `/api/*` answered from a city JSON (in memory) and the scripts injected at document-start. |
 | `local/shot.js` | Headless Chromium screenshot of the local app (Playwright). |
 | `local/city.json` | Anonymous test city (the `/api/city` format). |
-| `tools/check-privacy.js` | The privacy check (URLs, host names, e-mail addresses, city data, `.private-terms`). |
-| `tools/sanitize-app.js` | Brings new files from the real app into `app/`, cleaned. |
-| `tools/anonymise-city.js` | Turns a real `/api/city` dump into an anonymous city. |
+| `tools/check-privacy.js` | The privacy guard (URLs, host names, e-mail addresses, city data, `.private-terms`). |
+| `.githooks/pre-push` | Runs the guard before every push (enable with `git config core.hooksPath .githooks`). |
 | `CONTEXT.md` | How the app works internally and how the scripts hook into it. Keep it current. |
 
 ## Conventions
@@ -63,26 +64,43 @@ request, issue and comment.
 - Keep `README.md` (the script table with versions) and `CONTEXT.md` up to date.
 - New shared needs (hooks, traps, borrowed classes) go into the core, not into each script.
 
-## Updating the app copy (new HTML/JS/CSS from the real app)
+## Updating the app files (only when a developer asks)
 
-The user will hand you the newest files of the real app (a "Save page as" folder, or files from
-DevTools → Network: `index-*.js`, the lazily loaded `CityCanvas-*.js`, `index-*.css`, `logo.webp`,
-the Google Fonts `css2`). Then:
+The app files in `app/` and the test city in `local/` are already in the repository; developing
+and testing needs nothing else. Only when a developer hands you newer files from the real app (a
+"Save page as" folder, files from DevTools → Network such as `index-*.js`, the lazily loaded
+`CityCanvas-*.js`, `index-*.css`, `logo.webp`, or an `/api/city` dump) do you update them – by
+hand, following these steps. Keep the given files outside the repository (a scratch folder, or
+`incoming/`, which is git-ignored).
 
-1. Put them in a scratch folder outside the repo (or `incoming/`, which is git-ignored).
-2. `node tools/sanitize-app.js <folder-or-files>` – writes `app/index.html` and `app/assets/`,
-   replaces older bundles with the same name prefix (one build at a time), and runs the privacy
-   check on the result. If the check fails because a bundle contains a private URL, don't commit
-   it: tell the user.
-3. Compare old and new bundles to see what changed (`git diff --stat app/`; for the minified code,
-   grep for the shapes `CONTEXT.md` mentions, e.g. the helpers the core finds by code shape).
-4. Fix the scripts that broke (minified names change every build; find things by shape/strings),
-   bump their versions, and test with the local runner.
-5. Update `CONTEXT.md` (bundle names and dates, what changed) and `README.md`.
-6. `node tools/check-privacy.js`, then commit.
-
-A new city dump from the real app: `node tools/anonymise-city.js dump.json local/city.json`
-(keep the dump itself out of the repo).
+1. **Bundles and CSS:** copy the new `index-*.js`, `CityCanvas-*.js`, `index-*.css` (and
+   `logo.webp` / `css2` if they changed) into `app/Savings City_files/` and delete the old
+   bundles with the same name prefix, so there is exactly one build (the local runner takes the
+   `index-*.js` / `index-*.css` it finds). Don't change their code. Search them for addresses
+   (`grep -oE 'https?://[^"\x60 ]+'`): if a bundle contains the real host or another private
+   address, stop and ask the developer what to do.
+2. **HTML:** replace `app/Savings City.html` with the new one, then anonymise it:
+   - every absolute URL to the real host (the "saved from url" comment, favicon, preloaded logos,
+     …) → `https://your-savings-city-host.example/…`;
+   - `./<name>_files/` paths → `./Savings City_files/` (rename the folder references if the page
+     was saved under another name), and point the bundle references at the bundles in step 1;
+   - the rendered page inside `<div id="root">`: real project names → made-up ones (like the test
+     city's: "Snelle Exportscript"), people's names → `Bouwer A`, …, totals (hours saved, AI
+     costs) and other real figures → the test city's values or made-up ones;
+   - anything else that identifies the organisation or a person.
+3. **City dump** → `local/city.json` (one project per line, `roads`, `revision`), per project:
+   a fresh UUID for `id` (keep nothing from the real ids), a made-up `name`, `description`
+   `Voorbeeldproject (geanonimiseerd).`, `authors` → `Bouwer A`, `Bouwer B`, … (the same person
+   keeps the same letter), `link` → `https://example.com/` or `null`, `time_estimated_no_ai`,
+   `time_spent_ai`, `budget_spent` × a random 0.7…1.3, rounded. Keep `gx`, `gy`, `facing`,
+   `color`, dates, `open_for_placement` and `roads` (the city's shape).
+4. Run `node tools/check-privacy.js` (with the real host and names in `.private-terms`, so it
+   checks for them too) and fix whatever it finds.
+5. See what changed in the app (`git diff --stat app/`; grep the new bundles for the shapes
+   `CONTEXT.md` mentions, e.g. the helpers the core finds by code shape), fix the scripts that
+   broke (minified names change every build; find things by shape/strings), bump their versions,
+   and test with the local runner.
+6. Update `CONTEXT.md` (bundle names and dates, what changed) and `README.md`, then commit.
 
 ## Testing
 

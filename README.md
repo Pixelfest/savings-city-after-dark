@@ -125,32 +125,26 @@ node local/shot.js 'http://localhost:8123/?plugins=core,graphics' city.png --wai
 - `CONTEXT.md` – how the app works internally and how the scripts hook into it. Read this first.
 - `AGENTS.md` (and `CLAUDE.md`) – instructions for coding agents: conventions, releases, and how to
   bring in a newer version of the app.
-- `app/` – the cleaned copy of the app: `index.html` and `assets/` (minified JS bundles, including
-  the lazily loaded 3D code `CityCanvas-*.js`, CSS, logo). Reference only – never edit it.
+- `app/` – an anonymised copy of the app (`Savings City.html` and `Savings City_files/`: minified JS
+  bundles, including the lazily loaded 3D code `CityCanvas-*.js`, CSS, logo). It's all in the
+  repository; the local runner serves it. Reference only – don't edit the bundles.
+- `local/city.json` – the anonymous test city.
 
-### Bringing in a newer version of the app
-
-When the real app changes, take its newest files (browser *Save page as*, plus the `CityCanvas-*.js`
-from DevTools → Network, which a saved page lacks) and let the sanitizer put them in `app/`:
-
-```bash
-node tools/sanitize-app.js ~/Downloads/savings-city-new/
-```
-
-It removes everything that points to where the files came from (the real address, the rendered
-page with real project data), replaces the old bundles, and runs the privacy check. Then fix and
-test the scripts against the new copy. A new city from the real app's `/api/city`:
-
-```bash
-node tools/anonymise-city.js ~/Downloads/city-dump.json local/city.json
-```
+When the real app changes, a developer can hand the newest app files to an agent; how to bring
+them in (anonymised) is described in `AGENTS.md` → "Updating the app files".
 
 ### Privacy
 
 This repository is public. It must never contain the real app's address or anything that could
 identify a person or the organisation behind it (only public libraries and placeholder addresses
-such as `example.com`). Check before every commit – GitHub Actions runs the same check on every
-push:
+such as `example.com`). A guard checks this on every push and pull request (GitHub Actions). Turn on
+the same check before every `git push` from your own clone (`npm install` does this too):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Or run it by hand:
 
 ```bash
 node tools/check-privacy.js

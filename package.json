@@ -8,8 +8,7 @@
     "start": "node local/server.js",
     "shot": "node local/shot.js",
     "check": "node tools/check-privacy.js",
-    "sanitize-app": "node tools/sanitize-app.js",
-    "anonymise-city": "node tools/anonymise-city.js"
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "playwright": "1.48.2"

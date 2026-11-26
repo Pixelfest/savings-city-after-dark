@@ -23,15 +23,14 @@ placeholder `https://your-savings-city-host.example/`.
   `facing` 0 = N, 1 = E, 2 = S, 3 = W (front door side).
 - The 3D code is in a lazily loaded chunk (`assets/CityCanvas-*.js`); it is not in a "Save page as"
   download – fetch it separately (DevTools → Network) when you need to read it.
-- A copy of the app is in `app/`: `index.html` + `assets/`
+- A copy of the app is in `app/`: `Savings City.html` + `Savings City_files/`
   (`index-CF0NHCg9.js` = React app + shared code, `CityCanvas-kvJpXrfx.js` = three.js r186 and the
   whole city/traffic/rendering code, `index-E9WejX2W.css` – all 26 Nov 2026; the HTML is from
-  24 Nov, logo, `css2` = the Google Fonts CSS). `index.html` is cleaned by `tools/sanitize-app.js`:
-  the rendered page (real project names and totals) and every reference to the real host are gone.
-  The local runner serves `index.html` and picks up whatever `index-*.js` / `index-*.css` is there.
-  Search the bundles rather than reading them: they're minified, one line per file
-  (e.g. `grep -o '.{300}isMeshBasicMaterial.{300}'`). When the live app changes, bring in the new
-  files with `node tools/sanitize-app.js <files>` (see `AGENTS.md` → "Updating the app copy").
+  24 Nov, logo). The copy is anonymised: the real host is replaced by the placeholder, the
+  project names in the saved page are made up and the totals are those of the test city. The local
+  runner picks up whatever `index-*.js` / `index-*.css` is there. Search it rather than reading it:
+  it's minified, one line per file (e.g. `grep -o '.{300}isMeshBasicMaterial.{300}'`). When a
+  developer brings in a newer copy, follow `AGENTS.md` → "Updating the app files".
 - Menu buttons live in `.hz-tr .menu-mini` (scripts add `button.icon-btn.small` there).
 
 ## Clock, season, daylight (26 Nov 2026 build)
@@ -358,7 +357,7 @@ kept knocking down everyone within its radius every frame, so the death toll kep
 
 **Preferred (since 25 Nov 2026): the local app.** `node local/server.js --port 8123 &` serves the
 saved copy in `app/` with `/api/*` answered from `local/city.json` (an anonymised `/api/city` dump, 93
-projects, made with `tools/anonymise-city.js`; write calls kept in memory) and injects the chosen scripts as classic `<script>` tags in
+projects; write calls kept in memory) and injects the chosen scripts as classic `<script>` tags in
 `<head>` before the app's module (= document-start). `node local/shot.js 'http://localhost:8123/?plugins=nuke' out.png [--eval js] [--wait ms]`
 renders it in headless Chromium (SwiftShader; `NODE_PATH=$(npm root -g)` for Playwright) with the
 welcome dialog suppressed – look at the PNG. For walk mode: click `#sc-walk-toggle`, one
