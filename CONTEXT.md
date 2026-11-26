@@ -420,3 +420,8 @@ Older approach, still useful for unit-level checks:
 - `local/harness.js` + `local/harness-layout.json`: fixed shots (stand at a point, aim at a point,
   fire, report events, screenshot). Residents and officers still need a placement hook for fixed
   targets.
+- Test hooks (for `local/harness.js` and by hand in the console): `scResidents.freeze(x, z)` pins
+  the walking adult nearest to (x, z) there (residents 1.23; `unfreeze(i)` lets them walk again);
+  `scCops.placeAt(x, z)` creates a still officer that can be shot (cops 1.9).
+- Headless Chromium runs the simulation slowly: the frame time step is clamped to 0.05 s, so
+  "1.8 s" on screen is less game time. Give the skinner's fall about 4 s before judging it.

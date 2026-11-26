@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.22
+// @version      1.23
 // @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -375,7 +375,7 @@
   }
 
   function step(p, dt) {
-    if (p.state === 'gone') return;
+    if (p.state === 'gone' || p.frozen) return;
     if (p.burn) { burnStep(p, dt); if (p.state !== 'down' && p.lie > 0) return; }   // writhing / getting up: stays put
     if (p.state === 'down') { p.fall = Math.min(1, p.fall + dt / FALL_SECONDS); return; }   // lies still
     if (p.parent) { follow(p, dt); return; }
@@ -614,6 +614,7 @@
   }
 
   function place(p, dt = 0) {
+    if (p.frozen) { p.x = p.fx; p.z = p.fz; p.h = p.fh; return; }   // test hook: stays where freeze() put them
     const [x, z] = edgePoint(p.a, p.dir, p.side, p.s);
     // stepping aside, measured away from the road (+) or towards it (−); with a child on the
     // building side the parent keeps a bit closer to the road. Eased in world space, so it doesn't
@@ -1263,6 +1264,21 @@
       const k = p.k || 1;
       return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE };
     },
+    // Test hooks: freeze(x, z, facing) pins the walking adult nearest to (x, z) at exactly that
+    // spot (returns their index, or -1); unfreeze(i) lets them walk again.
+    freeze(x, z, facing = 0) {
+      let bi = -1, bd = Infinity;
+      people.forEach((p, i) => {
+        if (p.state !== 'walk' || p.parent) return;
+        const d = Math.hypot(p.x - x, p.z - z);
+        if (d < bd) { bd = d; bi = i; }
+      });
+      if (bi < 0) return -1;
+      const p = people[bi];
+      p.frozen = true; p.fx = x; p.fz = z; p.fh = facing; p.x = x; p.z = z; p.h = facing;
+      return bi;
+    },
+    unfreeze(i) { const p = people[i]; if (p) p.frozen = false; },
     // An explosion at (x, z): everyone within knockRadius falls over (away from it), everyone
     // within panicRadius runs away for about panicSeconds. People indoors notice nothing.
     // Something scary (a gunshot) at (x, z): everyone outside within radius runs away from it.

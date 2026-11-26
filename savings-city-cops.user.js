@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.7
+// @version      1.9
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -419,6 +419,7 @@
       if (cop.burn) burnStep(cop, dt);
       if (cop.state === 'down') { cop.fall = Math.min(1, cop.fall + dt / 0.45); pose(cop); continue; }
       if (cop.state === 'gone') continue;
+      if (cop.still) { pose(cop); continue; }                      // test hook: placeAt()
       if (cop.burn && cop.state === 'fight') { pose(cop); continue; }   // on fire: no fighting (burnStep moves them)
       const dx = pl.x - cop.x, dz = pl.z - cop.z, dist = Math.hypot(dx, dz) || 1e-6;
       cop.t += dt;
@@ -720,6 +721,22 @@
     window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: cop.x, z: cop.z, cause: how === 'gib' ? 'blast' : how, who: 'cop' } }));
     return true;
   }
+  // test hook: an officer that stands still at (x, z) and can be shot (returns its index, or -1)
+  function placeOfficer(x, z, h = 0) {
+    if (!geo && !model()) return -1;
+    if (!geo || !K || !mat) return -1;
+    const cop = { x, z, h, state: 'fight', t: 0, out: [1, 0], nextShot: Infinity, unit: null, steady: 0.5, shots: 0, voice: 500,
+      still: true, fall: 0, lie: 0, axis: null };
+    cop.mesh = new K.Mesh(geo, mat);
+    cop.mesh.castShadow = true; cop.mesh.frustumCulled = false;
+    cop.head = new K.Mesh(headGeo, mat);
+    cop.head.position.y = HEAD_Y; cop.head.castShadow = true; cop.head.frustumCulled = false;
+    cop.mesh.add(cop.head);
+    W().scene.add(cop.mesh);
+    cops.push(cop);
+    pose(cop);
+    return cops.length - 1;
+  }
   // skinned (the skinner script): the officer is taken out of the city; returns their place or null
   function skinOfficer(i) {
     const cop = cops[i];
@@ -846,7 +863,7 @@
   whenCore((c) => c.onFrame(frame));
   window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head, burning: !!c.burn })),
     cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar(),
-    hurt: () => hurt(), skin: (i) => skinOfficer(i),
+    hurt: () => hurt(), skin: (i) => skinOfficer(i), placeAt: (x, z, h) => placeOfficer(x, z, h),
     // set officer i (as in officers()) on fire; the fire came from (fromX, fromZ)
     ignite: (i, fromX, fromZ) => ignite(cops[i], fromX, fromZ),
     burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };

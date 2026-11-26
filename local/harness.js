@@ -48,8 +48,25 @@ fs.mkdirSync(outDir, { recursive: true });
   await page.mouse.down(); await page.mouse.up();          // the first click takes the pointer lock
   await page.waitForTimeout(300);
 
+  // place the test subjects first: { name, kind: "resident" | "officer", x, z }
+  const placed = {};
+  for (const sub of layout.place || []) {
+    const r = await page.evaluate(({ kind, x, z }) => (kind === 'officer'
+      ? window.scCops.placeAt(x, z, 0)
+      : window.scResidents.freeze(x, z, 0)), sub);
+    placed[sub.name] = { ...sub, index: r };
+    console.log('placed', sub.name, sub.kind, 'index', r);
+  }
+  await page.waitForTimeout(300);
+
   const report = [];
   for (const shot of layout.shots) {
+    // a shot may name a placed subject: stand 0.12 tiles west of it, look at its chest
+    if (shot.target) {
+      const t = placed[shot.target];
+      shot.from = { x: t.x - 0.12, z: t.z };
+      shot.at = { x: t.x, y: 0.1, z: t.z };
+    }
     await page.evaluate(({ from, eye, at, key }) => {
       const w = window.scWalk;
       w.moveTo(from.x, from.z);
@@ -63,11 +80,22 @@ fs.mkdirSync(outDir, { recursive: true });
     await page.waitForTimeout(150);
     const weapon = await page.evaluate(() => window.scWalk.weapon);
     await page.mouse.down(); await page.mouse.up();        // the shot
-    await page.waitForTimeout(shot.wait || 1500);
+    // headless: the click re-takes the pointer lock and the view jumps; the shot already went
+    // off along the aim, so aim again for the pictures
+    await page.evaluate(({ from, at }) => { const w = window.scWalk; w.moveTo(from.x, from.z); w.lookAt(at.x, at.y, at.z); }, { from: shot.from, at: shot.at });
+    // one frame per time in `frames` (ms after the shot), else one frame after `wait`
+    const times = shot.frames || [shot.wait || 1500];
+    const files = [];
+    let last = 0;
+    for (const t of times) {
+      await page.waitForTimeout(t - last); last = t;
+      const f = path.join(outDir, `${shot.name}-${t}ms.png`);
+      await page.screenshot({ path: f });
+      files.push(f);
+    }
     const events = await page.evaluate(() => window.__events);
-    const file = path.join(outDir, shot.name + '.png');
-    await page.screenshot({ path: file });
-    const line = { name: shot.name, weapon, expectedWeapon: shot.weapon, events, screenshot: file };
+    const file = files[files.length - 1];
+    const line = { name: shot.name, weapon, expectedWeapon: shot.weapon, events, screenshots: files };
     report.push(line);
     console.log(JSON.stringify({ name: shot.name, weapon, kills: events.filter((e) => e.type === 'sc:kill').map((e) => e.detail.cause) }));
   }

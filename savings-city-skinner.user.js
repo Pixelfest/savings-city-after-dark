@@ -70,7 +70,7 @@
 
   // ---------- the weapon ----------
   const def = {
-    id: 'skinner', name: 'Huidschiller', key: KEY, interval: INTERVAL, kick: 0.5,
+    id: 'skinner', name: 'Huidschiller', key: KEY, interval: INTERVAL, kick: 0.1,
     at: [0.14, -0.12, -0.2], aim: 1.1, roll: -0.03, muzzle: [0, 0.005, -0.42],
     build({ builder, mesh, makeFlash, colors }) {
       const { DARK, GRIP, SKIN, SLEEVE, METAL } = colors;
