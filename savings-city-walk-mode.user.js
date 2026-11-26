@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.31
+// @version      1.32
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -1491,18 +1491,33 @@
     if (!DESTRUCTIBLE_PROPS || !appScene || !bulletParts()) return;
     const C = findColorClass(); if (!C) return;
     const meshes = [], inst = [];
+    const lin = (hex) => { const c = new C(hex); return [c.r, c.g, c.b]; };
+    const POLE = lin('#4b5058'), LAMP = lin('#f3e3a6'), TRUNK = lin('#8a5a3b'), WOOD = lin('#a0703c'), STONE = lin('#cfc6b6'), WATER = lin('#69c3e6');
+    const PROP_COLOURS = [POLE, LAMP, TRUNK, WOOD, STONE, WATER];
+    const sameColour = (col, i, c) => Math.abs(col.getX(i) - c[0]) < 0.003 && Math.abs(col.getY(i) - c[1]) < 0.003 && Math.abs(col.getZ(i) - c[2]) < 0.003;
+    // does an indexed mesh hold any prop's colour? (the highways' lamps are merged that way)
+    const holdsProps = (g) => {
+      const col = g.attributes.color, idx = g.index, n = idx ? idx.count : col.count;
+      for (let t = 0; t < n; t += 3) {
+        const v = idx ? idx.getX(t) : t;
+        for (const c of PROP_COLOURS) if (sameColour(col, v, c)) return true;
+      }
+      return false;
+    };
     appScene.traverse((o) => {
       if (isOurs(o)) return;
       if (o.isInstancedMesh) { const p = o.geometry && o.geometry.parameters; if (p && Math.abs(p.width - 0.045) < 1e-4 && Math.abs(p.height - 0.12) < 1e-4) inst.push(o); return; }
-      if (o.isMesh && o.geometry && !o.geometry.index && o.geometry.attributes.color && o.geometry.attributes.position) meshes.push(o);
+      if (!o.isMesh || !o.geometry || !o.geometry.attributes.color || !o.geometry.attributes.position) return;
+      // merged road-side meshes (the highways' lamps) are indexed: flatten those that hold props, so
+      // their triangles can be read and cut like the rest (other indexed meshes, e.g. buildings, stay as they are)
+      if (o.geometry.index) { if (!holdsProps(o.geometry)) return; const old = o.geometry; o.geometry = old.toNonIndexed(); old.dispose(); }
+      meshes.push(o);
     });
     const sig = meshes.map((m) => m.geometry.uuid).join() + '|' + inst.map((m) => m.uuid).join();
     if (sig === propSig) return;
     propSig = sig;
     const old = props; const next = new Map();
-    const lin = (hex) => { const c = new C(hex); return [c.r, c.g, c.b]; };
-    const POLE = lin('#4b5058'), LAMP = lin('#f3e3a6'), TRUNK = lin('#8a5a3b'), WOOD = lin('#a0703c'), STONE = lin('#cfc6b6'), WATER = lin('#69c3e6');
-    const add = (key, make) => { let p = next.get(key); if (!p) { const before = old.get(key); p = make(); if (before) { p.hits = before.hits; p.copy = before.copy; p.state = before.state; p.fall = before.fall; p.wobble = before.wobble; } next.set(key, p); } return p; };
+    const add =(key, make) => { let p = next.get(key); if (!p) { const before = old.get(key); p = make(); if (before) { p.hits = before.hits; p.copy = before.copy; p.state = before.state; p.fall = before.fall; p.wobble = before.wobble; } next.set(key, p); } return p; };
 
     // --- merged trees and lamps ---
     for (const mesh of meshes) {
