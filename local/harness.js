@@ -73,7 +73,6 @@ fs.mkdirSync(outDir, { recursive: true });
       shot.from = { x: t.x - dist, z: t.z };
       shot.at = { x: t.x, y: 0.1, z: t.z };
     }
-    await page.evaluate((fill) => { window.scSkinnerFill = fill || 0; }, shot.fill);   // test hook: extra blobs
     await page.evaluate(({ from, eye, at, key }) => {
       const w = window.scWalk;
       w.moveTo(from.x, from.z);

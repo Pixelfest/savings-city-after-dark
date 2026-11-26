@@ -407,19 +407,24 @@ Older approach, still useful for unit-level checks:
 - Several scripts hooking the same thing (prototype trap, `forEach`) must chain, not replace.
 - Don't search all city triangles per hit/frame – use bounding boxes and caches.
 
-## Skinner (savings-city-skinner 1.0, residents 1.22, cops 1.7)
+## Skinner (savings-city-skinner 1.5, residents 1.24, cops 1.12)
 
 - A walk-mode weapon (key 5, `scWalkWeapons.push`). Its beam takes the nearest resident
   (`scResidents.hit`) or officer (a cylinder test over `scCops.officers()`) before a wall or car.
   On arrival it calls `scResidents.skin(i)` or `scCops.skin(i)`: the person or officer leaves the
-  city (state `gone`, `sc:kill` cause `skinned`) and their place `{ x, z, y, h, k }` is returned.
+  city (state `gone`, `sc:kill` cause `skinned`) and their place `{ x, z, y, h, k, th }` is
+  returned; `th` is their heading (the figure's front is local +z turned by `th`), so the insides
+  face the way the person was walking.
 - The script draws the body itself: one InstancedMesh per kind (blobs, rods, skin, rings), with
-  slot pools. Phases: peel (0.4 s, ring + swelling skin), exposed (1 s, interior), fall (gravity,
-  bounce, push, spin), pile (20 s, then fade). At most 6 bodies are moving and 30 in all.
+  slot pools. The insides are built at once, inside the skin: about 90 overlapping red blobs on a
+  jittered grid fill the figure's torso and legs (`flesh()`, new jitter per body), plus organs, a
+  skull, ribs, spine and leg bones (`INSIDE`), all within the resident figure's boxes (no arms:
+  the figure has none). Phases: peel (0.9 s, a rising ring; the skin shells – the figure's own
+  legs, torso and head boxes – roll down, head first), exposed (1 s, heart pulses), fall
+  (gravity, bounce, push, spin), pile (20 s, then fade). At most 6 bodies are moving and 30 in all.
 - The fall calls `scResidents.spatter` for blood and `scResidents.avoid` around the heap.
 - `local/harness.js` + `local/harness-layout.json`: fixed shots (stand at a point, aim at a point,
-  fire, report events, screenshot). Residents and officers still need a placement hook for fixed
-  targets.
+  fire, report events, screenshots at set times). A shot can name a placed subject (`target`).
 - Test hooks (for `local/harness.js` and by hand in the console): `scResidents.freeze(x, z)` pins
   the walking adult nearest to (x, z) there (residents 1.23; `unfreeze(i)` lets them walk again);
   `scCops.placeAt(x, z)` creates a still officer that can be shot (cops 1.9).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -51,7 +51,7 @@
   const AVOID = 0.035;             // people keep this far (tiles) from a heap
   const ENERGY = '#5ff3ff';        // the cyan energy of the skinner and the ring
   const VOLUME = 0.35;
-  const CAP_BLOBS = 4000, CAP_RODS = 720, CAP_SKIN = 220, CAP_RINGS = 40;
+  const CAP_BLOBS = 4000, CAP_RODS = 900, CAP_SKIN = 220, CAP_RINGS = 40;
   // --------------------------------------------------------------
 
   const H_PERSON = 0.135;          // a standing person (residents' scale)
@@ -314,17 +314,34 @@
   const ROLL = 0.35;   // seconds one piece of skin takes to roll back
 
   const bodies = [];
-  // Extra red blobs filling the torso and legs. Test hook: window.scSkinnerFill = how many (default 0).
-  function fillers() {
-    const n = Math.max(0, Math.min(120, (window.scSkinnerFill | 0)));
+  // The red mass that fills the body: overlapping blobs on a jittered grid, packed into the
+  // figure's torso (x ±0.016, y 0.05–0.102, z ±0.01) and its two legs (x ±0.013, y 0–0.048,
+  // z ±0.008), up to the edges, so the skinned body reads as solid red flesh. They sit a little
+  // back from the front, so the ribs, breastbone and leg bones still show through in places.
+  // New jitter for every body.
+  const FLESH = ['organ', 'organ', 'organ', 'gut', 'lung'];
+  function flesh() {
     const out = [];
-    for (let k = 0; k < n; k++) {
-      const g = (k * 0.618034 + 0.31) % 1, h = (k * 0.381966 + 0.7) % 1;
-      const r = 0.0035 + 0.002 * ((k * 0.41) % 1), ci = k % 5;   // small: 3.5–5.5 thousandths of a tile
-      if (k % 3 === 0) {                                          // legs: x ±0.013, z ±0.008
-        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.013 - r), 0.004 + r + h * (0.044 - 2 * r), ((k * 0.7549) % 1 - 0.5) * 2 * (0.008 - r), 2 * r, 2 * r, 2 * r]);
-      } else {                                                    // torso: x ±0.016, z ±0.01, y 0.052–0.1
-        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.016 - r), 0.052 + r + h * (0.048 - 2 * r), ((k * 0.7549) % 1 - 0.5) * 2 * (0.01 - r), 2 * r, 2 * r, 2 * r]);
+    const blob = (x, y, z, d) => {
+      const c = FLESH[(Math.random() * FLESH.length) | 0];
+      out.push(['blob', c, (Math.random() * 5) | 0, x, y, z, d * rnd(0.85, 1.15), d * rnd(0.8, 1.2), d * rnd(0.85, 1.15), rnd(0, 3), rnd(0, 3), 0]);
+    };
+    // torso: 4 across, 7 up, 2 deep (back layer full, front layer behind the ribs)
+    for (let iy = 0; iy < 7; iy++) {
+      for (let ix = 0; ix < 4; ix++) {
+        const x = -0.012 + ix * 0.008 + rnd(-0.0015, 0.0015), y = 0.053 + iy * 0.0078 + rnd(-0.0015, 0.0015);
+        blob(x, y, -0.005 + rnd(-0.001, 0.001), rnd(0.009, 0.011));
+        blob(x + rnd(-0.002, 0.002), y + rnd(-0.002, 0.002), 0.002 + rnd(-0.001, 0.001), rnd(0.007, 0.009));
+      }
+    }
+    // legs: two columns per leg, 6 up, 2 deep
+    for (const side of [-1, 1]) {
+      for (let iy = 0; iy < 6; iy++) {
+        for (const ix of [0.0035, 0.0095]) {
+          const x = side * ix + rnd(-0.001, 0.001), y = 0.006 + iy * 0.0078 + rnd(-0.0012, 0.0012);
+          blob(x, y, -0.003 + rnd(-0.001, 0.001), rnd(0.007, 0.0085));
+          if (iy % 2 === 0) blob(x, y + 0.004, 0.002, rnd(0.006, 0.0075));
+        }
       }
     }
     return out;
@@ -385,7 +402,7 @@
   // the insides appear as the skin goes
   function showInside(b) {
     b.parts = [];
-    for (const [pool, col, ci, lx, ly, lz, sx, sy, sz, rx = 0, ry = 0, rz = 0] of INSIDE.concat(fillers())) {
+    for (const [pool, col, ci, lx, ly, lz, sx, sy, sz, rx = 0, ry = 0, rz = 0] of flesh().concat(INSIDE)) {
       const hex = HEX[col][ci % HEX[col].length];
       const slot = take(pools[pool], hex);
       if (slot < 0) continue;

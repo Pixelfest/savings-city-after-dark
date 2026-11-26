@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.11
+// @version      1.12
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -857,8 +857,16 @@
     const pl = w.player;
     if (lastPl && dt > 0) plSpeed = plSpeed * 0.8 + 0.2 * Math.hypot(pl.x - lastPl.x, pl.z - lastPl.z) / dt;
     lastPl = { x: pl.x, z: pl.z };
-    try { step(dt, performance.now()); } catch (e) { console.warn('[cops]', e); }
-    try { stepBurgers(dt); } catch (e) { console.warn('[cops] burgers', e); }
+    try { step(dt, performance.now()); } catch (e) { warnOnce('[cops]', e); }
+    try { stepBurgers(dt); } catch (e) { warnOnce('[cops] burgers', e); }
+  }
+  // the loop runs every frame: a repeating error is logged once, not 60 times a second
+  const warned = new Set();
+  function warnOnce(tag, e) {
+    const k = tag + (e && e.message);
+    if (warned.has(k)) return;
+    warned.add(k);
+    console.warn(tag, e);
   }
   whenCore((c) => c.onFrame(frame));
   window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head, burning: !!c.burn })),
