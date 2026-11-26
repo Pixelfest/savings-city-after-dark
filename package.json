@@ -3,12 +3,15 @@
   "private": true,
   "description": "Tampermonkey userscripts for the Savings City app, with a local copy of the app to develop and test on.",
   "license": "UNLICENSED",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node local/server.js",
     "shot": "node local/shot.js",
     "check": "node tools/check-privacy.js",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "check:version": "node tools/check-loader-version.js"
   },
   "devDependencies": {
     "playwright": "1.48.2"

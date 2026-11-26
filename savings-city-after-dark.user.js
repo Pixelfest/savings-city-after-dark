@@ -1,29 +1,29 @@
 // ==UserScript==
 // @name         Savings City – After Dark (loader)
 // @namespace    savings-city-tweaks
-// @version      1.14
+// @version      1.15
 // @description  Loads all Savings City After Dark scripts from GitHub, so you install one script and get every update.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-after-dark.user.js
 // @downloadURL  https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-after-dark.user.js
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-core.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-buildings.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-bodycount.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-car-tyres.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-auto-layout.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-graphics.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-walk-mode.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-residents.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-rocket-launcher.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-flamethrower.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-cops.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-heli-crane.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-billboard.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-drive.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-nuke.user.js?v=1.14
-// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-monster.user.js?v=1.14
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-core.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-buildings.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-bodycount.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-car-tyres.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-auto-layout.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-graphics.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-walk-mode.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-residents.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-rocket-launcher.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-flamethrower.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-cops.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-heli-crane.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-billboard.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-drive.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-nuke.user.js?v=1.15
+// @require      https://raw.githubusercontent.com/Pixelfest/savings-city-after-dark/main/savings-city-monster.user.js?v=1.15
 // ==/UserScript==
 
 /*
@@ -40,4 +40,4 @@
  *   "Check for userscript updates" in its menu) it fetches all scripts fresh.
  * - The console shows which loader version runs: "[Savings City After Dark] loader x.y".
  */
-console.info('[Savings City After Dark] loader 1.14');
+console.info('[Savings City After Dark] loader 1.15');
