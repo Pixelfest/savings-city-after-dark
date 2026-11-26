@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.5
+// @version      1.6
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -16,8 +16,10 @@
  * - The shot: a beam from the skinner. It hits the nearest resident or officer on the line before
  *   a wall or car; the beam's arrival skins them (residents' and cops' skin(): they leave the city
  *   and get counted as "skinned" by the bodycount).
- * - Peel (0.9 s): an energy ring rises through the body; the pale skin rolls back piece by piece
- *   (head first, then torso and legs), so the insides show through.
+ * - Peel (0.9 s): an energy ring rises through the body; the pale skin is pulled straight up, piece
+ *   by piece (head first, then torso and legs), off the body, so the insides show through.
+ * - Float: the skin pieces then drift down through the air and settle on the floor a few metres
+ *   from the body (2–4 m), a little swaying on the way, lying flat.
  * - Inside (from the start, under the skin): a red heart that pulses, lungs, liver, stomach,
  *   intestines, muscle, a bone skull with eye sockets, jaw and teeth, ribs, spine and leg bones.
  *   Exposed (1 s): the insides, after the skin is gone.
@@ -311,7 +313,10 @@
     [0, 0.076, 0, 0.036, 0.055, 0.024, 0.2],          // torso
     [0, 0.116, 0, 0.026, 0.024, 0.026, 0],            // head
   ];
-  const ROLL = 0.35;   // seconds one piece of skin takes to roll back
+  const ROLL = 0.35;   // seconds one piece of skin takes to be pulled up
+const PULL = 0.9;    // how far the skin is pulled up, in body heights
+const FLOAT_TIME = 1.8;          // seconds the skin takes to float down to the floor
+const FLOAT_DIST = [0.12, 0.2];  // tiles (2.4–4 m) from the body where the skin lands
 
   const bodies = [];
   // The red mass that fills the body: overlapping blobs on a jittered grid, packed into the
@@ -374,7 +379,7 @@
     if (moving.length >= MAX_ACTIVE) hurry(moving[0]);      // the oldest one drops straight to its fall
 
     const th = typeof info.th === 'number' ? info.th : Math.atan2(-d.x, -d.z);   // their own front, else towards the shooter
-    const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, th, dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
+    const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, th, a: rnd(0, Math.PI * 2), dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
     b.ring = take(pools.ring, HEX.ring[0]);
     for (const [lx, ly, lz, sx, sy, sz, delay] of SKIN_SHELL) {
       b.skin.push({ slot: take(pools.skin, HEX.skin[0]), lx: lx * sc, ly: ly * sc, lz: lz * sc, sx: sx * sc, sy: sy * sc, sz: sz * sc, delay });
@@ -392,11 +397,43 @@
   // the shot's skin is gone at once: the body moves on to its fall (for the cap)
   function hurry(b) { b.t = PEEL_TIME + EXPOSED_TIME; }
 
-  function releaseSkin(b) {
-    for (const p of b.skin) give(pools.skin, p.slot);
-    for (const f of b.flaps) give(pools.skin, f.slot);
-    b.skin = []; b.flaps = [];
+  // the peel is over: the skin pieces (and the flakes) start to float down to the floor, a few metres
+  // away from the body, each landing flat where it lands
+  function startFloat(b) {
+    const h = H_PERSON * b.sc, lift = PULL * h;
+    const pieces = [];
+    for (const s of b.skin) {
+      pieces.push({ slot: s.slot, sx: s.sx, sy: s.sy, sz: s.sz, delay: rnd(0, 0.15),
+        from: local(b, s.lx, s.ly + lift, s.lz), rot0: [0, b.th, 0] });
+    }
+    for (const f of b.flaps) {
+      pieces.push({ slot: f.slot, sx: f.sx, sy: f.sy, sz: f.sz, delay: rnd(0, 0.15),
+        from: [b.x + f.lx + f.vx * PEEL_TIME, b.y + f.ly + f.vy * PEEL_TIME, b.z + f.lz + f.vz * PEEL_TIME],
+        rot0: [f.rx + PEEL_TIME * 6, f.ry + PEEL_TIME * 4, f.rz] });
+    }
+    const n = pieces.length;
+    pieces.forEach((p, i) => {
+      const ang = b.a + (i / n) * Math.PI * 2 + rnd(-0.3, 0.3), dist = rnd(...FLOAT_DIST);
+      p.to = [b.x + Math.cos(ang) * dist, b.y + p.sz / 2, b.z + Math.sin(ang) * dist];   // lying flat: thin side up
+      p.rot1 = [Math.PI / 2, 0, rnd(0, Math.PI)];
+      p.sway = rnd(0, Math.PI * 2);
+    });
     give(pools.ring, b.ring); b.ring = -1;
+    b.skin = pieces; b.flaps = [];
+  }
+
+  // where each skin piece is while it floats down (and fades with the heap)
+  function floatSkin(b) {
+    const k = b.phase === 'fade' ? Math.max(0, 1 - b.fadeT / PILE_FADE) : 1;
+    for (const p of b.skin) {
+      const q = Math.min(1, Math.max(0, (b.t - PEEL_TIME - p.delay) / FLOAT_TIME));
+      const e = q * q * (3 - 2 * q), sway = Math.sin(b.t * 2.2 + p.sway) * 0.006 * Math.sin(q * Math.PI);
+      const x = p.from[0] + (p.to[0] - p.from[0]) * e + sway;
+      const y = p.from[1] + (p.to[1] - p.from[1]) * e + Math.abs(sway) * 0.5;
+      const z = p.from[2] + (p.to[2] - p.from[2]) * e + sway * 0.7;
+      const rx = p.rot0[0] + (p.rot1[0] - p.rot0[0]) * e, ry = p.rot0[1] + (p.rot1[1] - p.rot0[1]) * e, rz = p.rot0[2] + (p.rot1[2] - p.rot0[2]) * e;
+      put(pools.skin, p.slot, x, y, z, rx, ry, rz, p.sx * k, p.sy * k, p.sz * k);
+    }
   }
 
   // the insides appear as the skin goes
@@ -459,8 +496,8 @@
     if (all || force) { b.phase = 'pile'; b.pileT = 0; }
   }
 
-  // the peel: the energy ring rises; each piece of skin shrinks towards its bottom edge (rolls back),
-  // the head first, so the insides show through from the top down
+  // the peel: the energy ring rises; each piece of skin is pulled straight up, off the body, the head
+  // first, so the insides show through from the top down
   function peel(b) {
     const p = Math.min(1, b.t / PEEL_TIME), sc = b.sc, h = H_PERSON * sc;
     if (b.ring >= 0) {
@@ -468,15 +505,13 @@
       put(pools.ring, b.ring, b.x, b.y + h * p * 0.95 + 0.002, b.z, 0, 0, 0, r, 1, r);
     }
     for (const s of b.skin) {
-      const q = Math.min(1, Math.max(0, (b.t - s.delay) / ROLL)), left = 1 - q;
-      const height = s.sy * left;
-      const [X, Y, Z] = local(b, s.lx, s.ly - s.sy / 2 + height / 2, s.lz);
-      put(pools.skin, s.slot, X, Y, Z, 0, b.th, 0, s.sx, Math.max(height, 1e-5), s.sz);
+      const q = Math.min(1, Math.max(0, (b.t - s.delay) / ROLL)), up = q * q * (3 - 2 * q);   // eased
+      const [X, Y, Z] = local(b, s.lx, s.ly + up * PULL * h, s.lz);
+      put(pools.skin, s.slot, X, Y, Z, 0, b.th, 0, s.sx, s.sy, s.sz);
     }
     for (const f of b.flaps) {
-      const k = Math.max(0, 1 - p);
       put(pools.skin, f.slot, b.x + f.lx + f.vx * b.t, b.y + f.ly + f.vy * b.t, b.z + f.lz + f.vz * b.t,
-        f.rx + b.t * 6, f.ry + b.t * 4, f.rz, f.sx * k, f.sy * k, f.sz * k);
+        f.rx + b.t * 6, f.ry + b.t * 4, f.rz, f.sx, f.sy, f.sz);
     }
   }
 
@@ -488,9 +523,10 @@
       b.t += dt;
       if (b.phase === 'peel') {
         if (b.t < PEEL_TIME) { peel(b); continue; }
-        releaseSkin(b);                                      // the skin is gone
+        startFloat(b);                                       // the skin is off: it floats down
         b.phase = 'exposed';
       }
+      if (b.skin.length) floatSkin(b);
       if (b.phase === 'exposed') {
         if (b.t < PEEL_TIME + EXPOSED_TIME) {
           for (const p of b.parts) if (p.heart) {            // the heart keeps beating

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.32
+// @version      1.33
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -375,6 +375,126 @@
     }
   }
 
+  // ---------- sky: a dome around you with a gradient; at night it is dark and full of stars ----------
+  // The gradient follows the sun's altitude: day (blue to pale at the horizon), dusk and dawn (an
+  // orange glow at the horizon, a violet-blue above), night (near black, stars that twinkle).
+  // The dome is one mesh with vertex colours, centred on the camera, drawn first.
+  const SKY_DOME = true;          // a gradient sky while walking (off: the flat SKY colour)
+  const SKY_STARS = 420;          // stars on the dome (they show at night)
+  const SKY_RADIUS = 300;         // the dome's distance from you (the camera reaches 400)
+  const SKY_RINGS = 18, SKY_SEGS = 40;   // the dome's resolution
+  const SKY_PALETTE = {           // colours (hex)
+    dayTop: '#3d7fd6', dayHorizon: '#cde7f7',
+    duskTop: '#3b4a8e', glow: '#ff8a4a',   // dusk and dawn: violet-blue above, orange at the horizon
+    nightTop: '#02040c', nightHorizon: '#0b1331',
+  };
+  const DEG = Math.PI / 180;
+  // hex (sRGB) → linear RGB: vertex colours go to the screen through the renderer's colour conversion
+  const hexRGB = (h) => [1, 3, 5].map((i) => (parseInt(h.slice(i, i + 2), 16) / 255) ** 2.2);
+  const PAL = Object.fromEntries(Object.entries(SKY_PALETTE).map(([k, v]) => [k, hexRGB(v)]));
+  const mixRGB = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const smoothstep = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+  const skyRnd = (a, b) => a + Math.random() * (b - a);
+  let skyMesh = null, skySun = null, skyOverride = null, skyAcc = 0, skyT = 0;
+  let skyVertKind = null, skyCol = null, skyStarTint = [], skyStarInfo = [];
+  let skyStarCols = null;
+
+  // colour of the sky at an elevation (degrees above the horizon), for a day-ness (0 night … 1 day)
+  // and the twilight amount (1 around sunrise and sunset)
+  function skyRGB(elev, dayness, tw) {
+    const e = Math.max(0, elev);
+    const up = smoothstep(0, 42, e), hz = Math.exp(-((e / 24) ** 2));   // hz: 1 at the horizon, fading up
+    const night = mixRGB(PAL.nightHorizon, PAL.nightTop, up);
+    const day = mixRGB(PAL.dayHorizon, PAL.dayTop, up);
+    const c = mixRGB(night, day, dayness);
+    return mixRGB(c, mixRGB(PAL.glow, PAL.duskTop, up), tw * (0.3 + 0.7 * hz));
+  }
+
+  // the sun's altitude in degrees (the sun is the app's directional light)
+  function sunAltitude() {
+    if (skyOverride !== null) return skyOverride;
+    if (!skySun || !skySun.target) return 40;
+    const p = skySun.position, t = skySun.target.position;
+    const dx = p.x - t.x, dy = p.y - t.y, dz = p.z - t.z, l = Math.hypot(dx, dy, dz);
+    return l < 1e-9 ? 40 : Math.asin(dy / l) / DEG;
+  }
+
+  function buildSky() {
+    const K = window.scCore && window.scCore.classes && window.scCore.classes();
+    if (!K || !K.Geometry || !K.Attr || !K.Basic || !K.Mesh || !K.Color) return false;
+    const R = SKY_RADIUS, pos = [], kind = [];
+    const elevOf = (i) => -8 + (98 * i) / SKY_RINGS;                      // degrees; the bottom ring sits under the ground
+    const at = (e, a) => [R * Math.cos(e) * Math.cos(a), R * Math.sin(e), R * Math.cos(e) * Math.sin(a)];
+    for (let j = 0; j < SKY_SEGS; j++) {
+      const a0 = (j / SKY_SEGS) * Math.PI * 2, a1 = ((j + 1) / SKY_SEGS) * Math.PI * 2;
+      for (let i = 0; i < SKY_RINGS; i++) {
+        const e0 = elevOf(i) * DEG, e1 = elevOf(i + 1) * DEG;
+        const v00 = at(e0, a0), v01 = at(e0, a1), v10 = at(e1, a0), v11 = at(e1, a1);
+        for (const [v, r] of [[v00, i], [v10, i + 1], [v11, i + 1], [v00, i], [v11, i + 1], [v01, i]]) { pos.push(...v); kind.push(r); }
+      }
+    }
+    // stars: small quads flat on the dome, in the upper half
+    for (let k = 0; k < SKY_STARS; k++) {
+      const el = Math.asin(skyRnd(0.04, 1)), az = skyRnd(0, Math.PI * 2);
+      const d = [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)];
+      // two directions flat on the dome, both at right angles to the star's direction d
+      let u = [d[2], 0, -d[0]], ul = Math.hypot(u[0], u[2]);
+      if (ul < 1e-4) { u = [1, 0, 0]; ul = 1; }
+      u = [u[0] / ul, 0, u[2] / ul];
+      const v = [d[1] * u[2], d[2] * u[0] - d[0] * u[2], -d[1] * u[0]];   // d × u (unit, since d ⟂ u)
+      const s = R * skyRnd(0.0012, 0.0022) * (Math.random() < 0.12 ? 1.7 : 1);   // half size: a pixel or two
+      const corner = (a, b) => [d[0] * R + (u[0] * a + v[0] * b) * s, d[1] * R + (u[1] * a + v[1] * b) * s, d[2] * R + (u[2] * a + v[2] * b) * s];
+      const c0 = corner(-1, -1), c1 = corner(1, -1), c2 = corner(1, 1), c3 = corner(-1, 1);
+      for (const q of [c0, c1, c2, c0, c2, c3]) { pos.push(...q); kind.push(-(k + 1)); }
+      skyStarInfo.push({ el: el / DEG, b: skyRnd(0.35, 1) ** 2, tw: skyRnd(0.6, 2.4), ph: skyRnd(0, 6.28) });
+      skyStarTint.push(Math.random() < 0.6 ? [1, 1, 1] : Math.random() < 0.5 ? [0.8, 0.9, 1] : [1, 0.9, 0.75]);
+    }
+    const n = kind.length;
+    skyVertKind = Int32Array.from(kind);
+    skyCol = new Float32Array(n * 3);
+    skyStarCols = new Float32Array(SKY_STARS * 3);
+    const g = new K.Geometry();
+    g.setAttribute('position', new K.Attr(new Float32Array(pos), 3));
+    const colAttr = new K.Attr(skyCol, 3);
+    skyCol = colAttr.array;                     // the borrowed attribute class copies its array: write into its own
+    g.setAttribute('color', colAttr);
+    skyMesh = new K.Mesh(g, new K.Basic({ vertexColors: true, side: 2, depthWrite: false, fog: false }));
+    skyMesh.frustumCulled = false; skyMesh.renderOrder = -1000; skyMesh.name = 'sc-walk-sky';
+    skyMesh.userData.colAttr = colAttr;
+    return true;
+  }
+
+  // recolour the dome for the sun's altitude now (throttled); the dome follows the camera
+  function updateSky(dt) {
+    if (!skyMesh || !skyCol) return;
+    skyAcc += dt; if (skyAcc < 0.05) return;
+    skyT += skyAcc; skyAcc = 0;
+    const alt = sunAltitude();
+    const dayness = smoothstep(-3, 9, alt), night = smoothstep(-1, -9, alt), tw = Math.exp(-(((alt + 3) / 7) ** 2));
+    const ring = [];
+    for (let i = 0; i <= SKY_RINGS; i++) ring.push(skyRGB(-8 + (98 * i) / SKY_RINGS, dayness, tw));
+    skyStarInfo.forEach((s, k) => {
+      const base = skyRGB(s.el, dayness, tw), lit = night * s.b * (0.7 + 0.3 * Math.sin(skyT * s.tw + s.ph));
+      const t = skyStarTint[k];
+      for (let c = 0; c < 3; c++) skyStarCols[k * 3 + c] = Math.min(1, base[c] + t[c] * lit);
+    });
+    for (let v = 0, o = 0; v < skyVertKind.length; v++, o += 3) {
+      const r = skyVertKind[v];
+      const c = r >= 0 ? ring[r] : null;
+      if (c) { skyCol[o] = c[0]; skyCol[o + 1] = c[1]; skyCol[o + 2] = c[2]; }
+      else { const k = -r - 1; skyCol[o] = skyStarCols[k * 3]; skyCol[o + 1] = skyStarCols[k * 3 + 1]; skyCol[o + 2] = skyStarCols[k * 3 + 2]; }
+    }
+    skyMesh.userData.colAttr.needsUpdate = true;
+    const hz = skyRGB(0, dayness, tw);
+    const K = window.scCore && window.scCore.classes && window.scCore.classes();
+    if (K && K.Color) {
+      if (appScene) appScene.background = new K.Color().setRGB(hz[0], hz[1], hz[2]);
+      if (appScene && appScene.fog && appScene.fog.isFog) appScene.fog.color = new K.Color().setRGB(hz[0], hz[1], hz[2]);
+    }
+    if (cam) skyMesh.position.copy(cam.position);
+  }
+  whenCore((c) => c.onFrame((dt) => { if (walking && SKY_DOME) updateSky(dt); }));
+
   // ---------- 4. entering / leaving ----------
   let sun = null, sunSaved = null, snowUniforms = [], fogSaved, bgSaved, hud = [];
 
@@ -411,6 +531,11 @@
       if (Color) { fogSaved = appScene.fog; appScene.fog = { isFog: true, name: '', color: new Color(SKY), near: 12, far: 55 }; }
     }
 
+    skySun = null;
+    appScene.traverse((o) => { if (!skySun && o.isDirectionalLight) skySun = o; });
+    if (SKY_DOME && !skyMesh) buildSky();
+    if (skyMesh) { if (!skyMesh.parent) appScene.add(skyMesh); skyMesh.visible = true; skyAcc = 1; updateSky(0); }
+
     hud = [...document.querySelectorAll('.hud, .city-overlay')];
     hud.forEach((h) => { h.dataset.scWalkDisplay = h.style.display; h.style.display = 'none'; });
     keys.clear(); lastT = 0; speed = WALK_SPEED;
@@ -436,6 +561,7 @@
     }
     if (fogSaved !== undefined || (appScene && appScene.fog && appScene.fog.isFog)) { appScene.fog = fogSaved ?? null; fogSaved = undefined; }
     if (bgSaved !== undefined) { appScene.background = bgSaved; bgSaved = undefined; }
+    if (skyMesh) skyMesh.visible = false;
     hud.forEach((h) => { h.style.display = h.dataset.scWalkDisplay || ''; });
     keys.clear(); stick.x = stick.y = 0;
     showUi(false);
@@ -1132,6 +1258,8 @@
   // what other scripts may use
   window.scWalk = {
     get player() { return { x: pos.x, y: eye, z: pos.z, yaw, pitch }; },
+    // test: the sun's altitude in degrees for the sky (null: the app's sun again)
+    skyAltitude(deg) { skyOverride = deg == null ? null : Number(deg); skyAcc = 1; },
     leave: () => leave(),
     moveTo(x, z) { pos.x = x; pos.z = z; },
     lookAt(x, y, z) { const dx = x - pos.x, dz = z - pos.z; yaw = Math.atan2(-dx, -dz); pitch = Math.atan2(y - eye, Math.hypot(dx, dz)); },

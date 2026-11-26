@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.13
+// @version      1.14
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -51,11 +51,12 @@
   const KEEP_DISTANCE = 1.2;       // and don't come closer than this
   const SHOT_INTERVAL = [1.1, 2.0];// seconds between an officer's shots
   const ACCURACY = 0.32;           // chance to hit at point-blank range (was 0.45)…
-  const ACCURACY_FALLOFF = 0.07;   // …minus this per tile of distance…
-  const MIN_ACCURACY = 0.07;       // …but never below this…
+  const ACCURACY_FALLOFF = 0.12;   // …minus this per tile of distance (was 0.07: far shots mostly miss)…
+  const MIN_ACCURACY = 0.04;       // …but never below this (was 0.07)…
   const STEADINESS = [0.6, 1.15];  // …times how steady this officer's hand is (picked per officer)…
   const NERVES = 0.6;              // …and their first shots are worse: × this, getting steady over 3 shots
   const MISS_SPREAD = [0.05, 0.3]; // a miss goes this far past you (tiles), and anywhere from your knees to over your head
+  const MISS_FAR = 0.3;            // …and a miss from further away goes this much wider per tile of distance
   const RUNNING_DODGE = 0.55;      // aim × this while you're running
   const FIRST_SHOT_DELAY = 1.2;    // seconds before a fresh officer fires the first time
   // On fire (flamethrower, explosions, a burning person): like residents – run screaming, writhe,
@@ -538,7 +539,7 @@
     const aim = { x: pl.x, y: pl.y - 0.03, z: pl.z };
     if (hit) { w.tracer(start, aim, () => hurt()); return; }
     // a miss: just past you, on until it meets a wall or the ground
-    const rx = -d.z, rz = d.x, side = rnd(...MISS_SPREAD) * (Math.random() < 0.5 ? -1 : 1);
+    const rx = -d.z, rz = d.x, side = rnd(...MISS_SPREAD) * (1 + MISS_FAR * dist) * (Math.random() < 0.5 ? -1 : 1);
     const tx = aim.x + rx * side - start.x, ty = aim.y + rnd(-0.09, 0.12) - start.y, tz = aim.z + rz * side - start.z;
     const l = Math.hypot(tx, ty, tz) || 1, dir = { x: tx / l, y: ty / l, z: tz / l };
     let t = l + 4;

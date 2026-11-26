@@ -299,6 +299,15 @@ burning officer sets residents alight (`igniteAround`). Aim: `ACCURACY` 0.32 (wa
 Walk mode 1.32: the scan of trees, lamps, benches and fountains skipped indexed meshes, so the
 highways' tall lamps never broke when shot. Indexed meshes that hold a prop colour are now flattened once.
 
+Walk mode 1.33: a sky dome while walking (`SKY_DOME`): one mesh of vertex colours (rings plus
+~420 star quads, radius 300, drawn first, centred on the camera every frame) recoloured 20× a
+second from the sun's altitude – the app's `DirectionalLight` (position − target). Day: blue to
+pale at the horizon; dusk/dawn (sun around −3°): an orange glow at the horizon under violet-blue;
+night: near black with twinkling stars. Scene background and the walk fog follow the horizon
+colour. Palette hex values are converted to linear (the renderer converts back). Note: the core's
+borrowed `Attr` class copies the array you give it – write into `attr.array`. Test hook:
+`scWalk.skyAltitude(deg)` forces the sun's altitude (null: the real sun again).
+
 Residents 1.21: nobody walks on highways (their asphalt covers where the sidewalk line is), on a road
 that touches a highway junction, or through a door onto either. `buildNetwork()` builds the walking
 network from the roads that are not highway or next to one; the asphalt cells still include highways.
@@ -407,7 +416,7 @@ Older approach, still useful for unit-level checks:
 - Several scripts hooking the same thing (prototype trap, `forEach`) must chain, not replace.
 - Don't search all city triangles per hit/frame – use bounding boxes and caches.
 
-## Skinner (savings-city-skinner 1.5, residents 1.24, cops 1.12)
+## Skinner (savings-city-skinner 1.6, residents 1.24, cops 1.12)
 
 - A walk-mode weapon (key 5, `scWalkWeapons.push`). Its beam takes the nearest resident
   (`scResidents.hit`) or officer (a cylinder test over `scCops.officers()`) before a wall or car.
@@ -420,8 +429,11 @@ Older approach, still useful for unit-level checks:
   jittered grid fill the figure's torso and legs (`flesh()`, new jitter per body), plus organs, a
   skull, ribs, spine and leg bones (`INSIDE`), all within the resident figure's boxes (no arms:
   the figure has none). Phases: peel (0.9 s, a rising ring; the skin shells – the figure's own
-  legs, torso and head boxes – roll down, head first), exposed (1 s, heart pulses), fall
-  (gravity, bounce, push, spin), pile (20 s, then fade). At most 6 bodies are moving and 30 in all.
+  legs, torso and head boxes – are pulled straight up off the body, head first, `PULL` body
+  heights), exposed (1 s, heart pulses), fall (gravity, bounce, push, spin), pile (20 s, then
+  fade). From the end of the peel the skin shells and flakes float down (`FLOAT_TIME` 1.8 s,
+  swaying) to land flat on the floor 2–4 m from the body (`FLOAT_DIST`), and stay until the heap
+  fades (since 1.6; before, the skin rolled down and vanished). At most 6 bodies are moving and 30 in all.
 - The fall calls `scResidents.spatter` for blood and `scResidents.avoid` around the heap.
 - `local/harness.js` + `local/harness-layout.json`: fixed shots (stand at a point, aim at a point,
   fire, report events, screenshots at set times). A shot can name a placed subject (`target`).
