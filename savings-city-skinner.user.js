@@ -320,9 +320,12 @@
     const out = [];
     for (let k = 0; k < n; k++) {
       const g = (k * 0.618034 + 0.31) % 1, h = (k * 0.381966 + 0.7) % 1, z = (k * 0.7549) % 1;
-      const r = 0.0045 + 0.0035 * ((k * 0.41) % 1), ci = k % 5;
-      if (k % 3 === 0) out.push(['blob', 'organ', ci, (g - 0.5) * 0.02, 0.006 + h * 0.036, (z - 0.5) * 0.008, 2 * r, 2 * r, 2 * r]);   // legs
-      else out.push(['blob', 'organ', ci, (g - 0.5) * 0.026, 0.054 + h * 0.042, (z - 0.5) * 0.014, 2 * r, 2 * r, 2 * r]);            // torso
+      const r = 0.008 + 0.004 * ((k * 0.41) % 1), ci = k % 5;   // radius: 8–12 thousandths of a tile
+      if (k % 3 === 0) {                                          // legs: x ±0.013, z ±0.008
+        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.013 - r), 0.004 + r + h * (0.044 - 2 * r), (z - 0.5) * 2 * (0.008 - r), 2 * r, 2 * r, 2 * r]);
+      } else {                                                    // torso: x ±0.016, z ±0.01, y 0.052–0.1
+        out.push(['blob', 'organ', ci, (g - 0.5) * 2 * (0.016 - r), 0.052 + r + h * (0.048 - 2 * r), (z - 0.5) * 2 * (0.01 - r), 2 * r, 2 * r, 2 * r]);
+      }
     }
     return out;
   }
