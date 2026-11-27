@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.35
+// @version      1.36
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -80,7 +80,7 @@
   const BLAST_KNOCK_RADIUS = 0.6; // ≈ 12 m: residents this close fall over
   const BLAST_PANIC_RADIUS = 3;   // ≈ 60 m: residents this close run away
   const PANIC_SECONDS = 12;       // how long they keep running
-  const SHOT_PANIC_RADIUS = 1.5;  // ≈ 30 m: residents who hear a gunshot run away from you
+  const SHOT_PANIC_RADIUS = 0.25; // ≈ 5 m: residents this close to you when you fire (any weapon) run away from you
   const SHOT_PANIC_SECONDS = 8;
   const SOUND = true;
   const SHOW_GUN = true;          // the weapon in view, with recoil and muzzle flash when you shoot
@@ -1273,7 +1273,7 @@
     const o = { x: pos.x, y: eye, z: pos.z };
     const d = { x: -Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: -Math.cos(yaw) * Math.cos(pitch) };
     gunFired();
-    if (window.scResidents && typeof window.scResidents.alarm === 'function') window.scResidents.alarm(o.x, o.z, SHOT_PANIC_RADIUS * 2, SHOT_PANIC_SECONDS);
+    if (window.scResidents && typeof window.scResidents.alarm === 'function') window.scResidents.alarm(o.x, o.z, SHOT_PANIC_RADIUS, SHOT_PANIC_SECONDS);
     shotEvent(o, id);
     try { def.fire({ o, d, start: muzzleWorld(o) || { x: o.x + d.x * 0.05, y: o.y - 0.02 + d.y * 0.05, z: o.z + d.z * 0.05 } }); } catch (e) { console.warn('[walk] weapon', id, e); }
   }
