@@ -110,8 +110,10 @@ placeholder `https://your-savings-city-host.example/`.
     fine in our replaced shaders. Not physical on purpose: haze in shadow darkens (`dim`), sunlit
     haze adds a glow (`glow` × sun colour, or the panel's colour by `tint`), so shafts show without
     fogging the city. Wind: value noise drifting with time modulates the density per step. The
-    haze values live in localStorage `sc-graphics:haze`; the haze panel (setting `hazePanel`) is a
-    floating div without overlay so the city stays visible while tuning.
+    haze values are core settings since graphics 1.6 (`hazeTop`, `hazeThick`, `hazeDim`, `hazeGlow`,
+    `hazeColor` – the core's `type: 'color'` –, `hazeTint`, `hazeWind`), section "Nevel
+    (zonnestralen)", shown only while `shafts` is 2 (`when`); 1.5 kept them in localStorage
+    `sc-graphics:haze` with a floating panel (`hazePanel`), taken over once and removed.
   - Bursts: `window.scLightBursts` (a Set, created by whoever loads first) of
     `{ x, y, z, radius, strength, color: [r, g, b] }` in world units, updated by the owner every
     frame and deleted when done. The strongest gets a radial blur (48 samples towards its point on

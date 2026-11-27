@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.8
+// @version      1.9
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus, the settings popup and the disasters menu. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -48,6 +48,9 @@
  *   popup with all of them. The core's own: 'detail' (1 = normal … 5 = most detailed), read through
  *   detail() → { level, factor: 2^(level − 1) } – scripts multiply their piece budgets by it.
  *   'blood' (1 … 5), read through blood() → 1, 2, 4, 8 or 16: how much blood spatters.
+ *   type: 'color' is a colour picker (value '#rrggbb'). when: () → bool shows the setting only
+ *   while that's true (checked again after every change in the popup; a section with nothing to
+ *   show is hidden too).
  *   The popup has two columns of sections; SETTINGS_LAYOUT below puts every known setting in its
  *   place (a setting that isn't listed goes under its own `group`, or "Overig").
  *   'hideAppUi': the app's own panels on the left (totals, project list) and at the bottom (new
@@ -470,6 +473,7 @@
       if (v === undefined || v === null) return d ? d.value : undefined;
       if (!d) return v;
       if (d.type === 'toggle') return !!v;
+      if (d.type === 'color') return /^#[0-9a-f]{6}$/i.test(v) ? v : d.value;
       if (d.options) return Math.min(d.options.length - 1, Math.max(0, Math.round(v))) || 0;
       return Math.min(d.max, Math.max(d.min, v));
     },
@@ -501,8 +505,9 @@
   // aren't listed here go under their own `group` (or "Overig") at the end of the second column.
   const SETTINGS_LAYOUT = [
     [['Scherm', ['hideAppUi']],
-     ['Beeld', ['pixel', 'shadows', 'ao', 'outlines', 'shafts', 'lens', 'hazePanel']]],
+     ['Beeld', ['pixel', 'shadows', 'ao', 'outlines', 'lens', 'shafts']]],
     [['Tijd en seizoen', ['winter', 'daynight']],
+     ['Nevel (zonnestralen)', ['hazeTop', 'hazeThick', 'hazeDim', 'hazeGlow', 'hazeColor', 'hazeTint', 'hazeWind']],
      ['Stad', ['residents', 'carTopSpeed']],
      ['Vernielen', ['detail', 'buildingModel', 'hitsToCollapse', 'blood']]],
   ];
@@ -524,7 +529,7 @@
 
   function settingRow(d) {
     const row = document.createElement('div');
-    row.className = 'set';
+    row.className = 'set'; row.dataset.id = d.id;
     const v = settings.get(d.id), fmt = (x) => (d.format ? d.format(x) : String(x));
     const help = (d.help ? d.help : '') + (d.reload ? (d.help ? ' ' : '') + '<i>Na herladen.</i>' : '');
     const helpHtml = help ? `<div class="help">${help}</div>` : '';
@@ -533,6 +538,11 @@
         <input id="sc-set-${d.id}" class="sw" type="checkbox" role="switch"${v ? ' checked' : ''}></div>${helpHtml}`;
       const input = row.querySelector('input');
       input.addEventListener('change', () => { settings.set(d.id, input.checked); renderButtons(); });
+    } else if (d.type === 'color') {
+      row.innerHTML = `<div class="head tg"><label for="sc-set-${d.id}">${d.label}</label>
+        <input id="sc-set-${d.id}" class="col" type="color" value="${v}"></div>${helpHtml}`;
+      const input = row.querySelector('input');
+      input.addEventListener('input', () => { settings.set(d.id, input.value); renderButtons(); });
     } else if (d.options) {
       row.innerHTML = `<div class="head"><label>${d.label}</label></div><div class="opts" role="radiogroup"></div>${helpHtml}`;
       const opts = row.querySelector('.opts');
@@ -576,6 +586,13 @@
   function renderButtons() {
     if (!popupEl) return;
     popupEl.querySelector('.close').textContent = needReload ? 'Klaar · herladen' : 'Klaar';
+    // settings that only matter now and then (when: () → bool), and sections left empty by them
+    for (const row of popupEl.querySelectorAll('.set[data-id]')) {
+      const d = defs.find((x) => x.id === row.dataset.id);
+      let show = true; if (d && typeof d.when === 'function') try { show = !!d.when(); } catch {}
+      row.style.display = show ? '' : 'none';
+    }
+    for (const sec of popupEl.querySelectorAll('.list section')) sec.style.display = [...sec.querySelectorAll('.set')].some((r) => r.style.display !== 'none') ? '' : 'none';
   }
   function openSettings() {
     if (popupEl) { closeSettings(); return; }
@@ -605,6 +622,7 @@
         #sc-settings-popup .head input.sw:checked{background:#ffd23f}
         #sc-settings-popup .head input.sw:checked::after{left:23px;background:#223}
         #sc-settings-popup .head input.sw:focus-visible,#sc-settings-popup .opts button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+        #sc-settings-popup .head input.col{flex:none;width:44px;height:26px;margin:0;padding:0;border:0;border-radius:6px;background:none;cursor:pointer}
         #sc-settings-popup .opts{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
         #sc-settings-popup .opts button{flex:1 1 auto;border:0;border-radius:8px;padding:6px 10px;font:700 13px system-ui,sans-serif;cursor:pointer;background:#3a4160;color:#fff}
         #sc-settings-popup .opts button.on{background:#ffd23f;color:#223}
@@ -960,7 +978,7 @@
   });
 
   window.scCore = {
-    version: '1.8',
+    version: '1.9',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
