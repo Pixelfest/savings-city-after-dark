@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.11
+// @version      1.12
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -38,12 +38,16 @@
  *   the coarse chunks (and the finer pieces of chunks that already flew are dropped).
  * - crater(): chunks near a point fly out. hit() = a crater that counts; after HITS_TO_COLLAPSE
  *   the building comes down.
- * - Local collapse (settle, after every crater): what isn't held up any more falls. The pieces form
- *   a graph (boxes that touch); a piece's cost is the cheapest path of still pieces to the ground,
- *   each step costing how far it goes sideways. A piece whose cost grew by more than SUPPORT_SPAN
- *   since the building was intact (or that has no path left) falls, onto the floor below if that
- *   still stands: the facade above a wide hole comes down in a V, slabs around a shot-away core
- *   drop. With less than a third left standing, the rest comes down too.
+ * - Progressive collapse (settle, after every crater; then waves WAVE_DT apart): the pieces form a
+ *   graph (boxes that touch). A piece falls when nothing holds it (its cheapest path of still
+ *   pieces to the ground, each step costing how far it goes sideways, grew by more than
+ *   SUPPORT_SPAN since the building was intact) or when it's crushed: every piece passes its load
+ *   (own weight, rubble on it, rubble landing on it) to what's under it, and a piece whose
+ *   neighbourhood carries more than STRENGTH (setting Stevigheid) × its intact load (± 20 %) gives
+ *   way. Its load moves to its neighbours, so the next wave may find more – a hit can stop at a
+ *   notch or grow until the building comes down. Connected sections fall as blocks: tipping around
+ *   the side that still holds them, breaking up when they hit something. With less than a third
+ *   left standing, the rest comes down too.
  * - ray(o, d, maxT): the nearest still chunk along a ray; walk mode uses it for buildings shown as
  *   chunks (covers(id)), so shots and rockets go through holes and hit what's inside.
  * - collapse(building, opts) in two styles:
@@ -119,6 +123,13 @@
   const PILE_MAX = 0.25;           // rubble heaps rise to at most this high (≈ 5 m; 1 tile ≈ 20 m): the more rubble, the nearer
   const SUPPORT_SPAN = 0.2;        // local collapse: a part holds this much further (tiles) from what carries it than before the hit (≈ 4 m)…
   const SUPPORT_SLACK = 0.06;      // …and a piece on top of another may sit this far off its middle for free
+  const STRENGTH = [1.8, 2.1, 2.8]; // setting Stevigheid (zwak, normaal, sterk): a piece carries this × its load in the intact building…
+  const STRENGTH_SPREAD = 0.2;     // …± this share, different for every piece (rough edges, an outcome you can't predict)
+  const WAVE_DT = 0.2;             // after a hit the building is checked again this often (s) while things give way…
+  const WAVE_MAX = 60;             // …at most this many times
+  const IMPACT = 1.5;              // rubble landing on a floor pushes with up to this × its weight (once, as it lands)
+  const HINGE_ACC = 2.5;           // rad/s²: a section held on one side only tips over around that side this fast…
+  const HINGE_RELEASE = 0.45;      // …and comes off it after this angle (rad); it breaks up when it hits something
   // -------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
@@ -295,7 +306,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
   // it keeps more of its speed when it lands and slides on (a blast wave)
   function launch(set, fr, v, delay = 0, spin = rnd(1, 5), slide = false) {
     if (fr.stamp) unstamp(fr);                                     // rubble that's taken away: what lay on it drops
-    fr.floorY = undefined; fr.holder = null;
+    fr.floorY = undefined; fr.holder = null; fr.block = null;
     if (fr.carried) {                                              // a piece that goes: what lay on it drops too
       const list = fr.carried; fr.carried = null;
       for (const c of list) if (c.fr.holder === fr && (c.fr.state === 'rest' || c.fr.state === 'flying')) drop(c.set, c.fr);
@@ -320,6 +331,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
   // piece went up every frame: nearly the whole buffer as long as anything moved.
   function stepSets(dt) {
     if (!dt) return;
+    frameNo++;
     for (const set of sets) {
       if (!set.active) continue;
       const moved = [], awake = [], list = set.awake, n0 = list.length;
@@ -329,6 +341,19 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
         if (fr.delay > 0) { fr.delay -= dt; awake.push(fr); continue; }
         fr.age += dt;
         if (wells.size && pull(fr, dt)) { moved.push(fr); if (fr.state === 'flying') awake.push(fr); else fr.awake = false; continue; }
+        if (fr.block && !fr.block.broken) {
+          // part of a falling block: where the block has it
+          const b = fr.block; if (b.frame !== frameNo) stepBlock(b, dt);
+          const R = b.R, r = [fr.pivot[0] - b.c0[0], fr.pivot[1] - b.c0[1], fr.pivot[2] - b.c0[2]];
+          fr.R = R;
+          for (let a = 0; a < 3; a++) fr.off[a] = b.P[a] + R[a * 3] * r[0] + R[a * 3 + 1] * r[1] + R[a * 3 + 2] * r[2] - fr.pivot[a];
+          const minY = writeChunk(set, fr);
+          let floor = set.piles ? pileHeight(fr) : GROUND; if (fr.floorY > floor) floor = fr.floorY;
+          if (minY < floor) { fr.off[1] += floor - minY; writeChunk(set, fr); breakBlock(b); }
+          moved.push(fr); awake.push(fr);
+          continue;
+        }
+        if (fr.block) fr.block = null;
         fr.v[1] -= 6 * dt * (fr.lift ? 1 - fr.lift : 1);             // gravity (less inside a well)
         for (let a = 0; a < 3; a++) fr.off[a] += fr.v[a] * dt;
         if (!fr.landed) fr.R = mul(rot(...fr.axis, fr.w * dt), fr.R);   // tumbling through the air
@@ -353,6 +378,12 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
           fr.off[1] += floor - minY;
           if (!fr.landed) {
             fr.landed = true;
+            // rubble landing on a floor that still stands pushes on it (the next wave sees it)
+            const hd = fr.holder;
+            if (hd && hd.state === 'still' && set.st && minY < (fr.floorY ?? -1) + 0.05) {
+              hd.impact = (hd.impact || 0) + IMPACT * weightOf(fr) * Math.min(1, Math.max(0.3, -fr.v[1] / 2));
+              poke(set.st);
+            }
             // a puff of dust where debris of a collapsing building hits the ground, pushed outwards
             if (set.dusty && set.down && DUST > 0 && Math.random() < 0.3 * DUST) {
               const x = fr.pivot[0] + fr.off[0], z = fr.pivot[2] + fr.off[2], c = set.center || [x, z];
@@ -871,17 +902,60 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
           }
     });
     const g = st.graph = { nodes, nb, base };
-    // pieces without a baseline: the intact building's costs; pieces cut finer later take their
-    // coarse chunk's (plus half its size: they lie anywhere in it)
-    if (nodes.some((n) => n.fr.c0 === undefined)) {
-      const cost = holdCosts(g);
+    // The baseline (c0: what it costs to hold a piece up, L0: the load it carries) is the intact
+    // building's: worked out again for all pieces as long as nothing was hit yet (finer pieces cut
+    // while aiming). Pieces cut finer after a hit take their coarse chunk's: its cost plus half its
+    // size (they lie anywhere in it), its load times their share of its footprint.
+    if (!st.damaged || nodes.some((n) => n.fr.c0 === undefined)) {
+      const cost = holdCosts(g), load = loadsOf(g, cost), foot = (f) => Math.max(1e-6, (f.hi[0] - f.lo[0]) * (f.hi[2] - f.lo[2]));
       nodes.forEach((n, i) => {
-        const fr = n.fr; if (fr.c0 !== undefined) return;
-        const src = fr.fine && st.set ? st.set.frs[fr.idx] : null;
-        fr.c0 = src && src.c0 !== undefined ? src.c0 + 0.5 * Math.max(src.hi[0] - src.lo[0], src.hi[2] - src.lo[2]) : cost[i];
+        const fr = n.fr; if (st.damaged && fr.c0 !== undefined) return;
+        const src = st.damaged && fr.fine && st.set ? st.set.frs[fr.idx] : null;
+        if (src && src.c0 !== undefined) {
+          fr.c0 = src.c0 + 0.5 * Math.max(src.hi[0] - src.lo[0], src.hi[2] - src.lo[2]);
+          fr.L0 = src.L0 * Math.min(1, foot(fr) / foot(src)) * 1.5;
+        } else { fr.c0 = cost[i]; fr.L0 = load[i]; }
+        if (fr.capF === undefined) fr.capF = 1 + rnd(-STRENGTH_SPREAD, STRENGTH_SPREAD);
       });
     }
     return g;
+  }
+  // a piece's weight: the volume of its box (a plate's: thickness × area)
+  const weightOf = (fr) => fr.wt || (fr.wt = Math.max(1e-6, (fr.hi[0] - fr.lo[0]) * (fr.hi[1] - fr.lo[1]) * (fr.hi[2] - fr.lo[2])));
+  // What every still piece carries: its own weight, what lies on it and what lands on it, plus
+  // what the pieces above pass on. Pieces are handled from the top down (by height; at the same
+  // height the one furthest from its support first); each passes its load to the touching pieces
+  // below it, and a little sideways to neighbours at its height that are nearer to their support
+  // (a slab carries towards the walls). That depends only on where pieces are, so a hole changes
+  // the loads around it and nowhere else. Pieces on the ground pass theirs into the ground.
+  function loadsOf(g, cost) {
+    const N = g.nodes.length, load = new Float64Array(N), rank = new Int32Array(N).fill(-1), list = [];
+    for (let i = 0; i < N; i++) {
+      const fr = g.nodes[i].fr; if (fr.state !== 'still' || !(cost[i] < Infinity)) continue;
+      list.push(i);
+      load[i] = weightOf(fr) + (fr.impact || 0);
+      if (fr.carried) for (const c of fr.carried) if (c.fr.holder === fr && c.fr.state !== 'gone' && c.fr.state !== 'eaten') load[i] += weightOf(c.fr);
+    }
+    const yk = (i) => Math.round(g.nodes[i].fr.pivot[1] * 100);
+    list.sort((a, b) => yk(b) - yk(a) || cost[b] - cost[a]);
+    list.forEach((a, k) => { rank[a] = k; });
+    const ws = [];
+    for (let k = 0; k < list.length; k++) {
+      const a = list[k], A = g.nodes[a].fr;
+      if (A.lo[1] < g.base + 0.02) continue;                        // on the ground
+      let sum = 0, under = 0; ws.length = 0;
+      for (const b of g.nb[a]) {
+        if (rank[b] <= k) continue;                                  // above it, or already done
+        const B = g.nodes[b].fr.pivot, dy = A.pivot[1] - B[1], dh = Math.hypot(A.pivot[0] - B[0], A.pivot[2] - B[2]);
+        let w;
+        if (dy > 0.5 * dh) { w = 1 / (1 + 8 * dh); under++; }      // under it
+        else if (cost[b] < cost[a]) w = 0.25 / (1 + 8 * dh);        // beside it, nearer its support
+        else continue;
+        ws.push(b, w); sum += w;
+      }
+      if (sum) for (let j = 0; j < ws.length; j += 2) load[ws[j]] += load[a] * ws[j + 1] / sum;
+    }
+    return load;
   }
   // Dijkstra from the ground over the still pieces: what each costs to hold up
   function holdCosts(g) {
@@ -892,11 +966,13 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
       if (hc.length) { let k = 0; for (;;) { let m = 2 * k + 1; if (m >= hc.length) break; if (m + 1 < hc.length && hc[m + 1] < hc[m]) m++; if (hc[m] >= lc) break; hc[k] = hc[m]; hi[k] = hi[m]; k = m; } hc[k] = lc; hi[k] = li; }
       return [c, i];
     };
-    const still = (i) => g.nodes[i].fr.state === 'still';
+    const still = (i) => g.nodes[i].fr.state === 'still', done = new Uint8Array(N), order = [];
     for (let i = 0; i < N; i++) if (still(i) && g.nodes[i].fr.lo[1] < g.base + 0.02) { cost[i] = 0; push(0, i); }
     while (hc.length) {
       const [c, a] = pop();
-      if (c > cost[a] || c > 4) continue;
+      if (c > cost[a] || done[a]) continue;
+      done[a] = 1; order.push(a);                                   // (in this order: nearer the ground first – loadsOf)
+      if (c > 4) continue;
       const A = g.nodes[a].fr.pivot;
       for (const b of g.nb[a]) {
         if (!still(b)) continue;
@@ -907,29 +983,131 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
         if (c + w < cost[b]) { cost[b] = c + w; push(c + w, b); }
       }
     }
+    cost.order = order;
     return cost;
   }
-  // after a hit: what isn't held any more falls (onto the floor below, if that stands)
+  // After a hit the building is checked in waves (WAVE_DT apart) until nothing more gives way: a
+  // piece falls when nothing holds it any more (its cost grew by more than SUPPORT_SPAN, or no path
+  // is left) or when it's crushed (it carries more than the Stevigheid setting × its load in the
+  // intact building, ± STRENGTH_SPREAD). Its load goes to its neighbours, rubble that lands on a
+  // floor pushes on it, and the next wave sees that: a hit can stop at a notch or spread – wider,
+  // up, and down floor by floor – until the building comes down.
   function settle(st, p) {
     if (st.down || st.claimed || !st.ready) return 0;
-    const g = graphOf(st), cost = holdCosts(g), fallers = [];
-    g.nodes.forEach((n, i) => { if (n.fr.state === 'still' && cost[i] > n.fr.c0 + SUPPORT_SPAN) fallers.push(n); });
-    if (!fallers.length) return 0;
-    let mx = 0, my = Infinity, mz = 0;
-    for (const { fr, set } of fallers) {
-      launch(set, fr, [rnd(-0.08, 0.08), rnd(-0.25, 0), rnd(-0.08, 0.08)], rnd(0.05, 0.3), rnd(0.3, 2));
-      mx += fr.pivot[0] / fallers.length; mz += fr.pivot[2] / fallers.length; my = Math.min(my, fr.pivot[1]);
+    st.damaged = true;
+    const w = st.collapse || (st.collapse = { t: 0, n: 0, quiet: 0, p });
+    w.p = p; w.n = 0; w.quiet = 0;
+    return wave(st);
+  }
+  // rubble landed on the building: check again soon
+  function poke(st) { if (st && !st.down && !st.claimed && st.ready && !st.collapse) st.collapse = { t: 0, n: 0, quiet: 0, p: null }; }
+  function stepCollapses(dt) {
+    for (const st of solids.values()) {
+      const w = st.collapse; if (!w) continue;
+      if (st.down || st.claimed) { st.collapse = null; continue; }
+      w.t += dt; if (w.t < WAVE_DT) continue;
+      w.t = 0;
+      const n = wave(st);
+      if (n) w.quiet = 0;
+      else if (!st.sets.some((set) => set.awake.length)) w.quiet++;   // nothing gave way and nothing is still falling
+      if (w.quiet >= 3 || ++w.n > WAVE_MAX) st.collapse = null;
     }
-    for (const { fr, set } of fallers) landOn(st, set, fr);
-    if (fallers.length > 8) {
+  }
+  const strength = () => STRENGTH[(C() && C().settings ? C().settings.get('buildingStrength') : 1) ?? 1] || STRENGTH[1];
+  function wave(st) {
+    if (st.down || st.claimed || !st.ready) return 0;
+    const g = graphOf(st), cost = holdCosts(g), load = loadsOf(g, cost), reserve = strength(), fail = new Set();
+    // overload: load ÷ the intact building's load; judged over a piece and the still pieces it
+    // touches (the material around a hole shares the load – one overloaded piece alone holds)
+    const N = g.nodes.length, ratio = new Float64Array(N);
+    g.nodes.forEach((n, i) => { const fr = n.fr; if (fr.state === 'still') ratio[i] = load[i] / Math.max(fr.L0 || 0, 3 * weightOf(fr)); });
+    g.nodes.forEach((n, i) => {
+      const fr = n.fr; if (fr.state !== 'still') return;
+      let r = ratio[i], k = 1; for (const b of g.nb[i]) if (g.nodes[b].fr.state === 'still') { r += ratio[b]; k++; }
+      r /= k;
+      if (cost[i] > fr.c0 + SUPPORT_SPAN) fail.add(i);              // nothing holds it up
+      else if (r > reserve * fr.capF) fail.add(i);                  // crushed
+    });
+    for (const n of g.nodes) if (n.fr.impact) n.fr.impact = 0;
+    if (!fail.size) return 0;
+    fallBlocks(st, g, fail);
+    let mx = 0, my = Infinity, mz = 0;
+    for (const i of fail) { const fr = g.nodes[i].fr; mx += fr.pivot[0] / fail.size; mz += fr.pivot[2] / fail.size; my = Math.min(my, fr.pivot[1]); }
+    if (fail.size > 8) {
       sound('crack'); setTimeout(() => sound('boom'), 600);
-      if (DUST > 0) for (let k = 0; k < Math.min(14, fallers.length / 4) * DUST; k++) dust(mx + rnd(-0.15, 0.15), Math.max(0.06, my), mz + rnd(-0.15, 0.15),
+      if (DUST > 0) for (let k = 0; k < Math.min(14, fail.size / 4) * DUST; k++) dust(mx + rnd(-0.15, 0.15), Math.max(0.06, my), mz + rnd(-0.15, 0.15),
         { vx: rnd(-0.3, 0.3), vy: rnd(-0.1, 0.1), vz: rnd(-0.3, 0.3), rise: 0.03, drag: 0.8, size: rnd(0.06, 0.12), grow: 5, life: rnd(4, 7), alpha: 0.6, delay: rnd(0.3, 1) });
     }
     // so little left standing: the rest comes down too
     let left = 0, all = 0; for (const n of g.nodes) { if (n.fr.state === 'gone') continue; all++; if (n.fr.state === 'still') left++; }
-    if (all && left / all < 0.35) collapse(st.bd, { at: p });
-    return fallers.length;
+    if (all && left / all < 0.35) collapse(st.bd, { at: (st.collapse && st.collapse.p) || { x: mx, y: my, z: mz } });
+    return fail.size;
+  }
+  // What gives way in one wave, in connected sections: a section of a few pieces falls as one block
+  // – tipping over around the side that still holds it (a hinge), or straight down when it's held
+  // all round or not at all – and breaks up when it hits something; single pieces just drop.
+  function fallBlocks(st, g, fail) {
+    const seen = new Set();
+    for (const start of fail) {
+      if (seen.has(start)) continue;
+      const comp = [start]; seen.add(start);
+      for (let k = 0; k < comp.length; k++) for (const b of g.nb[comp[k]]) if (fail.has(b) && !seen.has(b)) { seen.add(b); comp.push(b); }
+      if (comp.length < 3) {
+        for (const i of comp) { const { fr, set } = g.nodes[i]; launch(set, fr, [rnd(-0.08, 0.08), rnd(-0.25, 0), rnd(-0.08, 0.08)], rnd(0, 0.15), rnd(0.3, 2)); landOn(st, set, fr); }
+        continue;
+      }
+      const c0 = [0, 0, 0]; for (const i of comp) for (let a = 0; a < 3; a++) c0[a] += g.nodes[i].fr.pivot[a] / comp.length;
+      // where it still touches what stands: the hinge
+      let hx = 0, hy = 0, hz = 0, hn = 0, ext = 0;
+      for (const i of comp) {
+        const fr = g.nodes[i].fr; ext = Math.max(ext, Math.hypot(fr.pivot[0] - c0[0], fr.pivot[2] - c0[2]));
+        if (g.nb[i].some((b) => !fail.has(b) && g.nodes[b].fr.state === 'still')) { hx += fr.pivot[0]; hy += fr.pivot[1]; hz += fr.pivot[2]; hn++; }
+      }
+      const blk = { frs: [], c0, P: c0.slice(), v: [rnd(-0.05, 0.05), -0.05, rnd(-0.05, 0.05)], R: [1, 0, 0, 0, 1, 0, 0, 0, 1], w: 0, theta: 0, hinge: null, free: true, broken: false, frame: -1 };
+      if (hn) {
+        const h = [hx / hn, hy / hn, hz / hn], dx = c0[0] - h[0], dz = c0[2] - h[2], dl = Math.hypot(dx, dz);
+        if (dl > Math.max(0.05, 0.25 * ext)) { blk.hinge = h; blk.free = false; blk.axis = [dz / dl, 0, -dx / dl]; }
+      }
+      if (blk.free) { const a = rnd(0, 6.3); blk.axis = [Math.cos(a), 0, Math.sin(a)]; blk.w = rnd(0.1, 0.5); }
+      for (const i of comp) {
+        const { fr, set } = g.nodes[i];
+        launch(set, fr, [0, 0, 0], 0, 0);
+        fr.block = blk; blk.frs.push(fr);
+      }
+      for (const i of comp) { const { fr, set } = g.nodes[i]; landOn(st, set, fr); }
+    }
+  }
+  let frameNo = 0;
+  // one step of a falling block: around its hinge, then free (gravity, turning on)
+  function stepBlock(b, dt) {
+    b.frame = frameNo;
+    if (!b.free) {
+      b.w += HINGE_ACC * dt; const d = b.w * dt; b.theta += d;
+      b.R = mul(rot(...b.axis, d), b.R);
+      const h = b.hinge, r = [b.c0[0] - h[0], b.c0[1] - h[1], b.c0[2] - h[2]], R = b.R;
+      const q = [R[0] * r[0] + R[1] * r[1] + R[2] * r[2], R[3] * r[0] + R[4] * r[1] + R[5] * r[2], R[6] * r[0] + R[7] * r[1] + R[8] * r[2]];
+      b.P = [h[0] + q[0], h[1] + q[1], h[2] + q[2]];
+      if (b.theta > HINGE_RELEASE) { b.free = true; b.v = cross(b.axis.map((x) => x * b.w), q); }
+      return;
+    }
+    b.v[1] -= 6 * dt;
+    for (let a = 0; a < 3; a++) b.P[a] += b.v[a] * dt;
+    b.R = mul(rot(...b.axis, b.w * dt), b.R);
+  }
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  // a block hits something: every piece goes on alone, with the speed its place in the block had
+  function breakBlock(b) {
+    b.broken = true;
+    const om = b.axis.map((x) => x * b.w), ref = b.free ? b.P : b.hinge, base = b.free ? b.v : [0, 0, 0];
+    for (const fr of b.frs) {
+      if (fr.block !== b) continue;
+      fr.block = null;
+      if (fr.state !== 'flying') continue;
+      const p = [fr.pivot[0] + fr.off[0] - ref[0], fr.pivot[1] + fr.off[1] - ref[1], fr.pivot[2] + fr.off[2] - ref[2]], c = cross(om, p);
+      fr.v = [base[0] + c[0] + rnd(-0.1, 0.1), base[1] + c[1], base[2] + c[2] + rnd(-0.1, 0.1)];
+      let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
+      fr.axis = [ax / al, ay / al, az / al]; fr.w = rnd(1, 4); fr.R = fr.R.slice();
+    }
   }
   // the highest still piece of the building right under fr: it lands on that (and drops when that goes)
   function landOn(st, set, fr) {
@@ -1151,6 +1329,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     dt = Math.min(dt, 0.05);                                       // (bigger steps make chunks jump)
     if (wells.size) stepWells(dt);
     stepSets(dt);
+    stepCollapses(dt);
     for (const st of solids.values()) if (st.wave) stepWave(st, dt);
   }
   function onDamage(ev) {
@@ -1175,6 +1354,8 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     c.onDamage(onDamage);
     if (c.settings) c.settings.define({ id: 'hitsToCollapse', label: 'Raketten tot een gebouw instort', min: 1, max: 20, step: 1, value: HITS_TO_COLLAPSE,
       format: (v) => (v === 1 ? '1 raket' : `${v} raketten`) });
+    if (c.settings) c.settings.define({ id: 'buildingStrength', label: 'Stevigheid van gebouwen', options: ['Zwak', 'Normaal', 'Sterk'], value: 1,
+      help: 'Hoeveel een gebouw kan hebben voordat het verder bezwijkt. Zwak: een paar treffers en er stort een flink stuk in, dat kan doorzetten tot het hele gebouw. Sterk: meestal valt alleen een stuk rond het gat naar beneden.' });
     if (c.settings) c.settings.define({ id: 'buildingModel', label: 'Gebouwen bij vernielen', options: ['Massief', 'Vloeren en muren'], value: 0,
       help: 'Massief: een gebouw breekt in blokken. Vloeren en muren: gebouwen zijn hol, met verdiepingen; in een gat zie je de vloeren en het puin stapelt zich op. Geldt voor gebouwen die daarna geraakt worden.' });
   })();
@@ -1189,7 +1370,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     state(x) { const id = x && typeof x === 'object' ? x.id : x, st = solids.get(id); if (!st || st.claimed) return st ? { claimed: true } : null;
       const all = st.sets.flatMap((x) => x.frs).filter((f) => f.state !== 'gone');
       return { solid: true, model: st.shell ? 'shell' : 'solid', ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length,
-        flying: all.filter((f) => f.state === 'flying').length, pile: st.shell ? Math.round(Math.max(0, ...all.filter((f) => f.stamp).map((f) => f.bb[4])) * 1000) / 1000 : undefined }; },
+        flying: all.filter((f) => f.state === 'flying').length, collapsing: !!st.collapse, pile: st.shell ? Math.round(Math.max(0, ...all.filter((f) => f.stamp).map((f) => f.bb[4])) * 1000) / 1000 : undefined }; },
     crater, hit, collapse, blastWave, claim, well,
     // shots against buildings in chunks: ray(o, d, maxT) → { t, n, id } | null; covers(id): the
     // building is shown as chunks (rays should use ray(), not its own meshes)

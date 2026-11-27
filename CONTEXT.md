@@ -483,6 +483,35 @@ the cloud's top (≈ 1.2 × H, ×√3 nearer along the view) is cut off from abo
 ground zero lies towards the camera. After `CLOUD_LINGER` (20 s) the cloud lifts off out of the
 view on purpose (its shadow stays a while).
 
+Buildings 1.12 – progressive collapse (both models). `settle()` (after a crater) starts waves
+(`stepCollapses`, every `WAVE_DT` 0.2 s, at most `WAVE_MAX` 60; stops after three quiet waves with
+nothing falling; `poke()` starts it again when rubble lands on the building). A wave (`wave()`):
+`holdCosts` (as 1.9, now also the order pieces were reached) and `loadsOf`: every still piece's
+load = own weight (`weightOf`: its box volume) + pieces resting on it (`carried`) + landing impact
+(`fr.impact`, `IMPACT` 1.5 × weight × fall speed ÷ 2, used once); pieces are handled top down (by
+height, then furthest from support first) and pass their load to the touching pieces under them
+(weight 1 ÷ (1 + 8·dh)) and a little (0.25) sideways to neighbours nearer support; pieces on the
+ground pass it on to the ground. Baseline in `graphOf` while the building is undamaged (`st.damaged`
+is set by the first `settle`): `c0` and `L0` from the intact building, recomputed after a refine;
+after damage refined pieces inherit (L0 × footprint share × 1.5). Fails: `cost > c0 + SUPPORT_SPAN`
+(nothing holds it) or the overload ratio load ÷ max(L0, 3 × weight), averaged over the piece and
+its still neighbours, above `STRENGTH[setting]` × `capF` (1 ± `STRENGTH_SPREAD` 0.2, per piece).
+First tries: routing load by `holdCosts`' order (a DAG) gave ratios of 5× after one crater (a hole
+reshuffles the order, whole loads take other routes) – geometry order fixed that (1.75×); judging
+each piece alone let one hot piece start a runaway cascade every time – the neighbourhood average
+fixed that; reserve 1.3–2.0 with ± 30 % and impact 2.5 still brought down 7 of 8 buildings.
+Measured (mid-size towers, shell, Normaal): one crater 0–3 extra pieces; three in a row 91 (7
+waves); a corner (both walls) 351, half the building, 18 waves; 3rd floor 6. Zwak (1.8): one crater
+0, three in a row 352, a corner the whole building. Sterk (2.8): 0–20. Solid (Normaal): 0–13, wide
+building with 5 craters 271. A wave takes 1.4–7 ms for 744 pieces.
+`fallBlocks`: the pieces that fail in a wave, in connected groups; groups under 3 drop as before,
+bigger ones are a block (`fr.block`: c0, P, R, v, axis, w): if part of it touches still pieces and
+its middle is off that contact (> max(0.05, ¼ of its size)), it turns around a horizontal axis
+through the contact (`HINGE_ACC` 2.5 rad/s², free after `HINGE_RELEASE` 0.45 rad, then falling and
+turning on); otherwise it falls straight with a slow turn. `stepSets` places a block's pieces from
+the block (`stepBlock` once per frame, `frameNo`); when one touches its floor the block breaks
+(`breakBlock`): every piece goes on alone with its point's speed. `state()` has `collapsing`.
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`
