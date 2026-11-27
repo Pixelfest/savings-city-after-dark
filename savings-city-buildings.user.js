@@ -175,9 +175,97 @@
     mesh.castShadow = mesh.receiveShadow = true; mesh.frustumCulled = false; mesh.userData.scSolid = true;
     mesh.visible = !opts.hidden;
     (opts.parent || scene()).add(mesh);
-    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null, st: opts.st || null, awake: [] };
+    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null, st: opts.st || null, awake: [], base: material };
+    frs.forEach((fr, i) => { fr.pi = i; });
+    if (GPU_PIECES) try { gpuPieces(set); } catch (e) { console.warn('[buildings] pieces on the GPU', e); set.tex = null; }
     sets.add(set);
     return set;
+  }
+
+  // ---------- moving pieces on the GPU ----------
+  // A set's vertices stay where the pieces were cut (the position and normal attributes never
+  // change). Every piece has a 3×4 transform in a float texture (3 RGBA texels: rows of L | t),
+  // every vertex its piece's number (aPiece), and the vertex shader moves it: p' = L·p + t,
+  // n' = L·n. A still piece has the identity. The CPU writes 12 numbers per moving piece and works
+  // out its bounds from its corners (fr.hull) instead of moving every vertex, and the GPU gets the
+  // texture (48 bytes a piece) instead of positions and normals (24 bytes a vertex, 36+ vertices).
+  // Shadows: the shadow pass draws with a copy of three's own depth material (taken from
+  // onBeforeShadow) that does the same.
+  const PIECE_ROW = 256;           // pieces per texture row (× 3 texels)
+  function gpuPieces(set) {
+    const map = set.base && set.base.map, Tex = map && map.constructor, r = C() && C().renderer;
+    if (!Tex || !r || (r.capabilities && r.capabilities.isWebGL2 === false)) return;
+    const P = set.frs.length, W = PIECE_ROW * 3, H = Math.max(1, Math.ceil(P / PIECE_ROW)), data = new Float32Array(W * H * 4);
+    for (let i = 0; i < P; i++) { const o = ((i % PIECE_ROW) * 3 + Math.floor(i / PIECE_ROW) * W) * 4; data[o] = 1; data[o + 5] = 1; data[o + 10] = 1; }
+    const tex = new Tex();
+    Object.assign(tex, { isDataTexture: true, image: { data, width: W, height: H }, format: 1023, type: 1015, magFilter: 1003, minFilter: 1003, generateMipmaps: false, flipY: false, unpackAlignment: 1 });
+    tex.needsUpdate = true;
+    const n = set.pos.count, id = new Float32Array(n);
+    for (const fr of set.frs) id.fill(fr.pi, fr.start, Math.min(n, fr.start + fr.count));
+    set.g.setAttribute('aPiece', new K.Attr(id, 1));
+    set.tex = tex; set.texData = data;
+    set.mesh.material = pieceMat(set.base, set);
+    set.mesh.onBeforeShadow = (rr, obj, cam, shCam, geo, dm) => {
+      if (set.depthMat || !dm || !dm.isMeshDepthMaterial) return;
+      set.depthMat = pieceMat(dm, set, true);
+      set.mesh.customDepthMaterial = set.depthMat;
+    };
+  }
+  const PIECE_VS = `
+attribute float aPiece;
+uniform highp sampler2D uPieces;
+vec4 scPieceRow( int k ) { int i = int( aPiece + 0.5 ); return texelFetch( uPieces, ivec2( ( i % ${PIECE_ROW} ) * 3 + k, i / ${PIECE_ROW} ), 0 ); }`;
+  const PIECE_ROWS = `
+vec4 scR0 = scPieceRow( 0 ), scR1 = scPieceRow( 1 ), scR2 = scPieceRow( 2 );
+mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z, scR2.z );`;
+  // a copy of material m that moves the vertices by the set's texture (depth: the shadow pass)
+  function pieceMat(m, set, depth = false) {
+    const out = m.clone();
+    out.userData = Object.assign({}, m.userData, { scPieces: true });
+    const compile = m.onBeforeCompile, key = m.customProgramCacheKey ? m.customProgramCacheKey() : '';
+    out.onBeforeCompile = function (sh, r) {
+      if (compile) compile.call(this, sh, r);
+      sh.uniforms.uPieces = { value: set.tex };
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\n' + PIECE_VS);
+      if (depth) sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n' + PIECE_ROWS + '\ntransformed = scL * transformed + vec3( scR0.w, scR1.w, scR2.w );');
+      else sh.vertexShader = sh.vertexShader
+        .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\n' + PIECE_ROWS + '\nobjectNormal = scL * objectNormal;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed = scL * transformed + vec3( scR0.w, scR1.w, scR2.w );');
+    };
+    out.customProgramCacheKey = () => key + '+scPieces' + (depth ? 'D' : '');
+    return out;
+  }
+  // a piece's transform into the texture; returns its lowest point and sets fr.bb (like writeChunk)
+  function writePiece(set, fr) {
+    const R = fr.R, sc = fr.scale ?? 1, st = fr.stretch, p = fr.pivot, off = fr.off;
+    let L = [R[0] * sc, R[1] * sc, R[2] * sc, R[3] * sc, R[4] * sc, R[5] * sc, R[6] * sc, R[7] * sc, R[8] * sc];
+    if (st) {                                                       // stretched along d: st4·I + (st3 − st4)·d·dᵀ, after the turn
+      const a = st[4], b = st[3] - st[4], d = [st[0], st[1], st[2]], M = [];
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) M.push((i === j ? a : 0) + b * d[i] * d[j]);
+      L = mul(M, L);
+    }
+    const tx = p[0] + off[0], ty = p[1] + off[1], tz = p[2] + off[2];
+    const o = ((fr.pi % PIECE_ROW) * 3 + Math.floor(fr.pi / PIECE_ROW) * PIECE_ROW * 3) * 4, D = set.texData;
+    for (let r = 0; r < 3; r++) {
+      D[o + r * 4] = L[r * 3]; D[o + r * 4 + 1] = L[r * 3 + 1]; D[o + r * 4 + 2] = L[r * 3 + 2];
+      D[o + r * 4 + 3] = [tx, ty, tz][r] - (L[r * 3] * p[0] + L[r * 3 + 1] * p[1] + L[r * 3 + 2] * p[2]);
+    }
+    // the bounds from the piece's corners (its distinct vertices, found once)
+    if (!fr.hull) {
+      const seen = new Set(), pts = [], O = fr.orig;
+      for (let k = 0; k < O.length; k += 3) { const key = Math.round(O[k] * 1e5) + ',' + Math.round(O[k + 1] * 1e5) + ',' + Math.round(O[k + 2] * 1e5); if (!seen.has(key)) { seen.add(key); pts.push(O[k], O[k + 1], O[k + 2]); } }
+      fr.hull = new Float32Array(pts);
+    }
+    let minY = Infinity, maxY = -Infinity, x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    const Hl = fr.hull;
+    for (let k = 0; k < Hl.length; k += 3) {
+      const a = Hl[k], b = Hl[k + 1], c = Hl[k + 2];
+      const px = tx + L[0] * a + L[1] * b + L[2] * c, py = ty + L[3] * a + L[4] * b + L[5] * c, pz = tz + L[6] * a + L[7] * b + L[8] * c;
+      if (py < minY) minY = py; if (py > maxY) maxY = py; if (px < x0) x0 = px; if (px > x1) x1 = px; if (pz < z0) z0 = pz; if (pz > z1) z1 = pz;
+    }
+    const bb = fr.bb || (fr.bb = [0, 0, 0, 0, 0, 0]);
+    bb[0] = x0; bb[1] = z0; bb[2] = x1; bb[3] = z1; bb[4] = minY; bb[5] = maxY;
+    return minY;
   }
   function chunkSet(pieces, material, opts) { const gen = buildSet(pieces, material, opts); let r; do { r = gen.next(); } while (!r.done); return r.value; }
   // A chunk set from the cutter's flat arrays (see pack() in cutterCore): no work per vertex here.
@@ -286,10 +374,12 @@
       if (!awake.length) set.active = false;
     }
   }
+  const GPU_PIECES = true;         // moving pieces are moved by the GPU (see gpuPieces); false: on the CPU, vertex by vertex
   const UPLOAD_GAP = 256;          // vertices: pieces less far apart in the buffer go up in one run…
   const MAX_UPLOAD_RUNS = 48;      // …and never more than this many runs (uploads) per set and frame
   // the moved pieces' vertices to the GPU (add ranges; never clear them first – see CONTEXT.md)
   function upload(set, moved) {
+    if (set.tex) { set.tex.needsUpdate = true; return; }           // pieces on the GPU: only their transforms
     moved.sort((a, b) => a.start - b.start);
     let runs, gap = UPLOAD_GAP;
     for (;;) {
@@ -309,6 +399,7 @@
   }
   // returns the lowest point; fr.bb = [x0, z0, x1, z1, y0, y1] (where it is now)
   function writeChunk(set, fr) {
+    if (set.tex) return writePiece(set, fr);
     const { orig, n0, R, pivot, off } = fr, pos = set.pos, nor = set.nor;
     // a chunk in a well: smaller (fr.scale) and stretched along the pull (fr.stretch: [dx, dy, dz, along, across])
     const sc = fr.scale ?? 1, st = fr.stretch;
@@ -1050,7 +1141,7 @@
   function lightsOut(st) {
     const c = C(); if (!c || !c.lightsOut) return;
     c.lightsOut(st.bd.id);
-    for (const set of st.sets) set.mesh.material = c.darkFacade(set.mesh.material);
+    for (const set of st.sets) { set.base = c.darkFacade(set.base); set.mesh.material = set.tex ? pieceMat(set.base, set) : set.base; }
   }
 
   // ---------- the frame loop and the damage bus (as soon as the core is there) ----------
