@@ -227,7 +227,7 @@ More events (CustomEvent on `window`, data in `detail`) – scripts announce, ot
 | `sc:blast` | walk mode (car explosion, `blastResidents` for rockets), cops (their own cars) | `{ x, y, z, gib, knock, panic }` radii |
 | `sc:crush` | buildings (a building coming down), heli-crane (a crane falling), drive (running officers over) | `{ x0, z0, x1, z1, margin }` something coming down |
 | `sc:kill` | residents, cops, walk mode (car occupants), nuke (car occupants), heli-crane (pilot) | `{ x, z, cause, who }` every death (bodycount) |
-| `sc:car-exploded` | walk mode (also via `wreck()`), nuke | `{ x, z }` (bodycount) |
+| `sc:car-exploded` | walk mode (also via `wreck()`), nuke, cops, black hole | `{ x, z }` (cops) |
 | `sc:damage` | core (every `scCore.damage(ev)`) | the damage event: `{ kind: 'blast' \| 'impact' \| 'push' \| 'crush', x, y, z, radius, power, dir, n, source }` |
 
 Walk mode 1.20 also gives `scWalk.player` (x, y = eye, z, yaw, pitch), `leave()`, `blocked(x, z)`,
@@ -514,7 +514,8 @@ Residents 2.0 uses that population and adds what happens to it (`savings-city-re
   `panic`, doors, `walkAway`). When the panic is over (no `panic`, `away`, `burn`, `frozen`, `keep`) and
   they're not inside, they're removed (`temp`, state `gone`), and the app's `populate()` tops its list
   up (`topUpAt` every 0.5 s; `crowdTarget` is the list length after the app's last `populate()`, which
-  the residents wrap).
+  the residents wrap). No top-up while a zone that lasts for good exists (the nuke's ground zero):
+  the dead stay dead and nobody new walks the ruins.
 - **Ids.** Every person has `scId`. `hit()` returns `index: id`; `knockDown`, `skin`, `gib`, `behead`,
   `ignite`, `unfreeze` take the id (or the person object). `find()` also finds a person who was handed over
   since (their id stays with them). Other scripts that held an index into `res.people` pass the object now
@@ -524,7 +525,10 @@ Residents 2.0 uses that population and adds what happens to it (`savings-city-re
   setter is replaced by one that keeps the base (`scBase`), so the app's own `crowd` setting still works.
 - **Cars** run over the app's people too, but only fast cars (`hitByCar`: a calm person never walks in
   front of a car, and the app's people are calm, so only a car speeding up or with a siren hits them).
-- **Own slots:** `MAX_OWN` 1000; when full, the oldest lying figure is dropped (`freeSlot`).
+- **Own slots:** `MAX_OWN` = `MAX_PEOPLE` (4000, the app's crowd cap); when full, the oldest lying figure
+  is dropped (`freeSlot`) – but only for someone who dies: taking in a runner (`alarm`, a blast's panic
+  ring, a zone, a collapse's panic ring) passes `evict = false` (`ownOf(p, false)`) and leaves them
+  to the app when there's no free slot, so runners never make bodies disappear.
 
 Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness (`local/harness.js`).
 
