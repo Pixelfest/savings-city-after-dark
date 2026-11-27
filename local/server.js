@@ -40,8 +40,9 @@ function pickPlugins(query) {
 
 // --- city state (in memory) ----------------------------------------------------------------
 const loaded = JSON.parse(fs.readFileSync(CITY_FILE, 'utf8'));
-const city = { projects: loaded.projects || [], roads: new Set(loaded.roads || []), revision: loaded.revision || 1 };
-const cityJson = () => ({ projects: city.projects, roads: [...city.roads], revision: city.revision,
+const city = { projects: loaded.projects || [], roads: new Set(loaded.roads || []), water: new Set(loaded.water || []),
+  revision: loaded.revision || 1 };
+const cityJson = () => ({ projects: city.projects, roads: [...city.roads], water: [...city.water], revision: city.revision,
   server_time: new Date().toISOString() });
 const bump = () => { city.revision++; };
 
@@ -50,8 +51,13 @@ function api(method, p, body) {
   let m;
   if (method === 'GET' && p === '/city') return [200, cityJson()];
   if (method === 'GET' && p === '/city/revision') return [200, city.revision];
+  if (method === 'GET' && p === '/city/changes') return [204];   // the page reloads to see changes
   if (p === '/roads') {
     for (const k of body.keys || []) method === 'POST' ? city.roads.add(k) : city.roads.delete(k);
+    bump(); return [204];
+  }
+  if (p === '/water') {
+    for (const k of body.keys || []) method === 'POST' ? city.water.add(k) : city.water.delete(k);
     bump(); return [204];
   }
   if (method === 'POST' && p === '/projects') {

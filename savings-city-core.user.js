@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.6
+// @version      1.7
 // @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -430,7 +430,10 @@
     const fns = Object.values(m).filter((f) => typeof f === 'function');
     const code = (f) => { try { return Function.prototype.toString.call(f); } catch { return ''; } };
     const find = (re) => fns.find((f) => re.test(code(f)));
-    const isSign = (a) => Array.isArray(a) && a.length >= 4 && a.length <= 64 && a.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isInteger));
+    // the sign's tiles: a list of integer [x, y] pairs – but not the table of the 4 directions
+    // ([[0,-1],[1,0],[0,1],[-1,0]]), which the 27 Nov build also exports
+    const isSign = (a) => Array.isArray(a) && a.length >= 4 && a.length <= 64 && a.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isInteger))
+      && !a.every(([x, y]) => Math.abs(x) + Math.abs(y) === 1);
     return {
       v: find(/\.filter\(\w+\)\.map\(\w+=>\(\{id:\w+\.id,fp:/),
       A: find(/^function\s*\w*\(\w+,\w+\)\{let \w+=\w+\.base\?\?\w+/),
@@ -738,7 +741,7 @@
   });
 
   window.scCore = {
-    version: '1.6',
+    version: '1.7',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },

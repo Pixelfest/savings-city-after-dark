@@ -20,7 +20,11 @@ placeholder `https://your-savings-city-host.example/`.
 - A Dutch "savings city": projects (buildings) are placed on a tile grid, connected by roads, cars
   drive around, winter/Christmas season and day/night from a clock (see "Clock, season, daylight").
 - React + **three.js r186** (`WebGLRenderer`, one `Scene`, an **orthographic** camera seen from above).
-- City data: `GET /api/city` → `{ projects: [{ id, gx, gy, facing, … }], roads: ["x,y,h|v", …], revision }`.
+- City data: `GET /api/city` → `{ projects: [{ id, gx, gy, facing, … }], roads: ["x,y,h|v", …], water: ["x,y", …], revision }`
+  (`water`, since the 27 Nov build: tiles of lakes/canals, edited with `POST`/`DELETE /api/water {keys}`).
+  While the page is open the app polls `GET /api/city/changes?since=<revision>` → 204 (nothing new),
+  `{ reset: true }` (reload `/api/city`) or `{ revision, projects, deleted_projects, roads: {add, remove}, water: {add, remove} }`.
+  Auto layout (2.5) empties `water` in both, places the city next to the welcome sign and blocks `/api/water` edits.
   `facing` 0 = N, 1 = E, 2 = S, 3 = W (front door side).
 - The 3D code is in a lazily loaded chunk (`assets/CityCanvas-*.js`); it is not in a "Save page as"
   download – fetch it separately (DevTools → Network) when you need to read it.
@@ -153,7 +157,9 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
   `j`, floors `w` → `T`, footprint cells `S` → `C`, which broke auto layout). So the scripts find
   them by the shape of their code (`findHelpers(m)`: regexes on `Function.prototype.toString`) and
   expose them under the old letters: `v` placed projects, `A` rotate, `a` door road keys, `w` floors,
-  `S` cells, `n` welcome-sign tiles. Each pattern matches exactly one function in both builds; if a
+  `S` cells, `n` welcome-sign tiles (an exported array of integer pairs; since the 27 Nov build the
+  4-direction table `[[0,-1],[1,0],[0,1],[-1,0]]` is exported too and must be skipped – core 1.7;
+  27 Nov: sign tiles x −6…−3, y −5…−4). Each pattern matches exactly one function in both builds; if a
   build changes a helper's code, update the regex (grep the new bundle for the old code's shape).
 - **Response hooks:** `/api/city` can be read/changed by wrapping `fetch` / `Response.prototype.json`
   (auto layout does this).
@@ -447,7 +453,8 @@ kept knocking down everyone within its radius every frame, so the death toll kep
 
 **Preferred (since 25 Nov 2026): the local app.** `node local/server.js --port 8123 &` serves the
 saved copy in `app/` with `/api/*` answered from `local/city.json` (an anonymised `/api/city` dump, 93
-projects; write calls kept in memory) and injects the chosen scripts as classic `<script>` tags in
+projects; an optional `water` list in the city file; write calls kept in memory; `/api/city/changes` always
+204) and injects the chosen scripts as classic `<script>` tags in
 `<head>` before the app's module (= document-start). `node local/shot.js 'http://localhost:8123/?plugins=nuke' out.png [--eval js] [--wait ms]`
 renders it in headless Chromium (SwiftShader; `NODE_PATH=$(npm root -g)` for Playwright) with the
 welcome dialog suppressed – look at the PNG. For walk mode: click `#sc-walk-toggle`, one

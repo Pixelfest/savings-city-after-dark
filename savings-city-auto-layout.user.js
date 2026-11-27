@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – auto layout (tall in the centre)
 // @namespace    savings-city-tweaks
-// @version      2.4
-// @description  Shows the city rearranged: tallest buildings in the centre, smaller ones outward, with organically grown streets. View only – nothing is saved to the server.
+// @version      2.5
+// @description  Shows the city rearranged: tallest buildings in the centre, smaller ones outward, with organically grown streets, next to the welcome sign, without water. View only – nothing is saved to the server.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -15,11 +15,15 @@
  *   project.gx / gy / facing   – grid position + which side the front door is on (0=N 1=E 2=S 3=W)
  *   roads                      – keys "x,y,h" / "x,y,v": road on the grid line from point (x,y)
  *                                to (x+1,y) (h) or (x,y+1) (v). A front door must touch a road.
- * This script intercepts that response and replaces positions and roads with a generated layout.
+ *   water                      – tiles "x,y" of lakes and canals (left out: the layout has no water)
+ * This script intercepts that response and replaces positions and roads with a generated layout,
+ * and removes all water (also from the /api/city/changes updates the app polls for).
  * Building shapes and heights come from the app's own code (found by the core script, savings-city-core),
  * so the layout uses exactly the footprints the app will draw.
  *
  * Algorithm ("ranked organic growth")
+ *   The centre of the city is put just outside the welcome sign's free zone (SIGN_GAP tiles), on
+ *   the side where the city stood before, so the city sits right next to its sign.
  *   Buildings are placed one at a time, tallest first, so the city grows outward from its centre
  *   like a real town: the tallest end up downtown, the smallest on the edges.
  *   For each building:
@@ -53,6 +57,7 @@
   const TURN_COST = 0.6;    // higher = straighter roads with fewer bends
   const CANDIDATES = 14;    // best spots per building that get a road check
   const SIGN_MARGIN = 5;    // tiles to keep free around the welcome sign (app rule)
+  const SIGN_GAP = 2;       // centre of the city: this many tiles beyond the sign's free zone
   const RING_ROAD = false;  // road around the whole city, with the loose ends connected to it
   const RING_MARGIN = 2;    // tiles between the outermost buildings and the ring road
   const CONNECT_MAX = 12;   // longest new road (tiles) used to connect a dead end
@@ -114,15 +119,23 @@
     items.sort((a, b) => b.floors - a.floors || b.hours - a.hours || a.id.localeCompare(b.id));   // tallest first
 
     const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
-    const cx = Math.round(mean(items.map((i) => i.oldX))), cy = Math.round(mean(items.map((i) => i.oldY)));
+    const ox = mean(items.map((i) => i.oldX)), oy = mean(items.map((i) => i.oldY));   // where the city stood
 
     // Area around the welcome sign where nothing may go.
     const sign = Array.isArray(m.n) ? m.n : [];
-    const nearSign = sign.length ? (() => {
+    let nearSign = () => false, cx = Math.round(ox), cy = Math.round(oy);
+    if (sign.length) {
       const x0 = Math.min(...sign.map((t) => t[0])) - SIGN_MARGIN, x1 = Math.max(...sign.map((t) => t[0])) + SIGN_MARGIN;
       const y0 = Math.min(...sign.map((t) => t[1])) - SIGN_MARGIN, y1 = Math.max(...sign.map((t) => t[1])) + SIGN_MARGIN;
-      return (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
-    })() : () => false;
+      nearSign = (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
+      // centre of the city: from the middle of the sign towards where the city stood, just past the free zone
+      const sx = (x0 + x1 + 1) / 2, sy = (y0 + y1 + 1) / 2;
+      let dx = ox - sx, dy = oy - sy; const len = Math.hypot(dx, dy);
+      if (len < 1e-6) { dx = dy = Math.SQRT1_2; } else { dx /= len; dy /= len; }
+      const reach = Math.min(Math.abs(dx) > 1e-6 ? (x1 + 1 - x0) / 2 / Math.abs(dx) : Infinity,
+        Math.abs(dy) > 1e-6 ? (y1 + 1 - y0) / 2 / Math.abs(dy) : Infinity);       // centre → edge of the zone
+      cx = Math.round(sx + dx * (reach + SIGN_GAP)); cy = Math.round(sy + dy * (reach + SIGN_GAP));
+    }
 
     const occ = new Map();        // tile "x,y" → building id
     const keepOut = new Set();    // tiles within GAP of a building (no other building there)
@@ -380,19 +393,29 @@
     const path = apiPath(input);
     const method = ((init && init.method) || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
 
-    // Block saving positions/roads while showing the generated layout.
-    if (/\/api\/(roads$|projects\/[^/]+\/placement$)/.test(path) && method !== 'GET') {
-      alert('Automatische indeling staat aan: verplaatsen en wegen bouwen worden niet opgeslagen.\nZet de indeling uit om de stad te bewerken.');
+    // Block saving positions/roads/water while showing the generated layout.
+    if (/\/api\/(roads$|water$|projects\/[^/]+\/placement$)/.test(path) && method !== 'GET') {
+      alert('Automatische indeling staat aan: verplaatsen, wegen bouwen en water graven worden niet opgeslagen.\nZet de indeling uit om de stad te bewerken.');
       throw new TypeError('blocked by auto-layout userscript');
     }
 
     const res = await realFetch(input, init);
-    if (path !== '/api/city' || method !== 'GET' || !res.ok) return res;
+    if (method !== 'GET' || !res.ok) return res;
+    if (path === '/api/city/changes') {
+      // updates while the page is open: never let water come back
+      try {
+        const data = await res.clone().json();
+        if (!data || data.water == null) return res;
+        const water = Array.isArray(data.water) ? [] : { ...data.water, add: [] };
+        return new Response(JSON.stringify({ ...data, water }), { status: res.status, statusText: res.statusText, headers: res.headers });
+      } catch { return res; }
+    }
+    if (path !== '/api/city') return res;
     try {
       const data = await res.clone().json();
       if (!Array.isArray(data.projects) || !Array.isArray(data.roads)) return res;
       const out = layout(await app(), data.projects);
-      const body = JSON.stringify({ ...data, projects: out.projects, roads: out.roads });
+      const body = JSON.stringify({ ...data, projects: out.projects, roads: out.roads, water: [] });
       return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
     } catch (e) {
       console.warn('[auto-layout] left the city as is:', e);
