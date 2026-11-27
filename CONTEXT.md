@@ -195,7 +195,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | buildings | `window.scBuildings` (see "Solid buildings"); handles `damage` events of kind `blast` / `impact` (crater + hit) and `push` (pushed over) |
 | walk mode | `window.scWalk` (hit tests, effects, sounds, props, cars) and `window.scWalkWeapons.push(def)` for plugin weapons; listens to `sc:geometry-changed` (rebuild walls) |
 | residents | `window.scResidents` = `{ hit, knockDown, behead, gib, gibAround, alarm, blast, people, ignite, igniteAround, burning, skin, … }`. Since 2.0 `people` = the app's pedestrians + ours (a fresh array), and every call that takes a person accepts the **object or the id** (`hit().index` is the id, stable over time; see "People" below) |
-| drive | uses `scWalk.setDriver` / `onKey` / `setHelp` / `note` / `parkedCars`; takes traffic cars (`car.scTaken = true`, held and proxy hidden); `window.scDrive` = `{ driving, car, getIn, getOut, chase, place }` |
+| drive | uses `scWalk.setDriver` / `onKey` / `setHelp` / `note` / `parkedCars`; takes traffic cars (`car.scTaken = true`, held and proxy hidden); `window.scDrive` = `{ driving, car, getIn, getOut, place }` (camera always behind the car) |
 | billboard | shootable via `scWalk.addTarget`, listens to `sc:blast`; `window.scBillboard` = `{ tilesLeft, postsLeft, center }` |
 | cops | `window.scCops` = `{ hearts, dead, officers, cars, spawnCar, hurt, burgers }` |
 | flamethrower | registers weapon `flamethrower` (`auto: true`, fires every 0.05 s while held); its fire blobs are one InstancedMesh (unlit); sets residents in a cone along the stream alight (`scResidents.ignite`) |
