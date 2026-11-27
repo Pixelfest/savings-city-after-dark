@@ -345,13 +345,15 @@ standing piece, solid: < 6). A collapse leaves wall and core pieces standing up 
 (`stumpOf`: sines along x and z, up to `SHELL_STUMP`, the same for pieces above each other); slabs fall.
 Rubble piles (only sets with `piles`, i.e. shell buildings): a global grid of `PILE_CELL` cells.
 A landed piece that's flat (tilt < 0.35) and slow (< 0.25 tiles/s), or at rest, is stamped: its
-thinnest side × `PILE_BULK` (1.6) is added to the cells under the middle 60 % of its footprint
-(`fr.bb`, written by `writeChunk`). Landing height = `GROUND` + the highest cell under the piece,
-without its own share. `launch` (and a well's pull) unstamps a piece; pieces stamped in those
+thinnest side × `PILE_BULK` (1.2) is added to the cells under the middle 60 % of its footprint
+(`fr.bb`, written by `writeChunk`). Landing height = `GROUND` + halfway between the average and
+the highest cell under the piece, without its own share. `launch` (and a well's pull) unstamps a piece; pieces stamped in those
 cells whose bottom is now above the heap drop (launched with no speed, from where they lie).
 A first version stamped each piece's top and landed pieces on the highest top: the heap grew
 taller than the building (pieces land on the highest point) – adding thickness keeps it to the
-amount of material. The nuke doesn't use the shell model (its own ruin planner cuts solid boxes).
+amount of material. Measured in the local runner (a 1.2 × 1.2 × 1.57 tower, 740 pieces, collapse
+from an impact): highest piece 1.7 (tops) → 0.95 (thickness × 1.6, highest cell) → 0.67 (× 1.2,
+halfway average/highest). The heap is steep-sided: pieces don't slide off it. The nuke doesn't use the shell model (its own ruin planner cuts solid boxes).
 
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a

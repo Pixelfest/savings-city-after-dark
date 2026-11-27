@@ -270,12 +270,13 @@
   // ---------- rubble piles (shell model) ----------
   // A height grid of PILE_CELL cells. A piece that lies (nearly) still adds its thickness × PILE_BULK
   // (the gaps between pieces) to the cells under the middle of its footprint; a falling piece
-  // lands on the highest cell under it (not counting its own share). So a heap grows with the
+  // lands on the cells under it: halfway between their average and the highest (not counting its
+  // own share; on the highest alone, heaps grew like towers). So a heap grows with the
   // amount of rubble, not with how pieces happen to lie. A piece that's taken away again (launch,
   // a well) takes its share out of the grid, and what lay on it drops.
   const pile = new Map();          // cell → { h (height above GROUND), list: [{ fr, set, add, bottom }] }
   const PILE_INSET = 0.2;          // only the middle of a piece's footprint counts (corners of tilted pieces would make spikes)
-  const PILE_BULK = 1.6;           // a heap is this much higher than its pieces' thickness added up
+  const PILE_BULK = 1.2;           // a heap is this much higher than its pieces' thickness added up
   function pileCells(bb, fn) {
     const ix = (bb[2] - bb[0]) * PILE_INSET, iz = (bb[3] - bb[1]) * PILE_INSET;
     const i0 = Math.floor((bb[0] + ix) / PILE_CELL), i1 = Math.floor((bb[2] - ix) / PILE_CELL);
@@ -283,13 +284,15 @@
     for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) fn((i + 50000) * 100000 + (j + 50000));
   }
   function pileHeight(fr) {
-    let h = 0;
-    if (pile.size && fr.bb) pileCells(fr.bb, (key) => {
+    if (!pile.size || !fr.bb) return GROUND;
+    let hi = 0, sum = 0, n = 0;
+    pileCells(fr.bb, (key) => {
+      n++;
       const c = pile.get(key); if (!c) return;
       const t = fr.stamp && fr.stamp.has(key) ? c.h - fr.stampAdd : c.h;   // without its own share
-      if (t > h) h = t;
+      sum += t; if (t > hi) hi = t;
     });
-    return GROUND + h;
+    return GROUND + (n ? (hi + sum / n) / 2 : 0);
   }
   // a piece's thickness: its thinnest side (the plates: the wall or slab thickness)
   const thickness = (fr) => (fr.lo ? Math.max(0.01, Math.min(fr.hi[0] - fr.lo[0], fr.hi[1] - fr.lo[1], fr.hi[2] - fr.lo[2])) : 0.03);
