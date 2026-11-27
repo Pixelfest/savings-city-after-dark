@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – drive a car (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.6
-// @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Space handbrake, E to get out; the camera follows behind the car). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
+// @version      1.7
+// @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Shift handbrake, Space the Tesla jump (a barrel roll on rocket thrusters, like the app's selected car), E to get out; the camera follows behind the car). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -22,7 +22,11 @@
  *   traffic queues behind it or overtakes it; see "parked cars that traffic sees".
  * - Driving: a simple bicycle model. W accelerates (less and less towards top speed), S brakes and
  *   then reverses, letting go rolls out slowly; steering turns the front wheels gradually and less
- *   at speed. Space is the handbrake. The body dips when braking, squats when accelerating and
+ *   at speed. Shift is the handbrake.
+ * - Space: the Tesla jump, the same one the app does with a selected car (its barrel roll: up
+ *   JUMP_HEIGHT and a full roll around the car's length in JUMP_TIME, thruster smoke blasting out
+ *   under the car, hardest at take-off and landing). In the air the car keeps its speed and
+ *   heading (no gas, brakes or steering) and runs nobody over; walls and cars still stop it. The body dips when braking, squats when accelerating and
  *   leans in corners.
  * - Kerbs and sidewalks don't stop you. Walls (walk mode's wall grid, the same as for walking),
  *   trees, lamps, benches and fountains (walk mode's props) do: the car bounces back a little.
@@ -48,7 +52,11 @@
   const MAX_REVERSE = 25 / 72;     // 25 km/h backwards
   const ENGINE = 0.8;              // acceleration from standstill (less and less towards top speed: 0–80 in about 4 s)
   const BRAKE = 1.6;               // braking with S (80 → 0 in about 0.7 s)
-  const HANDBRAKE = 2.5;           // Space
+  const HANDBRAKE = 2.5;           // Shift
+  const JUMP_TIME = 1.2;           // the Tesla jump (Space): as long as the app's barrel roll…
+  const JUMP_HEIGHT = 0.16;        // …this high (+ a little more while upside down)…
+  const JUMP_ROLL_LIFT = 0.06;     // …so the roof doesn't scrape the road (the app's numbers)
+  const JUMP_SMOKE = 0.6;          // thruster smoke speed (tiles per second)
   const ROLL = 0.25;               // slowing down with no pedal pressed (+ air drag)
   const DRAG = 0.08;
   const WHEELBASE = 0.13;
@@ -185,6 +193,7 @@
       side: undefined, parked: Infinity, speed: 0, passing: false, x: 100000, z: 100000 });
   }
   function park(c) {
+    c.mesh.position.set(c.x, c.y, c.z); c.mesh.rotation.set(0, -c.h, 0);   // back on its wheels (also when you left mid-jump)
     leftCars.push({ mesh: c.mesh, x: c.x, z: c.z, h: c.h, y: c.y, source: c.source });
     const t = c.source; if (!t) return;
     const lane = laneAt(c.x, c.z);
@@ -255,10 +264,10 @@
       x = t.x; z = t.z; h = t.heading; source = t;
       hideGhost(t);                                                // no invisible car left behind on the road
     }
-    car = { mesh, x, z, h, y: 0.04, v: 0, steer: 0, pitch: 0, roll: 0, accel: 0, source };
+    car = { mesh, x, z, h, y: 0.04, v: 0, steer: 0, pitch: 0, roll: 0, accel: 0, source, jump: -1, space: false };
     lookYaw = 0; lookPitch = -0.05; camPos = null;
     w.setDriver({ step });
-    w.setHelp('W: gas · S: remmen / achteruit · A/D: sturen · spatie: handrem · muis: rondkijken · H: toeter · E: uitstappen · Esc: stoppen');
+    w.setHelp('W: gas · S: remmen / achteruit · A/D: sturen · Shift: handrem · spatie: Tesla-sprong · muis: rondkijken · H: toeter · E: uitstappen · Esc: stoppen');
     w.sound && w.sound('thud');
     engine(true);
     return true;
@@ -267,6 +276,7 @@
     const w = W();
     if (!car) return;
     if (Math.abs(car.v) > EXIT_SPEED) { w.note && w.note('Eerst langzamer rijden'); return; }
+    if (car.jump >= 0) return;                                     // not in mid-air
     // out of the driver's door (left), or the other one if there's a wall
     const s = side(car.h);
     let x = car.x - s[0] * 0.12, z = car.z - s[1] * 0.12;
@@ -284,8 +294,13 @@
   function step(dt, keys, look) {
     const w = W(), c = car, now = performance.now();
     const down = (...k) => k.some((code) => keys.has(code));
-    const gas = down('KeyW', 'ArrowUp'), brake = down('KeyS', 'ArrowDown'), hand = down('Space');
-    const steerIn = (down('KeyD', 'ArrowRight') ? 1 : 0) - (down('KeyA', 'ArrowLeft') ? 1 : 0);
+    // the Tesla jump: Space (pressed, not held) starts one when the car is on the ground
+    const space = down('Space');
+    if (space && !c.space && c.jump < 0) { c.jump = 0; jumpSound(); }
+    c.space = space;
+    const air = c.jump >= 0;                                       // wheels off the ground: no grip
+    const gas = !air && down('KeyW', 'ArrowUp'), brake = !air && down('KeyS', 'ArrowDown'), hand = !air && down('ShiftLeft', 'ShiftRight');
+    const steerIn = air ? 0 : (down('KeyD', 'ArrowRight') ? 1 : 0) - (down('KeyA', 'ArrowLeft') ? 1 : 0);
     // pedals
     let a = 0;
     if (gas && c.v >= -0.05) a = ENGINE * Math.max(0, 1 - c.v / maxSpeed());
@@ -293,7 +308,7 @@
     if (brake && c.v > 0.05) a = -BRAKE;
     else if (brake) a = -ENGINE * 0.6 * Math.max(0, 1 + c.v / MAX_REVERSE);
     const sign = Math.sign(c.v);
-    if (!gas && !brake) a -= sign * ROLL;
+    if (!gas && !brake && !air) a -= sign * ROLL;
     a -= DRAG * c.v * Math.abs(c.v);
     if (hand) a -= sign * HANDBRAKE;
     const v0 = c.v;
@@ -311,7 +326,7 @@
     const n = Math.max(1, Math.ceil(Math.abs(c.v) * dt / 0.025));
     let hit = false;
     for (let k = 0; k < n && !hit; k++) {
-      const sd = dt / n, h1 = c.h + c.v * Math.tan(c.steer) / WHEELBASE * sd * (hand ? 1.6 : 1);
+      const sd = dt / n, h1 = air ? c.h : c.h + c.v * Math.tan(c.steer) / WHEELBASE * sd * (hand ? 1.6 : 1);
       const f = fwd(h1), x1 = c.x + f[0] * c.v * sd, z1 = c.z + f[1] * c.v * sd;
       if (hitsWall(x1, z1, h1)) { hit = true; break; }
       const me = { x: x1, z: z1, h: h1, hx: HX, hz: HZ };
@@ -331,14 +346,24 @@
       if (along * c.v < 0) bump(Math.abs(c.v) * Math.abs(along));   // we drove into it
       if (o.traffic && o.traffic.parked !== Infinity) { o.traffic.parked = Math.max(o.traffic.parked || 0, BUMP_HOLD); o.traffic.speed = 0; }
     }
-    runOver(c);
+    if (!air) runOver(c);
     // height, body motion
     c.y += (groundAt(c.x, c.z, now) - c.y) * Math.min(1, dt * 12);
     c.pitch += (Math.max(-0.06, Math.min(0.06, -c.accel * 0.012)) - c.pitch) * Math.min(1, dt * 8);
     const lateral = c.v * c.v * Math.tan(c.steer) / WHEELBASE;
     c.roll += (Math.max(-0.05, Math.min(0.05, lateral * 0.006)) - c.roll) * Math.min(1, dt * 6);
-    c.mesh.position.set(c.x, c.y, c.z);
-    c.mesh.rotation.set(c.roll, -c.h, c.pitch);
+    // the jump: up and down on a sine, one full roll around the car's length (the app's barrel roll)
+    let lift = 0, spin = 0;
+    if (air) {
+      c.jump += dt;
+      const u = Math.min(1, c.jump / JUMP_TIME);
+      spin = 2 * Math.PI * u;
+      lift = JUMP_HEIGHT * Math.sin(Math.PI * u) + JUMP_ROLL_LIFT * (1 - Math.cos(spin));
+      thrusters(c, u, spin, lift, dt);
+      if (u >= 1) { c.jump = -1; spin = 0; lift = 0; thud(0.5); shake = Math.min(1, shake + 0.4); }
+    }
+    c.mesh.position.set(c.x, c.y + lift, c.z);
+    c.mesh.rotation.set(c.roll + spin, -c.h, c.pitch);
     engineSound(c, gas);
     speedo(c.v);
     // looking around (the mouse), easing back to straight ahead while driving
@@ -361,6 +386,21 @@
     const pitch = Math.atan2(c.y + 0.06 - camPos.y, Math.hypot(c.x - camPos.x, c.z - camPos.z)) + lookPitch + 0.05;
     const cy = Math.atan2(-(c.x - camPos.x), -(c.z - camPos.z));
     return { x: c.x, z: c.z, eye, yaw: cy, pitch, cam: { x: camPos.x + j(), y: camPos.y + j(), z: camPos.z + j() } };
+  }
+  // thruster smoke out of the car's underside (down in the car's own frame, so it sprays sideways
+  // and up while the car rolls over), hardest at take-off and landing, like the app's exhaust
+  let puffDue = 0;
+  function thrusters(c, u, spin, lift, dt) {
+    const core = window.scCore; if (!core || !core.smoke) return;
+    const power = 1 - Math.sin(Math.PI * u);
+    puffDue += dt * (10 + 50 * power);
+    const s = side(c.h), f = fwd(c.h), down = [-s[0] * Math.sin(spin), -Math.cos(spin), -s[1] * Math.sin(spin)];
+    for (; puffDue >= 1; puffDue--) {
+      const along = rnd(-0.08, 0.08), sp = JUMP_SMOKE * (0.4 + power) * rnd(0.7, 1.2);
+      const x = c.x + f[0] * along + down[0] * 0.03, y = c.y + lift + 0.05 + down[1] * 0.05, z = c.z + f[1] * along + down[2] * 0.03;
+      core.smoke('smoke', x, Math.max(0.03, y), z, { vx: down[0] * sp + rnd(-0.05, 0.05), vy: down[1] * sp, vz: down[2] * sp + rnd(-0.05, 0.05),
+        size: rnd(0.014, 0.024), grow: 2.2, life: rnd(0.8, 1.6), drag: 2.5, rise: 0.04, alpha: 0.6 });
+    }
   }
   function bump(speed) {
     const now = performance.now();
@@ -485,6 +525,19 @@
       const ng = a.createGain(); ng.gain.value = 0.15 + level * 0.3; n.buffer = buf; n.connect(ng); ng.connect(out(a)); n.start(t);
     } catch {}
   }
+  // the jump: a rocket's rushing roar that swells and dies away
+  function jumpSound() {
+    if (!SOUND) return;
+    try {
+      const a = ctx(), t = a.currentTime, n = a.createBufferSource(), buf = a.createBuffer(1, a.sampleRate * JUMP_TIME, a.sampleRate), ch = buf.getChannelData(0);
+      for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
+      const f = a.createBiquadFilter(), g = a.createGain();
+      f.type = 'lowpass'; f.frequency.setValueAtTime(1800, t); f.frequency.exponentialRampToValueAtTime(500, t + JUMP_TIME);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.3, t + 0.06); g.gain.exponentialRampToValueAtTime(0.06, t + JUMP_TIME * 0.5);
+      g.gain.exponentialRampToValueAtTime(0.2, t + JUMP_TIME * 0.9); g.gain.exponentialRampToValueAtTime(0.0001, t + JUMP_TIME);
+      n.buffer = buf; n.connect(f); f.connect(g); g.connect(out(a)); n.start(t);
+    } catch {}
+  }
   function horn() {
     if (!SOUND) return;
     try {
@@ -499,7 +552,7 @@
     if (car && res && res.alarm) { const f = fwd(car.h); res.alarm(car.x + f[0] * 0.5, car.z + f[1] * 0.5, 0.6, 3); }
   }
 
-  window.scDrive = { get driving() { return !!car; }, get car() { return car && { x: car.x, z: car.z, h: car.h, v: car.v, steer: car.steer, y: car.y }; },
+  window.scDrive = { get driving() { return !!car; }, get car() { return car && { x: car.x, z: car.z, h: car.h, v: car.v, steer: car.steer, y: car.y, jumping: car.jump >= 0 }; },
     getIn: () => getIn(), getOut: () => getOut(),
     place(x, z, h) { if (car) { car.x = x; car.z = z; if (h !== undefined) car.h = h; car.v = 0; } } };   // place: for tests
 })();
