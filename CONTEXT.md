@@ -210,6 +210,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | cops | `window.scCops` = `{ hearts, dead, officers, cars, spawnCar, hurt, burgers }` |
 | flamethrower | registers weapon `flamethrower` (`auto: true`, fires every 0.05 s while held); its fire blobs are one InstancedMesh (unlit); sets residents in a cone along the stream alight (`scResidents.ignite`) |
 | rocket launcher | registers weapon `rocket` with walk mode; every explosion is `scCore.damage({ kind: 'blast', … })`; while it's the selected weapon (`scWalk.weapon`), cuts the building under the crosshair ahead (`scBuildings.prepare` / `expect(p, r, { dir, prio: 'aim' })`), and again when it fires (`prio: 'fire'`) |
+| black hole | registers weapon `blackhole` (key 7); takes people via `scResidents.skin(p, 'blackhole')` / `scCops.skin(i, 'blackhole')`, traffic cars (`scBurst`, proxy hidden, moved off the map like drive's `hideGhost`), props via `scWalk.takeProp`; buildings via `scBuildings.well`; `window.scBlackhole` test hooks |
 | monster | `scBuildings.list()` / `alive()` / `collapse(bd, { at, push, force, spread })`; dust from `scCore.puff` |
 | nuke | plans its own ruins and flight with `scBuildings.geometry` + `chunkSet` + `launch`; claims the buildings it cuts (`claim`) at the flash; `blastWave` for buildings already in chunks |
 | car tyres | patches `BufferGeometry.translate` (route 1) and repairs car models in the scene (route 2) |
@@ -590,3 +591,40 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
 - Test hooks: `scYuletide.detonate(x, z)` sets one off at once (with `scResidents.freeze` to put
   people there first); `scYuletide.throw(start, dir)` throws one as the weapon does (synthetic
   clicks in headless runs don't fire reliably).
+
+## Black hole grenade (savings-city-blackhole 1.0, buildings 1.6, walk mode 1.35, residents 2.2)
+
+- A walk-mode weapon (key 7). The marble bounces and rolls (`rayBuildings` for walls) and opens
+  `FUSE` s after the throw: it rises to `HOVER`, then the hole grows (black `Basic` sphere, two
+  additive back-face spheres as rim and halo, an instanced unlit disk of streaks in a tilted plane).
+- Nobody notices it (no `alarm`): people walk on until the pull's reach (growing to `REACH`) has them.
+- Pull (`pullStep`, the same in buildings' `pull`): acceleration `PULL / d²` (capped) towards the
+  hole, plus a sideways speed steered towards `SWIRL × 0.7 × √(a·d)` – **below the orbit speed**.
+  A constant sideways *acceleration* (the first try) slung everything back out near the middle
+  (v²/d outgrew the pull), so nothing was ever swallowed. Swallowed when within the eat radius,
+  also when a fast step passes through it (closest point on the step's segment).
+- Spaghettification: near the middle the instance/object matrix is `S · R` with `S` stretched along
+  the pull (`1 + 6·near`) and thinner across, times a shrink. People are drawn by this script
+  (instanced boxes: legs, torso, head, hair in their own colours); cars from their batch's geometry;
+  props are walk mode's `takeProp` objects (`matrixAutoUpdate = false`, matrix written directly).
+- Buildings 1.6 – `scBuildings.well({ x, y, z, radius, strength, eat, peel, swirl })` → `{ set(p),
+  spit(speed), close(), eaten }`: flying chunks within `radius × 1.2` are pulled (less gravity:
+  `fr.lift`), stretched (`fr.stretch`) and shrunk (`fr.scale`, both in `writeChunk`); swallowed chunks
+  get state `eaten` (collapsed to the well's point) until `spit` relaunches them (smaller, tumbling,
+  sliding). Peeling: still and resting chunks in reach fly with a chance `peel·dt·(1 − d/r)²` (near
+  side first; resting rubble keeps its place and turn); at `PEEL_COLLAPSE` (30 %) the rest is
+  collapsed towards the well.
+- Walk mode 1.35 – `scWalk.takeProp(p)`: instanced props get a Mesh per instance (own colour from
+  `instanceColor`) under an Object3D at the foot, the instance zeroed; merged ones are `detach`ed.
+  `fallen` remembers `{ gone: true }` so a rebuild hides them again. Lamps go out (`lampOut`).
+- Residents 2.2 – a fix found here: the app's children have no street of their own (they follow
+  their parent, `a`/`b` empty). Taking a parent over (`adopt`) left the child with `a = b = ''`
+  and the app's walker threw in `plan()` every frame (`n.xy.get(e.b)` undefined), stopping the
+  app's tick. Now the child gets the parent's street (`placeOnEdge`), or is taken over too.
+- The end: `spit` – the well spits its chunks, the core's damage bus gets a `blast` (source
+  `blackhole`), walk mode's `blastResidents`; people come back as gore (blobs, a shoe, rags, now and
+  then a head) that splats and lies `GORE_TIME` s; cars as darkened, burning shells (`sc:car-exploded`;
+  occupants die when the car is swallowed); props are thrown and lie where they land.
+- Test hooks: `scBlackhole.open(x, z)`, `throw(start, dir)`, `collapse()`, `holes`, `bodyInfo()`.
+  Headless: skip drawing between screenshots (`scCore.onDraw(() => skip)`) or the simulation
+  crawls (SwiftShader; dt is clamped to 0.05 per frame).

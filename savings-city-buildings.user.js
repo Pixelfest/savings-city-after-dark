@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.5
+// @version      1.6
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -47,6 +47,13 @@
  *   (residents' crush, sc:crush), and walk mode rebuilds its walls (sc:geometry-changed).
  * - Chunk physics: gravity, tumbling, landing on the ground, tipping onto the largest face, rest.
  *
+ * - Gravity wells (the black hole): well({ x, y, z, radius, strength, eat, peel }) pulls every
+ *   flying chunk within `radius` towards its middle on a swirl (lifted against gravity, stretched
+ *   along the pull and shrinking near the middle), and peels chunks off the buildings in reach –
+ *   the near side first – until a building has lost PEEL_COLLAPSE of them and the rest comes down
+ *   towards the well. Chunks that reach `eat` are swallowed (hidden, kept); spit(speed) throws
+ *   them all back out, smaller and tumbling, and close() ends the pull.
+ *
  * For other scripts: window.scBuildings (see the end of this file), and the damage bus:
  *   scCore.damage({ kind: 'blast', x, y, z, n, radius }) → crater + a hit on the building there
  *   scCore.damage({ kind: 'push', x, y, z, dir, power }) → the building there is pushed over
@@ -73,6 +80,7 @@
   const COLLAPSE_LEAN = 0.6;       // how hard the part above the impact tips over towards the hole
   const DUST = 1;                  // amount of dust when a building comes down
   const GROUND = 0.04;             // chunks come to rest on this height
+  const PEEL_COLLAPSE = 0.3;       // a well that has peeled this share of a building's chunks brings the rest down
   // -------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
@@ -173,7 +181,8 @@
         busy = true;
         if (fr.delay > 0) { fr.delay -= dt; continue; }
         fr.age += dt;
-        fr.v[1] -= 6 * dt;                                           // gravity
+        if (wells.size && pull(fr, dt)) { lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count); continue; }
+        fr.v[1] -= 6 * dt * (fr.lift ? 1 - fr.lift : 1);             // gravity (less inside a well)
         for (let a = 0; a < 3; a++) fr.off[a] += fr.v[a] * dt;
         if (!fr.landed) fr.R = mul(rot(...fr.axis, fr.w * dt), fr.R);   // tumbling through the air
         else {
@@ -210,16 +219,129 @@
   }
   function writeChunk(set, fr) {
     const { orig, n0, R, pivot, off } = fr, pos = set.pos, nor = set.nor;
+    // a chunk in a well: smaller (fr.scale) and stretched along the pull (fr.stretch: [dx, dy, dz, along, across])
+    const sc = fr.scale ?? 1, st = fr.stretch;
     let minY = Infinity;
     for (let n = 0, k = fr.start; n < fr.count; n++, k++) {
-      const a = orig[n * 3], b = orig[n * 3 + 1], c = orig[n * 3 + 2];
-      const py = pivot[1] + off[1] + R[3] * a + R[4] * b + R[5] * c;
-      pos.setXYZ(k, pivot[0] + off[0] + R[0] * a + R[1] * b + R[2] * c, py, pivot[2] + off[2] + R[6] * a + R[7] * b + R[8] * c);
+      const a = orig[n * 3] * sc, b = orig[n * 3 + 1] * sc, c = orig[n * 3 + 2] * sc;
+      let rx = R[0] * a + R[1] * b + R[2] * c, ry = R[3] * a + R[4] * b + R[5] * c, rz = R[6] * a + R[7] * b + R[8] * c;
+      if (st) { const u = (rx * st[0] + ry * st[1] + rz * st[2]) * (st[3] - st[4]); rx = rx * st[4] + st[0] * u; ry = ry * st[4] + st[1] * u; rz = rz * st[4] + st[2] * u; }
+      const py = pivot[1] + off[1] + ry;
+      pos.setXYZ(k, pivot[0] + off[0] + rx, py, pivot[2] + off[2] + rz);
       const p = n0[n * 3], q = n0[n * 3 + 1], r = n0[n * 3 + 2];
       nor.setXYZ(k, R[0] * p + R[1] * q + R[2] * r, R[3] * p + R[4] * q + R[5] * r, R[6] * p + R[7] * q + R[8] * r);
       if (py < minY) minY = py;
     }
     return minY;
+  }
+
+  // ---------- gravity wells (the black hole) ----------
+  // A well pulls flying chunks in (and lifts them), peels chunks off buildings in reach, swallows
+  // what reaches its middle and can spit it all back out.
+  const wells = new Set();
+  function well(o = {}) {
+    const w = { x: o.x || 0, y: o.y ?? 0.2, z: o.z || 0, radius: o.radius ?? 1, strength: o.strength ?? 1.2, eat: o.eat ?? 0.04, peel: o.peel ?? 1.5,
+      swirl: o.swirl ?? 0.7, eaten: [], near: [], nearAt: -1, open: true };
+    wells.add(w);
+    return {
+      get x() { return w.x; }, get eaten() { return w.eaten.length; },
+      set(p) { for (const k of ['x', 'y', 'z', 'radius', 'strength', 'eat', 'peel', 'swirl']) if (p[k] !== undefined) w[k] = p[k]; },
+      // everything it swallowed flies back out from its middle (speed: tiles/s); returns how many
+      spit(speed = 3) { return spitOut(w, speed); },
+      close() { w.open = false; wells.delete(w); for (const set of sets) for (const fr of set.frs) if (fr.well === w && fr.state === 'flying') { fr.lift = 0; fr.stretch = null; fr.well = null; } },
+    };
+  }
+  // one chunk's step in the wells' pull; true when it was swallowed
+  function pull(fr, dt) {
+    const sc = fr.scale ?? 1, x = fr.pivot[0] + fr.off[0], y = fr.pivot[1] + fr.off[1], z = fr.pivot[2] + fr.off[2];
+    let caught = false;
+    for (const w of wells) {
+      const dx = w.x - x, dy = w.y - y, dz = w.z - z, d = Math.hypot(dx, dy, dz);
+      if (d > w.radius * 1.2) continue;
+      caught = true; fr.well = w; fr.landed = false;
+      if (d < w.eat + 0.02 * sc) { swallow(fr, w); return true; }
+      const a = Math.min(40, w.strength / Math.max(d * d, 0.004)), ux = dx / d, uy = dy / d, uz = dz / d;
+      const h = Math.hypot(dx, dz) || 1, tx = -dz / h, tz = dx / h;     // around the well (one way)
+      // straight in: the pull; around: steered towards a speed below the orbit speed (√(a·d)), so
+      // chunks spiral in instead of being slung out
+      fr.v[0] += ux * a * dt; fr.v[1] += uy * a * dt; fr.v[2] += uz * a * dt;
+      const vt = fr.v[0] * tx + fr.v[2] * tz, k = Math.min(1, 3 * dt) * (w.swirl * 0.7 * Math.sqrt(a * d) - vt);
+      fr.v[0] += tx * k; fr.v[2] += tz * k;
+      const damp = Math.exp(-0.8 * dt); fr.v[0] *= damp; fr.v[1] *= damp; fr.v[2] *= damp;
+      const sp = Math.hypot(...fr.v); if (sp > 7) for (let k = 0; k < 3; k++) fr.v[k] *= 7 / sp;
+      fr.lift = clamp01(1.4 - d / w.radius);
+      fr.w = Math.min(25, (fr.w || 2) + dt * 6);                            // spinning faster on the way in
+      // spaghetti: stretched along the pull, thinner across, and smaller near the middle
+      const near = clamp01(1 - d / 0.4);
+      fr.stretch = near > 0 ? [ux, uy, uz, 1 + 4 * near * near, 1 / Math.sqrt(1 + 4 * near * near)] : null;
+      fr.scale = Math.min(fr.scale ?? 1, clamp01(d / 0.15) * 0.9 + 0.1);
+      // does this step pass through the middle? (fast chunks)
+      const vx = fr.v[0] * dt, vy = fr.v[1] * dt, vz = fr.v[2] * dt, vv = vx * vx + vy * vy + vz * vz;
+      if (vv > 1e-9) { const t = clamp01((dx * vx + dy * vy + dz * vz) / vv); if (Math.hypot(dx - vx * t, dy - vy * t, dz - vz * t) < w.eat) { swallow(fr, w); return true; } }
+      break;
+    }
+    if (!caught && fr.lift) { fr.lift = 0; fr.stretch = null; }
+    return false;
+  }
+  function swallow(fr, w) {
+    fr.state = 'eaten'; fr.well = w; fr.stretch = null; fr.scale = 0;
+    fr.off = [w.x - fr.pivot[0], w.y - fr.pivot[1], w.z - fr.pivot[2]];
+    for (const set of sets) if (set.frs.includes(fr)) { writeChunk(set, fr); w.eaten.push({ set, fr }); break; }
+  }
+  function spitOut(w, speed) {
+    const list = w.eaten; w.eaten = [];
+    for (const { set, fr } of list) {
+      if (fr.state !== 'eaten') continue;
+      // a direction on the upper side of a sphere, mostly outwards
+      const a = Math.random() * Math.PI * 2, up = rnd(-0.15, 0.85), r = Math.sqrt(1 - up * up), sp = speed * rnd(0.35, 1.1);
+      launch(set, fr, [Math.cos(a) * r * sp, up * sp + rnd(0.3, 1), Math.sin(a) * r * sp], rnd(0, 0.15), rnd(4, 14), true);
+      fr.off = [w.x - fr.pivot[0], w.y - fr.pivot[1], w.z - fr.pivot[2]];
+      fr.scale = rnd(0.45, 0.95); fr.stretch = null; fr.lift = 0; fr.well = null;
+      const t = rnd(0, Math.PI * 2), c = Math.cos(t), s = Math.sin(t);
+      fr.R = mul(rot(...fr.axis, rnd(0, 6)), [c, 0, s, 0, 1, 0, -s, 0, c]);
+    }
+    return list.length;
+  }
+  // every frame: wells peel chunks off the buildings in reach (near side first)
+  function stepWells(dt) {
+    const now = performance.now();
+    for (const w of wells) {
+      if (!w.open || !(w.peel > 0)) continue;
+      if (now - w.nearAt > 400) {                                    // buildings in reach (cut them as soon as they are)
+        w.nearAt = now;
+        w.near = list().filter((bd) => Math.hypot(Math.max(bd.x0 - w.x, 0, w.x - bd.x1), Math.max(bd.z0 - w.z, 0, w.z - bd.z1)) < w.radius);
+        for (const bd of w.near) { const st = prepare(bd, PRIO.fire); if (st) hurry(st); }
+        // rubble lying around in reach goes too
+        for (const st of solids.values()) if (st.down && st.sets && st.bd && !w.near.includes(st.bd)
+          && Math.hypot(Math.max(st.bd.x0 - w.x, 0, w.x - st.bd.x1), Math.max(st.bd.z0 - w.z, 0, w.z - st.bd.z1)) < w.radius) w.near.push(st.bd);
+      }
+      for (const bd of w.near) {
+        const st = solids.get(bd.id);
+        if (!st || st.claimed || !st.ready) continue;
+        let peeled = 0, total = 0;
+        for (const set of st.sets) for (const fr of set.frs) {
+          if (fr.state === 'gone') continue;
+          total++;
+          if (fr.state !== 'still' && fr.state !== 'rest') { peeled++; continue; }
+          const cx = fr.pivot[0] + (fr.off ? fr.off[0] : 0), cy = fr.pivot[1] + (fr.off ? fr.off[1] : 0), cz = fr.pivot[2] + (fr.off ? fr.off[2] : 0);
+          const d = Math.hypot(cx - w.x, (cy - w.y) * 0.7, cz - w.z);
+          if (d > w.radius) continue;
+          const f = 1 - d / w.radius;
+          if (Math.random() > w.peel * dt * f * f * (fr.state === 'rest' ? 3 : 1)) continue;
+          if (!st.shown) swapIn(st);
+          const l = d || 1, lying = fr.state === 'rest' ? { off: fr.off, R: fr.R } : null;
+          launch(set, fr, [(w.x - cx) / l * 0.3 + rnd(-0.1, 0.1), rnd(0.1, 0.4), (w.z - cz) / l * 0.3 + rnd(-0.1, 0.1)], 0, rnd(1, 4));
+          if (lying) Object.assign(fr, lying);                       // rubble starts from where it lies
+          if (fr.state === 'flying' && st.down) set.down = true;
+          peeled++;
+        }
+        if (!st.down && total && peeled / total >= PEEL_COLLAPSE) {
+          // what's left comes down towards the well
+          const px = Math.max(bd.x0, Math.min(bd.x1, w.x)), pz = Math.max(bd.z0, Math.min(bd.z1, w.z));
+          collapse(bd, { at: { x: px, y: Math.min(bd.top, w.y), z: pz }, push: { x: w.x - bd.cx, z: w.z - bd.cz }, force: 1.2, spread: 3 });
+        }
+      }
+    }
   }
 
   // ---------- the buildings ----------
@@ -602,6 +724,7 @@
   // ---------- the frame loop and the damage bus (as soon as the core is there) ----------
   function step(dt) {
     dt = Math.min(dt, 0.05);                                       // (bigger steps make chunks jump)
+    if (wells.size) stepWells(dt);
     stepSets(dt);
     for (const st of solids.values()) if (st.wave) stepWave(st, dt);
   }
@@ -639,7 +762,7 @@
     state(x) { const id = x && typeof x === 'object' ? x.id : x, st = solids.get(id); if (!st || st.claimed) return st ? { claimed: true } : null;
       const all = st.sets.flatMap((x) => x.frs).filter((f) => f.state !== 'gone');
       return { solid: true, ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length }; },
-    crater, hit, collapse, blastWave, claim,
+    crater, hit, collapse, blastWave, claim, well,
     get cutter() { return cutter ? cutter.mode : null; },        // 'worker' or 'page' (no worker could be made)
     // low-level, for scripts with their own plans (the nuke)
     geometry: { readMasses, boxPoly: geo.boxPoly, shatter: geo.shatter, pieceTriangles: geo.pieceTriangles, newell: geo.newell, bounds: geo.bounds, isFacade, JF },

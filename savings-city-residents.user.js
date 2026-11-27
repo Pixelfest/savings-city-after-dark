@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      2.1
+// @version      2.2
 // @description  The app's people (who walk the sidewalks, cross at junctions and go in and out of buildings) now react to everything: shot, blown up, set alight, run over, buried. Panicking people run, scream and hide. A density slider.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -285,9 +285,18 @@
     const r = { ...newPerson(), x: p.x, z: p.z, h: p.h, speed: p.speed || SPEED, slot, scId: idOf(p), temp: true, since: now() };
     if (p.k) { r.k = CHILD_HEIGHT; r.kw = CHILD_WIDTH; }
     if (p.parent) p.parent.child = null;     // a child taken over: the app's parent stays where they are
-    if (p.child) p.child.parent = null;      // a parent taken over: the app's child walks on alone
+    const kid = p.child;
+    if (kid) kid.parent = null;              // a parent taken over: the app's child walks on alone…
     removeNative(P, i);
     own[slot] = r; ownSet.add(r);
+    // …but the app's children have no street of their own (they follow the parent): give it the
+    // parent's, or the app's walker throws on it every frame; with no street to give, ours takes it too
+    if (kid && P.list.includes(kid)) {
+      const walkNet = P["net"], ok = (k) => k && walkNet && walkNet.xy && walkNet.xy.get(k);
+      if (ok(p.a) && ok(p.b) && walkNet.links && walkNet.links.get(`${p.a}|${p.b}`) && typeof P.placeOnEdge === 'function') {
+        try { P.placeOnEdge(kid, p.a, p.b, Math.max(0, p.s || 0), p.side); kid.planFor = undefined; } catch (e) { adopt(kid); }
+      } else adopt(kid);
+    }
     return r;
   }
   // our figure for this person (taking the app's one over if it's still the app's)

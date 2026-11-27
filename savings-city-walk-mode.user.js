@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.34
+// @version      1.35
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -1333,6 +1333,10 @@
     wreck(car) { let st = damage.get(car); if (!st) damage.set(car, (st = { hits: 0 })); if (!st.wreck) carExploded(car, car.x, car.z); st.wreck = true; st.t0 = performance.now() - CAR_BURN_SECONDS * 1000; car.parked = Infinity; car.speed = 0; },
     propsNear(x, z, r) { return [...props.values()].filter((p) => p.state === 'up' && Math.hypot(p.x - x, p.z - z) - (p.radius || 0) <= r); },
     knockProp(p, d) { if (p.state !== 'up') return; p.hits = Math.max(p.hits, PROP_HITS - 1); damageProp(p, d, { x: p.x, y: p.y0 + 0.05, z: p.z }); },
+    // takes a standing prop out of the city for another script to move (the black hole): returns
+    // { obj, kind, x, z, y0, h } – obj an Object3D in the scene with its pivot at the prop's foot –
+    // or null. The prop is gone for good (also after the app redraws that part of the city).
+    takeProp: (p) => takeProp(p),
     spawn: (kind, x, y, z, o) => spawn(kind, x, y, z, o),
     startEffects: () => startEffects(),
     sound: (kind) => sound(kind),
@@ -1816,6 +1820,12 @@
     // props that already fell before the app rebuilt this part: down again straight away
     for (const [k, f] of fallen) {
       const p = props.get(k); if (!p) continue;
+      if (f.gone) {                                              // taken away (the black hole): stays hidden
+        p.state = 'gone'; p.copy = null;
+        if (p.inst) { const z = new (appCamera.matrixWorld.constructor)().makeScale(0, 0, 0); for (const part of p.inst) { part.im.setMatrixAt(part.i, z); part.im.instanceMatrix.needsUpdate = true; } }
+        else if (p.sources) for (const s of p.sources) collapse(s);
+        continue;
+      }
       p.state = 'down';
       if (p.inst) poseInstanced(p, f.axis, f.angle);
       else if (p.sources) for (const s of p.sources) collapse(s);
@@ -1923,6 +1933,42 @@
     appScene.add(copy);
     p.copy = copy;
     for (const s of p.sources) collapse(s);
+  }
+  // a prop leaves the city in one piece (the black hole takes it): a copy that another script moves,
+  // pivot at its foot; the original hidden (instances: a zero matrix; merged: squeezed away)
+  function takeProp(p) {
+    if (!p || p.state !== 'up' || !appScene) return null;
+    const K = window.scCore && window.scCore.classes && window.scCore.classes();
+    let obj = null;
+    if (p.inst && K && K.Object3D) {
+      const M4 = appCamera.matrixWorld.constructor;
+      obj = new K.Object3D();
+      obj.position.set(p.x, p.y0, p.z);
+      const back = new M4().makeTranslation(-p.x, -p.y0, -p.z), zero = new M4().makeScale(0, 0, 0);
+      for (const part of p.inst) {
+        part.im.updateWorldMatrix(true, false);
+        let mat = part.im.material;
+        if (part.im.instanceColor && mat && mat.color) {           // its own colour (instanced trees have one each)
+          mat = mat.clone(); part.im.getColorAt(part.i, mat.color);
+        }
+        const m = new MeshClass(part.im.geometry, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.multiplyMatrices(part.im.matrixWorld, part.m0).premultiply(back);
+        m.castShadow = true; m.userData.scProp = true;
+        obj.add(m);
+        part.im.setMatrixAt(part.i, zero); part.im.instanceMatrix.needsUpdate = true;
+      }
+      appScene.add(obj);
+    } else if (p.sources && p.sources.length) {
+      detach(p);
+      obj = p.copy; p.copy = null;
+    }
+    if (!obj) return null;
+    obj.userData.scProp = true;
+    p.state = 'gone'; p.wobble = null;
+    fallen.set(p.key, { gone: true });
+    if (p.kind === 'lamp') lampOut(p);
+    return { obj, kind: p.kind, x: p.x, z: p.z, y0: p.y0, h: p.hc || 0.1 };
   }
   // hide a prop's triangles in a merged mesh (squeezed to a point)
   function collapse(s) {
@@ -2087,7 +2133,7 @@
           #sc-walk-ui.touch .pad{display:block}#sc-walk-ui.touch .help{display:none}
         </style>
         <div class="cross"></div>
-        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–4: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
+        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–7: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
         <button class="stop" type="button">Stoppen met lopen</button>
         <div class="sc-note"></div>
         <div class="pad"><i></i></div>`;
