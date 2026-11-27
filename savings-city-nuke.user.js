@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.5
+// @version      3.6
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -75,6 +75,8 @@
   const RUIN_COLUMN = 0.3;         // the ruin's broken top is made of columns about this wide (wider when the chunks are bigger)
   const RUIN_SHARE = 0.75;         // at the edge of the blast this share of a building still stands (less towards the centre, none in the middle)
   const RUIN_JAGGED = 0.12;        // how much the broken tops of neighbouring columns differ (tiles; 0 = one flat cut)
+  const SHELL_PLATE_SHARE = 0.6;   // buildings of floors and walls: the plates (one piece each at least) may take this share of the budget…
+  const SHELL_MAX_GROUP = 8;       // …else they're made of up to this many storeys each (fewer, bigger plates)
   const MAX_CHUNK_VERTICES = 60000;    // (× the detail setting's factor: 1, 2, 4, 8, 16) for a big city the chunk size is raised so they stay below about this (every moving chunk's
                                        // vertices are recomputed and uploaded each frame: this is what the blast costs)
   const SCATTER_DEGREES = 15;      // pieces fly away from ground zero ± this much, so debris mixes (was 35: now clearly outward)
@@ -338,11 +340,11 @@
     return { v: [dx * out + rnd(-0.1, 0.1), rnd(0.3, 1.2) * power + 0.25 + cy * 0.2, dz * out + rnd(-0.1, 0.1)], spin: rnd(1.5, 7) * power + 0.6 };
   }
   // The shockwave reached this chunk: it starts flying.
-  function launch(fr) {
+  function launch(fr, set = solid.set) {
     if (fr.active) return;
     fr.active = true;
     const f = flight(fr.pivot, fr.d || 1);
-    B().launch(solid.set, fr, f.v, 0, f.spin, true);              // (slides on along the ground: blown away)
+    B().launch(set, fr, f.v, 0, f.spin, true);             // (slides on along the ground: blown away)
   }
   // street lamps the front has passed go out; where the blast leaves less than a lamp post standing it's gone
   const LAMP_TOP = 0.47;
@@ -370,7 +372,7 @@
   // as the original walls and roof; faces inside the building are broken concrete.
   // At the flash the original walls are swapped for these pieces (they look the same); when the
   // shockwave reaches a chunk it flies off, the ruin stays, scorched, with a broken concrete top.
-  const solid = { boxes: [], pieces: [], set: null, next: 0, verts: 0, hiddenMeshes: [], claims: new Set() };
+  const solid = { boxes: [], pieces: [], set: null, sets: [], next: 0, verts: 0, hiddenMeshes: [], claims: new Set() };
 
   // How high a column of a ruin still stands, for a building of height H: nothing near the centre,
   // a growing share of the building further out, uneven from column to column.
@@ -410,6 +412,10 @@
     }
     if (!solid.boxes.length || !mat) return;
     solid.boxes.sort((a, b) => a.dMin - b.dMin);
+    solid.mat = mat;
+    // the buildings setting "Vloeren en muren": hollow buildings (see planShell)
+    const model = B().shellModel && B().geometry.shellPlates ? B().shellModel() : null;
+    if (model) { yield* planShell(model); return; }
     // One chunk size for the whole city, raised for a big city so the pieces stay within budget.
     // (A chunk is cut until it is no longer than the size in any direction: never a long stick.)
     // Measured: about 140 vertices per (volume ÷ size³), ruins included (their columns grow with the size).
@@ -461,6 +467,85 @@
     solid.mat = mat;
   }
 
+  // The shell model (buildings setting "Vloeren en muren"): buildings are storeys of outer walls on
+  // floor slabs (scBuildings.geometry.shellPlates). Per box one break height (shellKeep: like the
+  // solid columns' – nothing near ground zero, more further out – with a jagged line along the
+  // building, RUIN_JAGGED up and down):
+  //   – the storeys wholly below the jagged line: the ruin, still and uncut, its walls one plate
+  //     over the whole ruin height (the same facade) and a slab per storey – a hollow ruin with its
+  //     floors; it never moves, so it doesn't count against the budget and goes into a layer of
+  //     its own (only its colours change, when it's scorched);
+  //   – the storeys the jagged line runs through: k storeys to a plate, cut into chunks; chunks
+  //     below the line stay (ruin), the rest fly;
+  //   – above that: k storeys to a plate, cut into chunks, all flying.
+  // A hollow building can't be made of fewer pieces than one per plate, so when the flying plates
+  // (k = 1) are more than SHELL_PLATE_SHARE of the budget (MAX_CHUNK_VERTICES ÷ 36 vertices a
+  // piece), k goes up (2, 3 … storeys to a wall, fewer slabs) until they fit; then the chunk size
+  // is the smallest that keeps all pieces within the budget.
+  function shellKeep(d, H) {
+    if (d <= nuke.total) return -Infinity;                        // nothing stays (the foundations are the lot)
+    const f = clamp01((d - nuke.total) / (nuke.edge - nuke.total));
+    return FOUNDATION_HEIGHT + (H - FOUNDATION_HEIGHT) * RUIN_SHARE * Math.pow(f, 0.8);
+  }
+  function* planShell(model) {
+    const { shellPlates, shatter, pieceTriangles, newell, bounds } = B().geometry;
+    const budget = (MAX_CHUNK_VERTICES * detailFactor()) / 36, perArea = model.piecesPerArea || 2.8;
+    const boxes = [];
+    for (const b of solid.boxes) {
+      const n = Math.max(1, Math.round((b.y1 - b.y0) / model.storey)), step = (b.y1 - b.y0) / n, H = Math.max(...b.siblings.map((x) => x.y1));
+      const d = Math.hypot((b.x0 + b.x1) / 2 - nuke.cx, (b.z0 + b.z1) / 2 - nuke.cz), base = shellKeep(d, H);
+      // the jagged line: smooth waves along the building, up to RUIN_JAGGED up and down
+      const p = [rnd(0, 6.3), rnd(0, 6.3), rnd(0, 6.3)], q = [rnd(5, 9), rnd(5, 9), rnd(10, 16)];
+      const keepAt = (x, z) => base + RUIN_JAGGED * (0.6 * Math.sin(q[0] * x + p[0]) * Math.sin(q[1] * z + p[1]) + 0.4 * Math.sin(q[2] * (x + z) + p[2]));
+      const level = (y, up) => Math.min(b.y1, Math.max(b.y0, b.y0 + (up ? Math.ceil((y - b.y0) / step - 1e-6) : Math.floor((y - b.y0) / step + 1e-6)) * step));
+      const ruinTop = base === -Infinity ? b.y0 : level(base - RUIN_JAGGED, false), split = base === -Infinity ? b.y0 : level(base + RUIN_JAGGED, true);
+      const wall = b.wallColor, concrete = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
+      boxes.push({ b, d, keepAt, ruinTop, split, concrete });
+    }
+    const whole = (b) => ({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1 });
+    // the plates that are cut: where the line runs (storey by storey) and above it (k storeys each)
+    const cutPlates = (k) => {
+      const out = [];
+      for (const bx of boxes) {
+        const { b, ruinTop, split } = bx;
+        if (split > ruinTop + 1e-4) for (const pl of shellPlates(b, model, whole(b), ruinTop, split, k, [])) out.push({ ...pl, bx, line: true });
+        if (b.y1 > split + 1e-4) for (const pl of shellPlates(b, model, whole(b), split, b.y1, k, [])) out.push({ ...pl, bx, line: false });
+      }
+      return out;
+    };
+    let k = 1, plates = cutPlates(1);
+    while (plates.length > budget * SHELL_PLATE_SHARE && k < SHELL_MAX_GROUP) { k++; plates = cutPlates(k); yield; }
+    // the chunk size: the smallest that keeps the pieces (≈ perArea × area ÷ size², at least 1 a plate) within the budget
+    for (const pl of plates) { const { lo, hi } = bounds(pl.poly), e = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]].sort((x, y) => y - x); pl.area = e[0] * e[1]; }
+    const count = (sz) => plates.reduce((n, pl) => n + Math.max(1, (perArea * pl.area) / (sz * sz)), 0);
+    let lo = CHUNK_SIZE / Math.sqrt(detailFactor()), hi = 20;
+    if (count(lo) > budget) { for (let i = 0; i < 40; i++) { const mid = Math.sqrt(lo * hi); if (count(mid) > budget) lo = mid; else hi = mid; } lo = hi; }
+    solid.size = lo; solid.group = k; solid.plates = plates.length; solid.ruinVerts = 0;
+    const ruinPiece = (tris, d) => { solid.pieces.push({ tris, d, still: true, dark: scorch(d) }); solid.ruinVerts += tris.length * 3; };
+    // the ruins below the line: still, uncut
+    for (const { b, d, ruinTop, concrete } of boxes) {
+      if (ruinTop <= b.y0 + 1e-4) continue;
+      for (const pl of shellPlates(b, model, whole(b), b.y0, ruinTop, 1, [], true)) ruinPiece(pieceTriangles(pl.poly, b, concrete.map((v) => v * rnd(0.92, 1.06))), d);
+      yield;
+    }
+    // the cut plates: chunks below the line stay, the rest fly
+    let n = 0;
+    for (const pl of plates) {
+      const chunks = [], { b, concrete, keepAt } = pl.bx;
+      shatter(pl.poly, solid.size, chunks);
+      for (const ch of chunks) {
+        const s2 = rnd(0.88, 1.1), tris = pieceTriangles(ch, b, concrete.map((v) => v * s2));
+        const { lo: l, hi: h } = bounds(ch), cx = (l[0] + h[0]) / 2, cy = (l[1] + h[1]) / 2, cz = (l[2] + h[2]) / 2, d = Math.hypot(cx - nuke.cx, cz - nuke.cz);
+        if (pl.line && cy < keepAt(cx, cz)) { ruinPiece(tris, d); continue; }
+        let big = null, area = -1;                                // it lands on its largest face
+        for (const f of ch) { const a = Math.hypot(...newell(f.v)); if (a > area) { area = a; big = f.n; } }
+        solid.pieces.push({ tris, d, still: false, normal: big, dark: scorch(d) });
+        solid.verts += tris.length * 3;
+      }
+      if (++n % 100 === 0) yield;
+    }
+  }
+
   // Which triangles of the drawn city meshes belong to a box that is replaced: hidden at the flash.
   function* flagSolidTriangles() {
     if (!solid.boxes.length) return;
@@ -494,19 +579,27 @@
 
   // Write all pieces into one layer with the facade material (the solid-buildings script's chunk
   // set); drawn from the flash on.
+  // (The shell model: the ruins get a layer of their own – they're many and never move, and the
+  // moving layer's buffer is uploaded over the range that moved – and its rubble piles up.)
   function buildSolids() {
     if (!solid.pieces.length || !solid.mat) return;
     solid.pieces.sort((a, b) => a.d - b.d);
     const c = window.scCore, mat = c && c.darkFacade ? c.darkFacade(solid.mat) : solid.mat;   // no power: no lit windows in the ruins
-    const set = B().chunkSet(solid.pieces, mat, { parent: nukeRoot, hidden: true, release: true });
-    solid.pieces.forEach((pc, i) => { pc.fr = set.frs[i]; });
-    solid.set = set; solid.mesh = set.mesh;
+    const layers = solid.group ? [solid.pieces.filter((p) => !p.still), solid.pieces.filter((p) => p.still)] : [solid.pieces];
+    solid.sets = [];
+    for (const list of layers) {
+      if (!list.length) continue;
+      const set = B().chunkSet(list, mat, { parent: nukeRoot, hidden: true, release: true, piles: !!solid.group && !list[0].still });
+      list.forEach((pc, i) => { pc.fr = set.frs[i]; pc.set = set; });
+      solid.sets.push(set);
+    }
+    solid.set = solid.sets[0]; solid.mesh = solid.set.mesh;
   }
 
   // The flash: original walls out, solid pieces in (they look the same).
   function showSolids() {
     if (!solid.mesh) return;
-    solid.mesh.visible = true;
+    for (const set of solid.sets) set.mesh.visible = true;
     for (const pid of solid.claims) B().claim(pid);
     for (const job of jobs) {
       if (!job.solid) continue;
@@ -526,25 +619,23 @@
   // Each frame: pieces the front has passed fly off (chunks) or get scorched (the ruin).
   function advanceSolids(f) {
     if (!solid.set) return;
-    const pcs = solid.pieces, C = solid.set.col;
-    let scorched = false, lo = Infinity, hi = -Infinity;
+    const pcs = solid.pieces, range = new Map();                  // set → [lo, hi] of the colours changed
     while (solid.next < pcs.length && pcs[solid.next].d <= f) {
-      const fr = pcs[solid.next++].fr;
-      lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count);
+      const pc = pcs[solid.next++], fr = pc.fr, set = pc.set || solid.set, C = set.col;
+      const r = range.get(set) || range.set(set, [Infinity, -Infinity]).get(set);
+      r[0] = Math.min(r[0], fr.start); r[1] = Math.max(r[1], fr.start + fr.count);
       if (fr.still) {
         for (let k = fr.start; k < fr.start + fr.count; k++) C.setXYZ(k, C.getX(k) * fr.dark, C.getY(k) * fr.dark, C.getZ(k) * fr.dark);
-        scorched = true;
       } else {
         const dk = 0.55 + 0.45 * fr.dark;                         // flying chunks: a little scorched
         for (let k = fr.start; k < fr.start + fr.count; k++) C.setXYZ(k, C.getX(k) * dk, C.getY(k) * dk, C.getZ(k) * dk);
-        scorched = true;
-        launch(fr);
+        launch(fr, set);
         if (debris && Math.random() < 0.08 * debrisChance) spawnDebrisAt(fr.pivot[0], fr.pivot[1], fr.pivot[2], fr.d, [C.getX(fr.start), C.getY(fr.start), C.getZ(fr.start)], 0.03);
       }
     }
-    if (scorched) {
-      if (C.addUpdateRange) { C.addUpdateRange(lo * 3, (hi - lo) * 3); }
-      C.needsUpdate = true;
+    for (const [set, [lo, hi]] of range) {
+      if (set.col.addUpdateRange) set.col.addUpdateRange(lo * 3, (hi - lo) * 3);
+      set.col.needsUpdate = true;
     }
   }
 
@@ -980,12 +1071,13 @@
     }
     // buildings as solids: boxes → ruin columns + chunks; their original triangles are swapped at the flash
     try { yield* planSolids(); yield* flagSolidTriangles(); yield; buildSolids(); }
-    catch (e) { console.warn('[nuke] solid buildings failed: buildings will only be cut off', e); solid.pieces = []; solid.set = null; solid.mesh = null; for (const j of jobs) j.solid = null; }
+    catch (e) { console.warn('[nuke] solid buildings failed: buildings will only be cut off', e); solid.pieces = []; solid.set = null; solid.sets = []; solid.mesh = null; for (const j of jobs) j.solid = null; }
     const toBreak = jobs.reduce((x, j) => x + j.breakable, 0);
     debrisChance = Math.min(1 / GRAVEL, (maxDebris * 0.9) / Math.max(1, toBreak * GRAVEL));
     console.info('[nuke] ready · ground zero', nuke.cx.toFixed(1), nuke.cz.toFixed(1), '· city radius', nuke.R.toFixed(1),
       '· meshes', jobs.length, '· other pieces that will break', toBreak,
-      '· building boxes', solid.boxes.length, '· chunk size', (solid.size || 0).toFixed(2), '· pieces', solid.pieces.length, '(' + (solid.verts / 3 | 0) + ' triangles)');
+      '· building boxes', solid.boxes.length, '· chunk size', (solid.size || 0).toFixed(2), '· pieces', solid.pieces.length, '(' + (solid.verts / 3 | 0) + ' triangles)',
+      solid.group ? '· floors and walls: ' + solid.group + ' storey(s) to a flying plate, ' + solid.plates + ' plates, ruins ' + ((solid.ruinVerts || 0) / 3 | 0) + ' triangles' : '');
     window.scNukeDebug = { nuke, jobs, solid, debrisCount: () => dN };
   }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.7
+// @version      1.8
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -491,6 +491,7 @@
     const core = w >= SHELL_CORE && d >= SHELL_CORE ? 4 * Math.min(SHELL_CORE_SIZE, w / 4, d / 4) * h : 0;
     return 2 * (w + d) * h + storeys * w * d + core;
   }
+  const shellSpec = () => ({ kind: 'shell', storey: SHELL_STOREY, wall: SHELL_WALL, slab: SHELL_SLAB, core: SHELL_CORE, coreSize: SHELL_CORE_SIZE, piecesPerArea: SHELL_PIECES_PER_AREA });
   // the building model the setting asks for: true = shell (floors and walls)
   const shellModel = () => !!(C() && C().settings && C().settings.get('buildingModel') === 1);
   // The cutter: cutterCore (at the end of this file) runs in a worker made from its own source
@@ -556,7 +557,7 @@
     const shell = shellModel();
     const st = { bd, hits: 0, ready: false, set: null, sets: [], shown: false, down: false, wave: null, pending: [], spots: [], refining: 0, shell, size: chunkSizeFor(bd, shell), t0: performance.now() };
     solids.set(bd.id, st);
-    const model = shell ? { kind: 'shell', storey: SHELL_STOREY, wall: SHELL_WALL, slab: SHELL_SLAB, core: SHELL_CORE, coreSize: SHELL_CORE_SIZE } : null;
+    const model = shell ? shellSpec() : null;
     getCutter().send({ op: 'cut', b: bd.id, boxes: plainBoxes(bd.boxes), size: st.size, model, prio }).then((m) => {
       try {
         st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, piles: shell, center: [bd.cx, bd.cz] });
@@ -884,7 +885,10 @@
     crater, hit, collapse, blastWave, claim, well,
     get cutter() { return cutter ? cutter.mode : null; },        // 'worker' or 'page' (no worker could be made)
     // low-level, for scripts with their own plans (the nuke)
-    geometry: { readMasses, boxPoly: geo.boxPoly, shatter: geo.shatter, pieceTriangles: geo.pieceTriangles, newell: geo.newell, bounds: geo.bounds, isFacade, JF },
+    geometry: { readMasses, boxPoly: geo.boxPoly, shatter: geo.shatter, pieceTriangles: geo.pieceTriangles, newell: geo.newell, bounds: geo.bounds, shellPlates: geo.shellPlates, isFacade, JF },
+    // the building model the setting asks for now: null (solid) or the shell's measures for
+    // geometry.shellPlates { kind: 'shell', storey, wall, slab, core, coreSize, piecesPerArea }
+    shellModel: () => (shellModel() ? shellSpec() : null),
     chunkSet, buildSet, launch,
     get chunkSize() { return CHUNK_SIZE; },
     chunkSizeFor: (x) => { const bd = byId(x); return bd ? chunkSizeFor(bd) : CHUNK_SIZE; },
@@ -1066,9 +1070,71 @@
     }
 
 
+    // The shell model's plates of box b (m: { storey, wall, slab, core, coreSize }) within the
+    // rectangle r = { x0, x1, z0, z1 } (part of the box's footprint: walls only where r reaches the
+    // box's sides) between heights ya and yb, with k storeys to a plate (one wall over k storeys, a
+    // slab only on top of every k-th: coarser, fewer pieces). Each storey: four outer walls on the
+    // slab below, the slab on top over the whole footprint (its edge is part of the facade; the
+    // top one is the roof), and a concrete core in wide buildings. Faces cut off by r, ya or yb are
+    // breaks (concrete). whole: walls and core in one plate from ya to yb and the slabs between
+    // the walls (for parts that never move – the nuke's ruins: far fewer plates, the same facade).
+    // Sets b.inner (inside colours for pieceTriangles). Pushes { poly, kind } onto out (kind: 1
+    // wall, 2 slab, 3 core).
+    function shellPlates(b, m, r, ya, yb, k, out, whole = false) {
+      const W = b.x1 - b.x0, D = b.z1 - b.z0, H = b.y1 - b.y0, E = 1e-6;
+      const T = Math.min(m.wall, W / 4, D / 4), n = Math.max(1, Math.round(H / m.storey)), S = Math.min(m.slab, H / n / 3);
+      if (!b.inner) {
+        const w = b.wallColor, con = [w[0] * 0.55 + 0.15, w[1] * 0.55 + 0.145, w[2] * 0.55 + 0.14], mix = (c, f, add) => c.map((v, i) => v * f + add[i]);
+        b.inner = { floor: mix(con, 0.8, [0.09, 0.085, 0.08]), ceil: mix(con, 0.6, [0.03, 0.03, 0.03]), wall: mix(w, 0.25, [0.36, 0.34, 0.31]) };
+      }
+      const ext = (side) => ({ side, ext: true }), IN = (kk) => ({ inner: kk });
+      const sx0 = Math.abs(r.x0 - b.x0) < E, sx1 = Math.abs(r.x1 - b.x1) < E, sz0 = Math.abs(r.z0 - b.z0) < E, sz1 = Math.abs(r.z1 - b.z1) < E;
+      const add = (x0, y0, z0, x1, y1, z1, tags, kind) => {
+        const c0 = Math.max(y0, ya), c1 = Math.min(y1, yb);
+        if (x1 - x0 < 1e-4 || c1 - c0 < 1e-4 || z1 - z0 < 1e-4) return;
+        const t = { ...tags };
+        if (c1 < y1 - E) t['+y'] = undefined;
+        if (c0 > y0 + E) t['-y'] = undefined;
+        out.push({ poly: boxPoly(x0, c0, z0, x1, c1, z1, t), kind });
+      };
+      const side = (on, s) => (on ? ext(s) : undefined);
+      const core = W >= m.core && D >= m.core ? Math.min(m.coreSize, W / 4, D / 4) / 2 : 0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+      if (whole) {
+        const top = yb >= b.y1 - E ? ext('+y') : undefined, za = Math.max(r.z0, b.z0 + T), zb = Math.min(r.z1, b.z1 - T);
+        if (sz0) add(r.x0, ya, b.z0, r.x1, yb, b.z0 + T, { '-z': ext('-z'), '+z': IN('wall'), '+x': side(sx1, '+x'), '-x': side(sx0, '-x'), '+y': top }, 1);
+        if (sz1) add(r.x0, ya, b.z1 - T, r.x1, yb, b.z1, { '+z': ext('+z'), '-z': IN('wall'), '+x': side(sx1, '+x'), '-x': side(sx0, '-x'), '+y': top }, 1);
+        if (sx0) add(b.x0, ya, za, b.x0 + T, yb, zb, { '-x': ext('-x'), '+x': IN('wall'), '+y': top }, 1);
+        if (sx1) add(b.x1 - T, ya, za, b.x1, yb, zb, { '+x': ext('+x'), '-x': IN('wall'), '+y': top }, 1);
+        if (core) add(Math.max(r.x0, cx - core), ya, Math.max(r.z0, cz - core), Math.min(r.x1, cx + core), yb, Math.min(r.z1, cz + core), { '+x': IN('wall'), '-x': IN('wall'), '+z': IN('wall'), '-z': IN('wall') }, 3);
+        const x0 = sx0 ? r.x0 + T : r.x0, x1 = sx1 ? r.x1 - T : r.x1, z0 = sz0 ? r.z0 + T : r.z0, z1 = sz1 ? r.z1 - T : r.z1;
+        for (let i = 1; i <= n; i++) {
+          const hi = b.y0 + (H * i) / n;
+          if (hi - S < yb - E && hi > ya + E) add(x0, hi - S, z0, x1, hi, z1, { '+y': i === n ? ext('+y') : IN('floor'), '-y': IN('ceil') }, 2);
+        }
+        return out;
+      }
+      for (let i = 0; i < n; i += Math.max(1, k)) {
+        const g = Math.min(n, i + Math.max(1, k)), lo = b.y0 + (H * i) / n, hi = b.y0 + (H * g) / n, yw = hi - S;
+        if (hi <= ya + E || lo >= yb - E) continue;
+        // walls: the ±z ones over the whole width (their ends are the corners), the ±x ones between them
+        if (sz0) add(r.x0, lo, b.z0, r.x1, yw, b.z0 + T, { '-z': ext('-z'), '+z': IN('wall'), '+x': side(sx1, '+x'), '-x': side(sx0, '-x') }, 1);
+        if (sz1) add(r.x0, lo, b.z1 - T, r.x1, yw, b.z1, { '+z': ext('+z'), '-z': IN('wall'), '+x': side(sx1, '+x'), '-x': side(sx0, '-x') }, 1);
+        const za = Math.max(r.z0, b.z0 + T), zb = Math.min(r.z1, b.z1 - T);
+        if (sx0) add(b.x0, lo, za, b.x0 + T, yw, zb, { '-x': ext('-x'), '+x': IN('wall') }, 1);
+        if (sx1) add(b.x1 - T, lo, za, b.x1, yw, zb, { '+x': ext('+x'), '-x': IN('wall') }, 1);
+        if (core) {
+          const x0 = Math.max(r.x0, cx - core), x1 = Math.min(r.x1, cx + core), z0 = Math.max(r.z0, cz - core), z1 = Math.min(r.z1, cz + core);
+          add(x0, lo, z0, x1, yw, z1, { '+x': IN('wall'), '-x': IN('wall'), '+z': IN('wall'), '-z': IN('wall') }, 3);
+        }
+        // the slab on top: the roof (outside) or the next storey's floor; underneath, the ceiling
+        add(r.x0, yw, r.z0, r.x1, hi, r.z1, { '+x': side(sx1, '+x'), '-x': side(sx0, '-x'), '+z': side(sz1, '+z'), '-z': side(sz0, '-z'),
+          '+y': g === n ? ext('+y') : IN('floor'), '-y': IN('ceil') }, 2);
+      }
+      return out;
+    }
     // the texture mapping of a wall at point p (the numbers from readMasses)
     function wallUV(w, p) { return [w.ua + (p[w.along] - w.sa) * w.du, w.va + (p[1] - w.ya) * w.dv]; }
-    const lib = { boxPoly, split, shatter, pieceTriangles, newell, bounds, JF };
+    const lib = { boxPoly, split, shatter, pieceTriangles, newell, bounds, shellPlates, JF };
     if (!port) return lib;
 
     // ---- pieces → flat arrays ----
@@ -1134,23 +1200,11 @@
     // footprint, so its edge is part of the facade), with a concrete core in wide buildings. Every
     // plate is cut on its own; kind: 1 wall, 2 slab, 3 core.
     function* shell(b, size, m, concrete, pieces) {
-      const W = b.x1 - b.x0, D = b.z1 - b.z0, H = b.y1 - b.y0;
-      const T = Math.min(m.wall, W / 4, D / 4), n = Math.max(1, Math.round(H / m.storey)), S = Math.min(m.slab, H / n / 3);
-      const mix = (c, k, add) => c.map((v, i) => v * k + add[i]);
-      b.inner = { floor: mix(concrete, 0.8, [0.09, 0.085, 0.08]), ceil: mix(concrete, 0.6, [0.03, 0.03, 0.03]), wall: mix(b.wallColor, 0.25, [0.36, 0.34, 0.31]) };
-      const ext = (side) => ({ side, ext: true }), IN = (k) => ({ inner: k });
-      const add = (poly, kind) => { const out = []; shatter(poly, size, out); for (const ch of out) pieces.push(piece(ch, b, concrete.map((v) => v * rnd(0.88, 1.1)), { kind })); };
-      const core = W >= m.core && D >= m.core ? Math.min(m.coreSize, W / 4, D / 4) / 2 : 0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+      const n = Math.max(1, Math.round((b.y1 - b.y0) / m.storey)), r = { x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1 };
       for (let i = 0; i < n; i++) {
-        const ya = b.y0 + (H * i) / n, yb = b.y0 + (H * (i + 1)) / n, yw = yb - S, top = i === n - 1;
-        // walls: the ±z ones over the whole width (their ends are the corners), the ±x ones between them
-        add(boxPoly(b.x0, ya, b.z0, b.x1, yw, b.z0 + T, { '-z': ext('-z'), '+z': IN('wall'), '+x': ext('+x'), '-x': ext('-x') }), 1);
-        add(boxPoly(b.x0, ya, b.z1 - T, b.x1, yw, b.z1, { '+z': ext('+z'), '-z': IN('wall'), '+x': ext('+x'), '-x': ext('-x') }), 1);
-        add(boxPoly(b.x0, ya, b.z0 + T, b.x0 + T, yw, b.z1 - T, { '-x': ext('-x'), '+x': IN('wall') }), 1);
-        add(boxPoly(b.x1 - T, ya, b.z0 + T, b.x1, yw, b.z1 - T, { '+x': ext('+x'), '-x': IN('wall') }), 1);
-        if (core) add(boxPoly(cx - core, ya, cz - core, cx + core, yw, cz + core, { '+x': IN('wall'), '-x': IN('wall'), '+z': IN('wall'), '-z': IN('wall') }), 3);
-        // the slab on top: the roof (outside) or the next storey's floor; underneath, the ceiling
-        add(boxPoly(b.x0, yw, b.z0, b.x1, yb, b.z1, { '+x': ext('+x'), '-x': ext('-x'), '+z': ext('+z'), '-z': ext('-z'), '+y': top ? ext('+y') : IN('floor'), '-y': IN('ceil') }), 2);
+        const plates = [];
+        shellPlates(b, m, r, b.y0 + ((b.y1 - b.y0) * i) / n, b.y0 + ((b.y1 - b.y0) * (i + 1)) / n, 1, plates);
+        for (const pl of plates) { const out = []; shatter(pl.poly, size, out); for (const ch of out) pieces.push(piece(ch, b, concrete.map((v) => v * rnd(0.88, 1.1)), { kind: pl.kind })); }
         yield;
       }
     }

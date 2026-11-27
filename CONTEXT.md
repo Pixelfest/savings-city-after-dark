@@ -353,7 +353,28 @@ A first version stamped each piece's top and landed pieces on the highest top: t
 taller than the building (pieces land on the highest point) – adding thickness keeps it to the
 amount of material. Measured in the local runner (a 1.2 × 1.2 × 1.57 tower, 740 pieces, collapse
 from an impact): highest piece 1.7 (tops) → 0.95 (thickness × 1.6, highest cell) → 0.67 (× 1.2,
-halfway average/highest). The heap is steep-sided: pieces don't slide off it. The nuke doesn't use the shell model (its own ruin planner cuts solid boxes).
+halfway average/highest). The heap is steep-sided: pieces don't slide off it.
+
+Buildings 1.8 / nuke 3.6 – the nuke follows the setting. `shellPlates(b, m, r, ya, yb, k, out, whole)`
+moved into the shared geometry (`scBuildings.geometry.shellPlates`; `scBuildings.shellModel()` → the
+measures or null): plates of box `b` inside rectangle `r` between heights `ya`–`yb`, `k` storeys to a
+plate (fewer, bigger plates), `whole` = walls and core as one plate over `ya`–`yb` with the slabs
+between them (for parts that never move). The cutter's `shell()` calls it storey by storey (same
+pieces as 1.7). Nuke `planShell`: per box one break height (`shellKeep`: the solid columns' formula
+without the randomness, −∞ within the total radius) with a smooth jagged line (`RUIN_JAGGED`): the
+storeys below it are the ruin (`whole`, uncut, still: a separate chunk set, so the moving set's
+uploads stay small; the ruins don't count against the budget), the storeys the line runs through are
+cut and chunks below the line stay, everything above flies. A hollow building can't have fewer pieces
+than plates: when the plates are more than `SHELL_PLATE_SHARE` (0.6) of the budget
+(`MAX_CHUNK_VERTICES` ÷ 36), `k` goes up to `SHELL_MAX_GROUP` (8); the chunk size is then found by
+bisection (pieces ≈ max(1, 2.8 × plate area ÷ size²) per plate). The moving set has `piles`.
+First try (ruin columns of 0.3 cut per storey, like the solid ruins): 4850 flying plates even at
+k = 8 and 225k ruin triangles for 15 kt over the local city – far over budget. Measured now in the
+local runner, detail 1: 1 kt (96 boxes) k = 8, chunk size 1.24, ~1850 pieces / 17k triangles flying,
+ruins ~4.6k triangles (solid: size 0.81, 1662 pieces / 21k triangles); 15 kt over the whole city
+(180 boxes) k = 8 and the plates uncut (~2700 pieces / 20k triangles: at about 9 pieces a building
+the budget can't cut them). Lone facade panels can stay standing on the ruin's walls (a coarse
+chunk of the break storeys whose middle is under the line).
 
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
