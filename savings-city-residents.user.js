@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      2.4
+// @version      2.5
 // @description  The app's people (who walk the sidewalks, cross at junctions and go in and out of buildings) now react to everything: shot, blown up, set alight, run over, buried. Panicking people run, scream and hide. A density slider.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -108,7 +108,11 @@
   // On fire (flamethrower, explosions): run screaming, fall and writhe on the ground, die there.
   const BURN_RUN = [1, 5];        // seconds someone on fire runs screaming…
   const BURN_WRITHE = 5;          // …then lies on the ground shaking (less and less) this long, and dies
-  const BURN_TOUCH = 0.035;       // tiles: someone on fire sets people this close alight
+  const BURN_TOUCH = 0.035;       // tiles: someone on fire can set people this close alight…
+  const BURN_TOUCH_RATE = [4, 1.2];// …with this chance per second of touching (running / writhing or dead)
+  const FIRE_FEAR = 0.4;          // tiles (≈ 8 m): people keep this far from fire (people on fire, burning bodies, burning ground)…
+  const FIRE_FEAR_EVERY = 0.25;   // …checked this often (seconds)
+  const GROUND_FIRE_RATE = 3;     // burning ground (groundFire): chance per second to catch fire while standing in it
   const BURN_CORPSE = 8;          // seconds a dead body keeps burning (the fire dies down at the end)
   const CHAR_COLOR = '#151210';   // a burnt body ends up this colour (charred)…
   const CHAR_RATE = [0.15, 0.35, 0.6];   // …blackening this fast (per second) running, writhing, dead
@@ -544,8 +548,9 @@
   const nodeZone = (n) => { const q = net.xy.get(n); return q ? zoneAt(q[0], q[1]) : null; };
   // walk (not run) away from (x, z) for a while: at junctions the way that leads furthest from it
   function walkAway(p, x, z, seconds) {
+    ensurePlaced(p);                                             // (someone just taken over from the app)
     p.away = seconds; p.fleeFrom = [x, z]; p.planFor = null;
-    if (p.state === 'walk' && !p.parent && p.dir[0] * (x - p.x) + p.dir[1] * (z - p.z) > 0 && !onAsphalt(...edgePoint(p.a, p.dir, p.side, p.s))) {
+    if (p.state === 'walk' && !p.parent && p.dir && p.dir[0] * (x - p.x) + p.dir[1] * (z - p.z) > 0 && !onAsphalt(...edgePoint(p.a, p.dir, p.side, p.s))) {
       placeOnEdge(p, p.b, p.a, 1 - p.s, -p.side);                // turn round: same sidewalk, other way
     }
   }
@@ -1293,6 +1298,39 @@
   // the fire spreading to whoever touches them.
   const burners = [];
   let smokeAcc = 0;
+  // Burning ground (other scripts: groundFire): { x, z, r, until }. People keep away from it and
+  // catch fire while they stand in it.
+  const groundFires = [];
+  let fearAcc = 0;
+  // Fire is scary: everyone outside (and on their feet) within FIRE_FEAR of a person on fire, a
+  // burning body or burning ground walks away from it – runs, when it's close. The app's people
+  // are taken over for that (as runners: back to the app when they've calmed down).
+  function fearFire(dt, crowd) {
+    fearAcc += dt;
+    if (fearAcc < FIRE_FEAR_EVERY || !crowd) return;
+    const step = fearAcc; fearAcc = 0;
+    const tNow = now();
+    for (let i = groundFires.length - 1; i >= 0; i--) if (groundFires[i].until < tNow) groundFires.splice(i, 1);
+    if (!burners.length && !groundFires.length) return;
+    const sources = burners.map((p) => ({ x: p.x, z: p.z, r: 0 })).concat(groundFires);
+    const catchChance = 1 - Math.exp(-GROUND_FIRE_RATE * step);
+    for (const src of sources) {
+      const reach = src.r + FIRE_FEAR, c = Math.ceil(reach / PASS_CELL), cx = Math.floor(src.x / PASS_CELL), cz = Math.floor(src.z / PASS_CELL);
+      for (let a = -c; a <= c; a++) for (let b = -c; b <= c; b++) {
+        const list = crowd.get((cx + a) + ',' + (cz + b)); if (!list) continue;
+        for (const q of list) {
+          if (q.burn || q.state === 'down' || q.state === 'gone' || q.state === 'inside' || q.lie > 0) continue;
+          const d = Math.hypot(q.x - src.x, q.z - src.z);
+          if (d > reach) continue;
+          if (src.r > 0 && d <= src.r && Math.random() < catchChance) { ignite(q, src.x, src.z); continue; }   // standing in the flames
+          if (q.fireFear > tNow || (q.parent && q.parent.fireFear > tNow)) continue;   // already on their way
+          const p = ownOf(q.parent || q, false); if (!p) continue;  // (a child goes with its parent)
+          p.fireFear = tNow + 1.5;
+          if (d < src.r + FIRE_FEAR * 0.45) panic(p, src.x, src.z, rnd(3, 5)); else walkAway(p, src.x, src.z, rnd(3, 5));
+        }
+      }
+    }
+  }
   function stepFire(dt, t, crowd) {
     burning = burners.length;
     if (!flames) return;
@@ -1314,6 +1352,7 @@
     }
     flames.count = k;
     if (k) { if (flames.instanceMatrix.addUpdateRange) flames.instanceMatrix.addUpdateRange(0, k * 16); flames.instanceMatrix.needsUpdate = true; }
+    if (dt > 0) fearFire(dt, crowd);
     if (!burners.length || !(dt > 0)) return;
     // smoke: about 3 puffs a second per person on fire (the core's solid puffs)
     if (core && core.smoke) {
@@ -1325,13 +1364,14 @@
           { vy: rnd(0.15, 0.3), rise: rnd(0.2, 0.35), size: rnd(0.02, 0.035), grow: 3, life: rnd(1.5, 2.5), drag: 1 });
       }
     }
-    // touching someone on fire: alight too
+    // touching someone on fire: alight too (a chance per second of touching: brushing past isn't always enough)
     if (!crowd) return;
     for (const p of burners) {
+      const chance = BURN_TOUCH_RATE[p.state === 'down' || (p.burn && p.burn.phase !== 'run') ? 1 : 0] * dt;
       const cx = Math.floor(p.x / PASS_CELL), cz = Math.floor(p.z / PASS_CELL);
       for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
         const list = crowd.get((cx + a) + ',' + (cz + b)); if (!list) continue;
-        for (const q of list) if (q !== p && !q.burn && Math.abs(q.x - p.x) < BURN_TOUCH && Math.abs(q.z - p.z) < BURN_TOUCH && Math.hypot(q.x - p.x, q.z - p.z) < BURN_TOUCH) ignite(q, p.x, p.z);
+        for (const q of list) if (q !== p && !q.burn && Math.abs(q.x - p.x) < BURN_TOUCH && Math.abs(q.z - p.z) < BURN_TOUCH && Math.hypot(q.x - p.x, q.z - p.z) < BURN_TOUCH && Math.random() < chance) ignite(q, p.x, p.z);
       }
     }
   }
@@ -1553,6 +1593,14 @@
       return n;
     },
     get burning() { return burning; },
+    // burning ground at (x, z), radius r, for `seconds`: people keep away from it (and from where
+    // they'd have to walk through it), and whoever stands in it catches fire (meteors)
+    groundFire(x, z, r, seconds = 30) {
+      groundFires.push({ x, z, r, until: now() + seconds });
+      zones.push({ x, z, r: r + 0.1, until: performance.now() + seconds * 1000 });
+      return groundFires.length;
+    },
+    get groundFires() { return groundFires.map((f) => ({ x: f.x, z: f.z, r: f.r })); },
     spatter: (x, y, z, dx, dz, n, speed, up) => spatter(x, y, z, dx, dz, n, speed, up),   // blood (n × the blood setting)
     // a scream at (x, z) (the cops on fire); voice: Hz, or random
     screamAt(x, z, voice, short) { scream({ x, z, voice }, 0, !!short); },

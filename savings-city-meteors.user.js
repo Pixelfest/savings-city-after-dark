@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – meteor shower
 // @namespace    savings-city-tweaks
-// @version      1.0
-// @description  A ☄ button: a shower of 10–40 burning meteors falls on the city at one angle. They smash through whatever is in their way, leave craters, and badly damaged buildings collapse. Only in your browser – reload to rebuild.
+// @version      1.1
+// @description  A ☄ button: a shower of 10–40 burning meteors falls on the city at one angle. They smash through whatever is in their way, leave burning craters, and badly damaged buildings collapse. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -45,6 +45,9 @@
  *     cars: close by burnt-out wrecks (occupants dead), further out they catch fire and explode a few
  *       seconds later (walk mode); trees, lamps, benches, fountains knocked over (walk mode, when its
  *       props are known); street lamps go out or fall (core).
+ * - The ground burns: flames in the crater and in a few patches around it (scorch marks under
+ *   them) for FIRE_TIME seconds, dying down at the end, with black smoke. Residents (2.5+) keep away
+ *   from the burning ground (scResidents.groundFire) and catch fire only when they stand in it.
  * - Camera shake (the canvas element, so walk mode shakes too), sounds: a roar as each meteor comes
  *   down, a crash when it ploughs through a building, a boom on impact.
  * - The damage bus gets { kind: 'meteor', x, y, z, radius, power, source: 'meteor' } for every
@@ -76,7 +79,9 @@
   const CRATER_AT = 0.12;            // less damage than this: no crater in the building's side
   const ROCK_GLOW = 18;              // seconds the rock in the crater keeps glowing
   const SHAKE = 14;                  // camera shake per impact (pixels, biggest meteor)
-  const CAP_FIRE = 3000, CAP_SMOKE = 2400, CAP_DEBRIS = 900, CAP_CRATERS = 80;
+  const FIRE_TIME = [25, 45];        // the ground burns this long after an impact (the biggest the longest)…
+  const FIRE_PATCHES = [3, 7];       // …in the crater and in this many patches around it (more for bigger ones)
+  const CAP_FIRE = 5000, CAP_SMOKE = 2400, CAP_DEBRIS = 900, CAP_CRATERS = 360;
   const GRAVITY = 2.5;               // for flying rocks and dirt (tiles/s², a bit theatrical)
   const GROUND = 0.03;
   const SOUND = true;
@@ -311,10 +316,10 @@
       const t = (py - GROUND) / -dir.y;
       landings.push({ x: px + dir.x * t, z: pz + dir.z * t, aimed: bd.id, size: lerp(SIZE[0], SIZE[1], rnd(0.55, 1)) });
     }
-    // the rest: anywhere over the city, spread out
-    const box = cityBox(all);
+    // the rest: anywhere over the city, spread out (test: opts.at = [x, z] → within a tile of there)
+    const box = opts.at ? { x0: opts.at[0] - 1, x1: opts.at[0] + 1, z0: opts.at[1] - 1, z1: opts.at[1] + 1 } : cityBox(all);
     for (let k = landings.length, tries = 0; k < n && tries < n * 40; tries++) {
-      const x = rnd(box.x0 - MARGIN, box.x1 + MARGIN), z = rnd(box.z0 - MARGIN, box.z1 + MARGIN);
+      const mg = opts.at ? 0 : MARGIN, x = rnd(box.x0 - mg, box.x1 + mg), z = rnd(box.z0 - mg, box.z1 + mg);
       if (tries < n * 30 && landings.some((l) => Math.hypot(l.x - x, l.z - z) < MIN_GAP)) continue;
       landings.push({ x, z, aimed: null, size: lerp(SIZE[0], SIZE[1], Math.pow(Math.random(), 1.6)) });
       k++;
@@ -487,6 +492,7 @@
     // the crater with the rock in it, glowing and cooling down
     if (onGround) {
       addCrater(p.x, p.z, R * 0.5, R * 0.07);
+      setAlight(p, R, e);
       m.root.remove(m.outer); m.root.remove(m.inner);
       m.root.position.set(p.x, GROUND + m.size * 0.15, p.z);
       embers.push({ m, t: 0 });
@@ -509,6 +515,42 @@
     m.set([c * r, 0, -s * r, 0, 0, h, 0, 0, s * r, 0, c * r, 0, x, GROUND + 0.012, z, 1], o);
     craterMesh.count = Math.min(CAP_CRATERS, craterN);
     craterMesh.instanceMatrix.needsUpdate = true;
+  }
+  // the ground burns: the crater and a few patches around it
+  const fires = [];                     // { x, z, r, t, life, acc, sacc }
+  function setAlight(p, R, e) {
+    const life = rnd(FIRE_TIME[0], FIRE_TIME[1]) * (0.6 + 0.4 * clamp01(e)), res = window.scResidents;
+    const patches = [{ x: p.x, z: p.z, r: R * 0.32 }];
+    for (let k = Math.round(lerp(FIRE_PATCHES[0], FIRE_PATCHES[1], clamp01(e))); k > 0; k--) {
+      const a = Math.random() * Math.PI * 2, d = rnd(0.35, 0.95) * R;
+      patches.push({ x: p.x + Math.cos(a) * d, z: p.z + Math.sin(a) * d, r: rnd(0.05, 0.13) * (0.6 + e * 0.5) });
+    }
+    patches.forEach((f, k) => {
+      const l = k ? life * rnd(0.5, 0.9) : life;
+      fires.push({ ...f, t: 0, life: l, acc: 0, sacc: Math.random() });
+      if (k) addCrater(f.x, f.z, f.r * 1.15, 0.004);               // a scorch mark under it
+      if (res && res.groundFire) try { res.groundFire(f.x, f.z, f.r, l); } catch (err) { console.warn('[meteors] ground fire', err); }
+    });
+  }
+  function stepFires(dt) {
+    const c = C();
+    for (let i = fires.length - 1; i >= 0; i--) {
+      const f = fires[i]; f.t += dt;
+      if (f.t >= f.life) { fires.splice(i, 1); continue; }
+      const heat = Math.min(1, f.t / 0.6) * Math.min(1, (f.life - f.t) / (f.life * 0.4));   // catches, burns, dies down
+      f.acc += (10 + 200 * f.r) * heat * dt;
+      while (f.acc >= 1) {
+        f.acc -= 1;
+        const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * f.r;
+        emit(pools.fire, f.x + Math.cos(a) * d, GROUND + 0.02, f.z + Math.sin(a) * d,
+          { vx: rnd(-0.05, 0.05), vy: rnd(0.25, 0.6), vz: rnd(-0.05, 0.05), size: rnd(0.035, 0.075) * (0.5 + 0.6 * heat), grow: 1.6, life: rnd(0.4, 0.9), drag: 1.2 });
+      }
+      f.sacc += (0.4 + 4 * f.r) * heat * dt;
+      while (f.sacc >= 1 && c && c.smoke) {
+        f.sacc -= 1;
+        c.smoke('blacksmoke', f.x + rnd(-0.5, 0.5) * f.r, GROUND + 0.08, f.z + rnd(-0.5, 0.5) * f.r, { vy: rnd(0.2, 0.4), rise: rnd(0.25, 0.4), size: rnd(0.04, 0.07), grow: rnd(4, 6), life: rnd(3, 5), alpha: 0.7 });
+      }
+    }
   }
   // nearby buildings: damage by distance; severe → collapse (pushed away), else a crater in the side
   function blastBuildings(p, R, e, direct) {
@@ -609,6 +651,7 @@
       }
       if (f >= 1) { mat.emissiveIntensity = 0; embers.splice(i, 1); }
     }
+    stepFires(dt);
     for (const k in pools) stepPool(pools[k], dt);
     stepShake(dt);
   }
@@ -695,12 +738,13 @@
   if (document.body) begin(); else document.addEventListener('DOMContentLoaded', begin);
 
   window.scMeteors = {
-    // start a shower; opts: count, aimed, azimuth (radians), elevation (degrees), duration (s)
+    // start a shower; opts: count, aimed, azimuth (radians), elevation (degrees), duration (s), at ([x, z]: land near there)
     start: (opts) => start(opts || {}),
     stop,
     plan: (opts) => (ensure() ? plan(opts || {}) : null),
     get meteors() { return flying.map((m) => ({ x: m.x, y: m.y, z: m.z, size: m.size, energy: m.energy, aimed: m.l.aimed, hits: [...m.hitIds] })); },
     get shower() { return shower ? { t: shower.t, count: shower.count, pending: shower.pending.length, flying: flying.length, plan: shower.plan } : null; },
     damage: (id) => damageOf.get(id) || 0,
+    get fires() { return fires.map((f) => ({ x: f.x, z: f.z, r: f.r, left: f.life - f.t })); },
   };
 })();

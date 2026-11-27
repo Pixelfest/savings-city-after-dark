@@ -696,7 +696,7 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
   `pop()`, `balloons` (t, position, feet height, R), `heaps`. A real headless click with the weapon
   selected (`keyboard.press('Digit9')`) fires too.
 
-## Meteor shower (savings-city-meteors 1.0, residents 2.4)
+## Meteor shower (savings-city-meteors 1.1, residents 2.5)
 
 - A ☄ menu button (`#sc-meteors`); clicking during a shower drops the meteors that haven't been
   launched yet. Needs core and buildings; residents, walk mode and cops add people, cars and props.
@@ -734,6 +734,21 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
   `next` street, and the app's walker threw in `move()` (`t.next[0]`) at the end of the door every
   frame. Now the child takes over the parent's way out (`from`, `to`, `t`, `dur`, `next`), or the
   parent's `enter` / `inside` with a timer of its own.
-- Test hooks: `scMeteors.start({ count, aimed, azimuth, elevation, duration })` (returns the plan),
-  `stop()`, `plan(opts)`, `meteors`, `shower`, `damage(id)`. Headless: skip drawing between
+- Meteors 1.1 – burning ground: after a ground impact the crater (0.32 R) and 3–7 patches around it
+  (0.35–0.95 R out, scorch marks = flat crater instances) burn for `FIRE_TIME` (25–45 s × energy;
+  the patches less), catching over 0.6 s and dying down over the last 40 %: flames from the fire pool
+  (rate ∝ patch radius), black smoke from the core. Each patch is `scResidents.groundFire(x, z, r, s)`.
+- Residents 2.5 – fire: the death toll kept rising after a shower because fire spread through the
+  crowd: everyone burning (and every burning body, 8 s) set alight whoever came within
+  `BURN_TOUCH`, and nobody kept away. Now (`fearFire`, every `FIRE_FEAR_EVERY` s over the crowd
+  cells) everyone on their feet within `FIRE_FEAR` (0.4) of a burning person, body or ground patch is
+  taken over and walks away (`walkAway`), or runs (`panic`) when closer than 0.45 × that (a child
+  goes with its parent); touching someone on fire ignites with a rate per second (`BURN_TOUCH_RATE`
+  4 running, 1.2 writhing/dead) instead of at once. `groundFire(x, z, r, seconds)` = a fire source +
+  a zone (r + 0.1) to stay out of; standing in it ignites at `GROUND_FIRE_RATE` per second.
+  `walkAway` now places someone just taken over from the app on our network first (`p.dir` was
+  undefined). Measured (30 meteors, local city): burning people peak at ~10 while ~185 patches burn,
+  and the toll stops when the fires are out; before, 147 burning at 65 s and still rising.
+- Test hooks: `scMeteors.start({ count, aimed, azimuth, elevation, duration, at: [x, z] })` (returns
+  the plan), `stop()`, `plan(opts)`, `meteors`, `shower`, `damage(id)`, `fires`. Headless: skip drawing between
   screenshots (`scCore.onDraw(() => skip)`), and zoom out (the zoom-out button) to see the city.
