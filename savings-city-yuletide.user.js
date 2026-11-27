@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – yuletide grenade (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.1
+// @version      1.2
 // @description  Adds a yuletide grenade to walk mode (key 6, click to throw): a little Christmas tree that goes off the moment it hits the ground, throwing out a ring of green sprinkles that shows how far it reaches. A Christmas tree grows out of everyone within 10 m and tears them apart: their organs hang in it as baubles, their bowels are the garland, their head goes on top, and the blood splatters on the ground.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -357,7 +357,7 @@
       res.people.forEach((q, i) => {
         if (!q || q.state === 'inside' || q.state === 'down' || q.state === 'gone') return;
         const dist = Math.hypot(q.x - cx, q.z - cz);
-        if (dist <= RADIUS) found.push({ who: 'res', i, dist });
+        if (dist <= RADIUS) found.push({ who: 'res', p: q, dist });
       });
     }
     const cops = (window.scCops && typeof window.scCops.officers === 'function' && window.scCops.officers()) || [];
@@ -370,7 +370,7 @@
     for (const f of found) {
       let info = null;
       try {
-        info = f.who === 'res' ? res.skin(f.i, 'tree') : window.scCops.skin(f.i, 'tree');
+        info = f.who === 'res' ? res.skin(f.p, 'tree') : window.scCops.skin(f.i, 'tree');
       } catch (e) { console.warn('[yuletide] take', e); }
       if (info) plant(info, f.dist / RADIUS * RIPPLE, cx, cz);
     }

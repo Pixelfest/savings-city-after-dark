@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – flamethrower (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  Adds a flamethrower to walk mode (key 4, hold the mouse button): a roaring stream of fire that sets residents alight – they run screaming, fall and writhe, get up and run on, and set others on fire.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -175,7 +175,7 @@
       if (px * px + pz * pz > r * r) continue;
       const py = vy - d.y * t;
       if (Math.abs(py) > 0.09 + r) continue;                      // over their heads / below
-      if (Math.random() < IGNITE_CHANCE) res.ignite(i, s.x, s.z);
+      if (Math.random() < IGNITE_CHANCE) res.ignite(p, s.x, s.z);
     }
     // police officers (cops script) in the stream
     const cops = window.scCops;

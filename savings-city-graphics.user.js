@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – graphics
 // @namespace    savings-city-tweaks
-// @version      1.2
+// @version      1.3
 // @description  Graphics settings in the settings popup (needs the core): winter on/off, day and night or always day/night, shadows, ambient occlusion and bigger pixels.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -247,7 +247,11 @@
     function draw(core, s, c, raw, S) {
       if (failed || !S.get('ao')) return false;
       const r = core.renderer;
-      if (!r || s !== core.scene || !c || r.getRenderTarget() !== null || s.overrideMaterial || !c.projectionMatrix) return false;
+      // The app draws every frame through its bloom composer (a render target), so the target is no
+      // reason to skip: the AO output goes back into the same target (`prev`) for the composer to finish.
+      // Daylight only (night: the app's view says so; no AO on night light).
+      const v = core.view ? core.view() : null;
+      if (!r || s !== core.scene || !c || s.overrideMaterial || !c.projectionMatrix || (v && v.night > 0.5)) return false;
       if (!quad && !setup(core)) return false;
       try {
         const w = Math.max(1, Math.round(r.domElement.width)), h = Math.max(1, Math.round(r.domElement.height));

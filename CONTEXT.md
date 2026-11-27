@@ -3,8 +3,9 @@
 Notes for future sessions: what the Savings City app is, how its 3D city is built internally, and
 how these Tampermonkey scripts get into it. Everything here was worked out by reading the app's
 minified bundles (no source code was available) and is true for the versions seen in Nov 2026
-(bundles `index-CF0NHCg9.js` + lazy-loaded `CityCanvas-kvJpXrfx.js` of 26 Nov; before that
-`index-Cj0dj4Sy.js` + `CityCanvas-CcnEJIm2.js` of 25 Nov,
+(bundles `index-BErtZ7Ms.js` + lazy-loaded `CityCanvas-HITv6BJv.js` + `index-CfR_kx9B.css` of 27 Nov
+2026; before that `index-CF0NHCg9.js` + `CityCanvas-kvJpXrfx.js` of 26 Nov, `index-Cj0dj4Sy.js` +
+`CityCanvas-CcnEJIm2.js` of 25 Nov,
 `index-CuJOOrbL.js` + `CityCanvas-D7u1hgTg.js`, and `CityCanvas-D-BN8eQV.js`).
 Minified names (`Jf`, `Q`, `qp` …) change with every app build – find things by their shape/strings.
 
@@ -24,9 +25,9 @@ placeholder `https://your-savings-city-host.example/`.
 - The 3D code is in a lazily loaded chunk (`assets/CityCanvas-*.js`); it is not in a "Save page as"
   download – fetch it separately (DevTools → Network) when you need to read it.
 - A copy of the app is in `app/`: `Savings City.html` + `Savings City_files/`
-  (`index-CF0NHCg9.js` = React app + shared code, `CityCanvas-kvJpXrfx.js` = three.js r186 and the
-  whole city/traffic/rendering code, `index-E9WejX2W.css` – all 26 Nov 2026; the HTML is from
-  24 Nov, logo). The copy is anonymised: the real host is replaced by the placeholder, the
+  (`index-BErtZ7Ms.js` = React app + shared code, `CityCanvas-HITv6BJv.js` = three.js r186 and the
+  whole city/traffic/rendering code, `index-CfR_kx9B.css` – all 27 Nov 2026; logo and the HTML's
+  references were updated to them). The copy is anonymised: the real host is replaced by the placeholder, the
   project names in the saved page are made up and the totals are those of the test city. The local
   runner picks up whatever `index-*.js` / `index-*.css` is there. Search it rather than reading it:
   it's minified, one line per file (e.g. `grep -o '.{300}isMeshBasicMaterial.{300}'`). When a
@@ -59,6 +60,12 @@ placeholder `https://your-savings-city-host.example/`.
   Graphics 1.2: the AO was there but too faint to see (radius 0.25, intensity 1.4); now radius 0.45,
   intensity 2.0 and an angle bias of 0.3 (was 0.15) so flat ground seen at a grazing angle in walk
   mode doesn't shade itself. `show.value = 2` shows the normals (cyan/pink), not the raw AO.
+  **Graphics 1.3 (27 Nov build):** the app draws every frame through its bloom composer
+  (`this.bloom.render(scene, camera)`, a render target, not only at night). Graphics 1.2 skipped the
+  AO when a target was set, so it silently stopped working. Now the scene goes into the AO's own
+  target, and the AO output goes back into the composer's target (`prev`) for the composer to finish
+  (tone mapping and colour space come from its last pass). Daylight only: `scCore.view().night > 0.5`
+  skips it. Check with `window.scGraphics.ao.state()` (`frames` grows when it runs).
 
 ## Night lights and lights out (core 1.6, buildings 1.5, nuke 3.5)
 
@@ -187,7 +194,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | core | `window.scCore`: `settings` (`define({ id, label, min, max, step, value, format, help })`, or `type: 'toggle'`, or `options: [names]` (value = index), `reload: true` = applies after a reload; `get`, `set`, `onChange`; popup from a menu button, stored in localStorage `sc-settings`), `detail()` → `{ level 1…5, factor 1…16 }` (scripts multiply piece budgets by it), `renderer`, `scene`, `camera` (the app's orthographic one), `classes()`, `city` / `onCity(fn)`, `traffic()`, `out(ctx)` / `audio()` (sound), `onFrame(fn(dt, now))`, `smoke(kind, x, y, z, opts)` / `smokeStats()`, `puff(x, y, z, opts)`, `damage(ev)` / `onDamage(fn)`, `isFacade(m)`, `projectOf(o)` |
 | buildings | `window.scBuildings` (see "Solid buildings"); handles `damage` events of kind `blast` / `impact` (crater + hit) and `push` (pushed over) |
 | walk mode | `window.scWalk` (hit tests, effects, sounds, props, cars) and `window.scWalkWeapons.push(def)` for plugin weapons; listens to `sc:geometry-changed` (rebuild walls) |
-| residents | `window.scResidents` = `{ hit, knockDown, behead, gib, gibAround, alarm, blast, people, ignite, igniteAround, burning }` (`people`: the live list, read-only; children have `parent`, adults with a child `child`) |
+| residents | `window.scResidents` = `{ hit, knockDown, behead, gib, gibAround, alarm, blast, people, ignite, igniteAround, burning, skin, … }`. Since 2.0 `people` = the app's pedestrians + ours (a fresh array), and every call that takes a person accepts the **object or the id** (`hit().index` is the id, stable over time; see "People" below) |
 | drive | uses `scWalk.setDriver` / `onKey` / `setHelp` / `note` / `parkedCars`; takes traffic cars (`car.scTaken = true`, held and proxy hidden); `window.scDrive` = `{ driving, car, getIn, getOut, chase, place }` |
 | billboard | shootable via `scWalk.addTarget`, listens to `sc:blast`; `window.scBillboard` = `{ tilesLeft, postsLeft, center }` |
 | cops | `window.scCops` = `{ hearts, dead, officers, cars, spawnCar, hurt, burgers }` |
@@ -462,29 +469,74 @@ Older approach, still useful for unit-level checks:
 - Several scripts hooking the same thing (prototype trap, `forEach`) must chain, not replace.
 - Don't search all city triangles per hit/frame – use bounding boxes and caches.
 
-## Skinner (savings-city-skinner 1.6, residents 1.24, cops 1.12)
+## People (residents 2.0): the app's pedestrians and the handover
+
+The app has its own pedestrians (`view.pedestrians`, class `rb`, since the 27 Nov build): one list
+(`list`, a person per entry: `x, z, h, state` = `walk` / `enter` / `exit` / `inside`, `speed, dir, a, b, s,
+side, path, parent, child, k` for a child) and four instanced meshes (`legs, torsos, heads, hairs`,
+colours per index, `bald` per index). It walks the roads (its own network: `eb()`), crosses at
+junctions, goes through doors (`enter`/`exit`) and has children. `share` (0…1, the app's `crowd`
+setting) × the road and path length gives the crowd, capped at 4000 (`iy`); `populate()` makes it;
+`density` is its setter. Its draw (`draw(i, person)`) writes the matrices.
+
+Residents 2.0 uses that population and adds what happens to it (`savings-city-residents`):
+
+- **Handover.** Anything that acts on someone (a shot, an explosion, a fire, a car, a panic, a
+  building coming down, a place to stay away from) calls `ownOf(p)`: the person leaves the app's list
+  (`removeNative`: the last one takes the index, its colours and bald flag with it, its matrix is
+  rewritten) and gets a slot of ours (`own`, residents' own four meshes, colours copied from the app's
+  index). Our figures fall, burn, bleed, lose their heads, are gibbed and skinned exactly as before.
+  `adopt` also detaches a child from its parent (and a parent from its child, which then walks on alone).
+- **Runners.** A panicking, burning or zone-escaping person keeps walking on *our* copy of the road
+  network (`ensurePlaced` puts them on it where they stand; the old walker engine: `step`, `place`,
+  `panic`, doors, `walkAway`). When the panic is over (no `panic`, `away`, `burn`, `frozen`, `keep`) and
+  they're not inside, they're removed (`temp`, state `gone`), and the app's `populate()` tops its list
+  up (`topUpAt` every 0.5 s; `crowdTarget` is the list length after the app's last `populate()`, which
+  the residents wrap).
+- **Ids.** Every person has `scId`. `hit()` returns `index: id`; `knockDown`, `skin`, `gib`, `behead`,
+  `ignite`, `unfreeze` take the id (or the person object). `find()` also finds a person who was handed over
+  since (their id stays with them). Other scripts that held an index into `res.people` pass the object now
+  (flamethrower, drive, yuletide).
+- **Density.** The 'residents' setting (default 2 = the app's own crowd, shown as 1×; range 0.25…4×) is a
+  multiplier: `share = app's base × multiplier`, applied through `applyDensity`. The app's `density`
+  setter is replaced by one that keeps the base (`scBase`), so the app's own `crowd` setting still works.
+- **Cars** run over the app's people too, but only fast cars (`hitByCar`: a calm person never walks in
+  front of a car, and the app's people are calm, so only a car speeding up or with a siren hits them).
+- **Own slots:** `MAX_OWN` 1000; when full, the oldest lying figure is dropped (`freeSlot`).
+
+Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness (`local/harness.js`).
+
+## Skinner (savings-city-skinner 1.7, residents 2.0, cops 1.12)
 
 - A walk-mode weapon (key 5, `scWalkWeapons.push`). Its beam takes the nearest resident
   (`scResidents.hit`) or officer (a cylinder test over `scCops.officers()`) before a wall or car.
-  On arrival it calls `scResidents.skin(i)` or `scCops.skin(i)`: the person or officer leaves the
-  city (state `gone`, `sc:kill` cause `skinned`) and their place `{ x, z, y, h, k, th }` is
+  On arrival it calls `scResidents.skin(id)` or `scCops.skin(i)`: the person or officer leaves the
+  city (state `gone`, `sc:kill` cause `skinned`) and their place `{ x, z, y, h, k, th, colors }` is
   returned; `th` is their heading (the figure's front is local +z turned by `th`), so the insides
-  face the way the person was walking.
+  face the way the person was walking. `hit().index` is an id (residents 2.0), so it stays valid
+  while the beam travels.
 - The script draws the body itself: one InstancedMesh per kind (blobs, rods, skin, rings), with
   slot pools. The insides are built at once, inside the skin: about 90 overlapping red blobs on a
   jittered grid fill the figure's torso and legs (`flesh()`, new jitter per body), plus organs, a
   skull, ribs, spine and leg bones (`INSIDE`), all within the resident figure's boxes (no arms:
-  the figure has none). Phases: peel (0.9 s, a rising ring; the skin shells – the figure's own
-  legs, torso and head boxes – are pulled straight up off the body, head first, `PULL` body
-  heights), exposed (1 s, heart pulses), fall (gravity, bounce, push, spin), pile (20 s, then
-  fade). From the end of the peel the skin shells and flakes float down (`FLOAT_TIME` 1.8 s,
-  swaying) to land flat on the floor 2–4 m from the body (`FLOAT_DIST`), and stay until the heap
-  fades (since 1.6; before, the skin rolled down and vanished). At most 6 bodies are moving and 30 in all.
+  the figure has none).
+- Phases: peel (0.9 s, a rising ring). The skin is 13 thin panels (`SKIN_PANELS`, 8 cm thick, `SKIN_T`):
+  the four sides of each of the figure's legs, torso and head boxes plus the top of the head. They
+  are pulled straight up off the body, head first (`PULL` body heights), so the outside of the figure
+  vanishes. Since 1.7 there are no plain skin boxes any more. Each panel has the person's own colour
+  (`skinColor`: legs = trousers, torso = shirt, head = skin, top = hair or skin when bald, from
+  `skin().colors`; officers get the uniform, `COP_COLORS`). Exposed (1 s, heart pulses). Fall
+  (gravity, bounce, push, spin). Pile (20 s, then fade).
+- From the end of the peel the panels (and 4 flakes) break apart and float down (`FLOAT_TIME` 1.8 s,
+  swaying) to land flat on the floor 2–4 m from the body (`FLOAT_DIST`). A panel lies thin side up:
+  `rot1` turns it about x (thin z → up) and spins it in its own plane; a thin-y panel (the top of the
+  head) just spins. The heap stays until it fades. At most 6 bodies are moving and 30 in all; the skin
+  pool holds `CAP_SKIN` = 640 panels (13 + 4 flakes × 30 bodies).
 - The fall calls `scResidents.spatter` for blood and `scResidents.avoid` around the heap.
 - `local/harness.js` + `local/harness-layout.json`: fixed shots (stand at a point, aim at a point,
   fire, report events, screenshots at set times). A shot can name a placed subject (`target`).
 - Test hooks (for `local/harness.js` and by hand in the console): `scResidents.freeze(x, z)` pins
-  the walking adult nearest to (x, z) there (residents 1.23; `unfreeze(i)` lets them walk again);
+  the walking adult nearest to (x, z) there (returns their id; `unfreeze(id)` lets them walk again);
   `scCops.placeAt(x, z)` creates a still officer that can be shot (cops 1.9).
 - Headless Chromium runs the simulation slowly: the frame time step is clamped to 0.05 s, so
   "1.8 s" on screen is less game time. Give the skinner's fall about 4 s before judging it.

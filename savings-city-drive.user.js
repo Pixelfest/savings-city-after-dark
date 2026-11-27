@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – drive a car (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.4
+// @version      1.5
 // @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Space handbrake, C camera, E to get out). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -387,8 +387,8 @@
         const p = P[i];
         if (p.state === 'inside' || p.state === 'down' || p.state === 'gone') continue;
         if (Math.abs(p.x - c.x) > 0.2 || Math.abs(p.z - c.z) > 0.2 || !inside(p.x, p.z, 0.012)) continue;
-        if (Math.abs(c.v) >= GIB_SPEED && res.gib) res.gib(i, c.x - dir.x * 0.1, c.z - dir.z * 0.1, Math.abs(c.v) * 0.7);
-        else res.knockDown(i, dir, 'car');
+        if (Math.abs(c.v) >= GIB_SPEED && res.gib) res.gib(p, c.x - dir.x * 0.1, c.z - dir.z * 0.1, Math.abs(c.v) * 0.7);
+        else res.knockDown(p, dir, 'car');
         W().sound && W().sound('hit');
         shake = Math.min(1, shake + 0.3);
       }

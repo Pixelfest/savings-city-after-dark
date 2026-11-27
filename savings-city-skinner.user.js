@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – skinner (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.6
+// @version      1.7
 // @description  Adds a sci-fi skinner to walk mode (key 5, click): whoever it hits – a resident or a police officer – loses their skin in a flash of energy. The insides and bones are visible for a second, then all the parts fall in a heap on the floor, as if the skin was the only thing holding them together.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -16,10 +16,12 @@
  * - The shot: a beam from the skinner. It hits the nearest resident or officer on the line before
  *   a wall or car; the beam's arrival skins them (residents' and cops' skin(): they leave the city
  *   and get counted as "skinned" by the bodycount).
- * - Peel (0.9 s): an energy ring rises through the body; the pale skin is pulled straight up, piece
- *   by piece (head first, then torso and legs), off the body, so the insides show through.
- * - Float: the skin pieces then drift down through the air and settle on the floor a few metres
- *   from the body (2–4 m), a little swaying on the way, lying flat.
+ * - Peel (0.9 s): an energy ring rises through the body. The outside of the figure is cut into thin
+ *   side panels (8 cm-thick pieces of skin, one per side of each body part, plus the top of the head)
+ *   that are pulled straight up, piece by piece (head first, then torso and legs), so the insides show
+ *   through: the person's outside vanishes.
+ * - Float: the skin panels then break apart and drift down through the air, settling flat on the floor
+ *   a few metres from the body (2–4 m), a little swaying on the way.
  * - Inside (from the start, under the skin): a red heart that pulses, lungs, liver, stomach,
  *   intestines, muscle, a bone skull with eye sockets, jaw and teeth, ribs, spine and leg bones.
  *   Exposed (1 s): the insides, after the skin is gone.
@@ -53,7 +55,7 @@
   const AVOID = 0.035;             // people keep this far (tiles) from a heap
   const ENERGY = '#5ff3ff';        // the cyan energy of the skinner and the ring
   const VOLUME = 0.35;
-  const CAP_BLOBS = 4000, CAP_RODS = 900, CAP_SKIN = 220, CAP_RINGS = 40;
+  const CAP_BLOBS = 4000, CAP_RODS = 900, CAP_SKIN = 640, CAP_RINGS = 40;   // skin: 13 panels + 4 flakes × 30 bodies
   // --------------------------------------------------------------
 
   const H_PERSON = 0.135;          // a standing person (residents' scale)
@@ -305,14 +307,34 @@
     ['rod', 'bone', 2, -0.006, 0.015, 0.002, 0.004, 0.026, 0.004],          // shin bones
     ['rod', 'bone', 0, 0.006, 0.015, 0.002, 0.004, 0.026, 0.004],
   ];
-  // the skin: pale shells over the body, peeled off in the first 0.4 s
-  // [x, y, z, sx, sy, sz, delay]: the resident figure's own boxes (legs, torso, head), a little bigger.
-  // The head peels first, then the torso, then the legs.
-  const SKIN_SHELL = [
-    [0, 0.024, 0, 0.030, 0.048, 0.020, 0.4],          // legs
-    [0, 0.076, 0, 0.036, 0.055, 0.024, 0.2],          // torso
-    [0, 0.116, 0, 0.026, 0.024, 0.026, 0],            // head
+  // The skin is the outside of the figure, cut into thin panels: one per side of each of the resident
+  // figure's boxes (legs, torso, head: [x, y, z, sx, sy, sz, delay], a little bigger than the figure),
+  // plus the top of the head. Each panel is SKIN_T thick. The head peels first, then the torso, then the legs.
+  const SKIN_BOXES = [
+    [0, 0.024, 0, 0.030, 0.048, 0.020, 0.4, 'trousers'],   // legs
+    [0, 0.076, 0, 0.036, 0.055, 0.024, 0.2, 'shirt'],      // torso
+    [0, 0.116, 0, 0.026, 0.024, 0.026, 0, 'skin'],         // head
   ];
+  // the colours an officer's panels get (cops' figure: navy trousers and cap, blue shirt)
+  const COP_COLORS = { trousers: '#1f2a4a', shirt: '#3b5a9a', skin: '#e0b48f', hair: '#1f2a4a', bald: false };
+  const SKIN_T = 0.004;            // thickness of one piece of skin (tiles; ≈ 8 cm)
+  const SKIN_GAP = 0.002;          // how far a panel stands off the box it came from
+  // Panels: { x, y, z (centre in the figure's frame), sx, sy, sz (full sizes), ry (turn about y: the
+  // side faces ±x are turned a quarter), thin ('z' or 'y': the thin axis), delay }.
+  // A panel with thin 'z' has sz = SKIN_T, one with thin 'y' has sy = SKIN_T.
+  const SKIN_PANELS = (() => {
+    const out = [], t = SKIN_T, g = t / 2 + SKIN_GAP;
+    for (const [x, y, z, sx, sy, sz, delay, part] of SKIN_BOXES) {
+      const hx = sx / 2, hz = sz / 2;
+      out.push({ x, y, z: z + hz + g, sx, sy, sz: t, ry: 0, thin: 'z', delay, part });                   // front
+      out.push({ x, y, z: z - hz - g, sx, sy, sz: t, ry: 0, thin: 'z', delay, part });                   // back
+      out.push({ x: x + hx + g, y, z, sx: sz, sy, sz: t, ry: Math.PI / 2, thin: 'z', delay, part });     // right
+      out.push({ x: x - hx - g, y, z, sx: sz, sy, sz: t, ry: Math.PI / 2, thin: 'z', delay, part });     // left
+    }
+    const [hx, hy, hz] = [SKIN_BOXES[2][3] / 2, SKIN_BOXES[2][4] / 2, SKIN_BOXES[2][5] / 2];
+    out.push({ x: 0, y: SKIN_BOXES[2][1] + hy + g, z: 0, sx: 2 * hx, sy: t, sz: 2 * hz, ry: 0, thin: 'y', delay: 0, part: 'hair' });   // top of the head (hair, or skin when bald)
+    return out;
+  })();
   const ROLL = 0.35;   // seconds one piece of skin takes to be pulled up
 const PULL = 0.9;    // how far the skin is pulled up, in body heights
 const FLOAT_TIME = 1.8;          // seconds the skin takes to float down to the floor
@@ -369,6 +391,15 @@ const FLOAT_DIST = [0.12, 0.2];  // tiles (2.4–4 m) from the body where the sk
     if (i >= 0) bodies.splice(i, 1);
   }
 
+  // the colour of a skin panel: the person's own (trousers, shirt, skin, hair) – residents' skin() gives
+  // them, officers wear the uniform – or the plain pale skin when nothing is known
+  function skinColor(info, part) {
+    const c = info.colors || (info.cop ? COP_COLORS : null);
+    if (!c) return HEX.skin[0];
+    if (part === 'hair') return c.bald ? (c.skin || HEX.skin[0]) : (c.hair || c.skin || HEX.skin[0]);
+    return c[part] || HEX.skin[0];
+  }
+
   // Skins someone. info = { x, z, y (floor), h (height), k } from residents' or cops' skin().
   function skinBody(info, d) {
     if (!ensure()) return false;
@@ -381,8 +412,9 @@ const FLOAT_DIST = [0.12, 0.2];  // tiles (2.4–4 m) from the body where the sk
     const th = typeof info.th === 'number' ? info.th : Math.atan2(-d.x, -d.z);   // their own front, else towards the shooter
     const b = { x: info.x, y: info.y || 0.036, z: info.z, sc, th, a: rnd(0, Math.PI * 2), dx: d.x / l, dz: d.z / l, phase: 'peel', t: 0, parts: [], skin: [], ring: -1, flaps: [], fallT: 0, pileT: 0, fadeT: 0, gone: false };
     b.ring = take(pools.ring, HEX.ring[0]);
-    for (const [lx, ly, lz, sx, sy, sz, delay] of SKIN_SHELL) {
-      b.skin.push({ slot: take(pools.skin, HEX.skin[0]), lx: lx * sc, ly: ly * sc, lz: lz * sc, sx: sx * sc, sy: sy * sc, sz: sz * sc, delay });
+    for (const q of SKIN_PANELS) {
+      b.skin.push({ slot: take(pools.skin, skinColor(info, q.part)), lx: q.x * sc, ly: q.y * sc, lz: q.z * sc, sx: q.sx * sc, sy: q.sy * sc, sz: q.sz * sc,
+        ry: q.ry, thin: q.thin, half: SKIN_T * sc / 2, delay: q.delay });
     }
     for (let k = 0; k < 4; k++) {                           // flakes of skin that fly off
       b.flaps.push({ slot: take(pools.skin, HEX.skin[1]), lx: rnd(-0.02, 0.02) * sc, ly: rnd(0.03, 0.12) * sc, lz: rnd(-0.015, 0.015) * sc,
@@ -403,19 +435,21 @@ const FLOAT_DIST = [0.12, 0.2];  // tiles (2.4–4 m) from the body where the sk
     const h = H_PERSON * b.sc, lift = PULL * h;
     const pieces = [];
     for (const s of b.skin) {
-      pieces.push({ slot: s.slot, sx: s.sx, sy: s.sy, sz: s.sz, delay: rnd(0, 0.15),
-        from: local(b, s.lx, s.ly + lift, s.lz), rot0: [0, b.th, 0] });
+      pieces.push({ slot: s.slot, sx: s.sx, sy: s.sy, sz: s.sz, thin: s.thin, half: s.half, delay: rnd(0, 0.15),
+        from: local(b, s.lx, s.ly + lift, s.lz), rot0: [0, b.th + s.ry, 0] });
     }
     for (const f of b.flaps) {
-      pieces.push({ slot: f.slot, sx: f.sx, sy: f.sy, sz: f.sz, delay: rnd(0, 0.15),
+      pieces.push({ slot: f.slot, sx: f.sx, sy: f.sy, sz: f.sz, thin: 'z', half: f.sz / 2, delay: rnd(0, 0.15),
         from: [b.x + f.lx + f.vx * PEEL_TIME, b.y + f.ly + f.vy * PEEL_TIME, b.z + f.lz + f.vz * PEEL_TIME],
         rot0: [f.rx + PEEL_TIME * 6, f.ry + PEEL_TIME * 4, f.rz] });
     }
     const n = pieces.length;
     pieces.forEach((p, i) => {
       const ang = b.a + (i / n) * Math.PI * 2 + rnd(-0.3, 0.3), dist = rnd(...FLOAT_DIST);
-      p.to = [b.x + Math.cos(ang) * dist, b.y + p.sz / 2, b.z + Math.sin(ang) * dist];   // lying flat: thin side up
-      p.rot1 = [Math.PI / 2, 0, rnd(0, Math.PI)];
+      const spin = rnd(0, Math.PI * 2);
+      p.to = [b.x + Math.cos(ang) * dist, b.y + p.half, b.z + Math.sin(ang) * dist];   // lying flat: thin side up
+      // thin along z: a turn about x (z → up) and a spin in its own plane; thin along y is already up
+      p.rot1 = p.thin === 'z' ? [-Math.PI / 2, 0, spin] : [0, spin, 0];
       p.sway = rnd(0, Math.PI * 2);
     });
     give(pools.ring, b.ring); b.ring = -1;
@@ -507,7 +541,7 @@ const FLOAT_DIST = [0.12, 0.2];  // tiles (2.4–4 m) from the body where the sk
     for (const s of b.skin) {
       const q = Math.min(1, Math.max(0, (b.t - s.delay) / ROLL)), up = q * q * (3 - 2 * q);   // eased
       const [X, Y, Z] = local(b, s.lx, s.ly + up * PULL * h, s.lz);
-      put(pools.skin, s.slot, X, Y, Z, 0, b.th, 0, s.sx, s.sy, s.sz);
+      put(pools.skin, s.slot, X, Y, Z, 0, b.th + s.ry, 0, s.sx, s.sy, s.sz);
     }
     for (const f of b.flaps) {
       put(pools.skin, f.slot, b.x + f.lx + f.vx * b.t, b.y + f.ly + f.vy * b.t, b.z + f.lz + f.vz * b.t,

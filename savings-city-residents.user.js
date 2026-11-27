@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      1.25
-// @description  Simple, static little figures (some adults with a child) that slowly walk the sidewalks, step aside for each other, cross the road at junctions and now and then go into or come out of buildings.
+// @version      2.0
+// @description  The app's people (who walk the sidewalks, cross at junctions and go in and out of buildings) now react to everything: shot, blown up, set alight, run over, buried. Panicking people run, scream and hide. A density slider.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -14,30 +14,31 @@
  * - Needs the core script (savings-city-core): the scene, the city data (roads, buildings – what
  *   the app itself reads, so it also follows the auto-layout script), traffic, the app's helpers,
  *   sound and the frame loop come from there.
+ * - The app walks the calm people itself (its pedestrians: the sidewalks, crossings, front doors,
+ *   children, the crowd setting). This script adds what happens to them: a shot, an explosion, a
+ *   fire, a car, a panic, a building coming down on them. Then the person is handed over to us
+ *   (see "People" below): they leave the app's list and get a figure of ours, with the same colours,
+ *   that falls, burns, bleeds or runs away. Everyone is a person to the other scripts (hit(),
+ *   people, the ids): nothing outside needs to know which crowd they are in.
+ * - Panicking people run on our own copy of the road network (roads and sidewalks as below): they
+ *   turn round at junctions, cross the road when they must, scream, and go into a door now and then
+ *   (they're out of sight from then on). When the panic is over they're removed: the app tops its
+ *   crowd up with new pedestrians, so the number of people stays the same.
  * - Roads lie on the lines between tiles: asphalt ±0.16 from the line, sidewalk from 0.16 to
- *   0.25. Residents walk along the road lines, SIDEWALK_OFFSET to one side (p.side), on either
+ *   0.25. Our runners walk along the road lines, SIDEWALK_OFFSET to one side (p.side), on either
  *   side of the street in either direction. Their path is the road network shifted onto the
  *   sidewalk: round a corner they walk to the corner of the sidewalk and on from there, so the only
  *   time they're on the asphalt is a real crossing, straight across, all the way.
- * - At every junction they pick a way on (only turning back at a dead end) and which side of that
- *   street to take: normally the one that needs the fewest crossings, now and then (CROSS_CHANCE)
- *   the other one: they cross. Decided once, in advance, so nobody turns back halfway.
  * - Highways (the app draws them as wider asphalt, 0.48 across, and without sidewalks) are not
  *   walked on at all: no path along them, no door onto them, and no road that runs into one (a
  *   junction with one is a dead end for people). Found from the drawn road boxes, once a second.
- * - Someone in front of you on the sidewalk: oncoming people both step to their right, someone
- *   slower (or lying there) is passed on the free side.
  * - Places to stay away from (avoid(x, z, r, seconds): ground zero, a collapsed building's rubble):
- *   nobody walks into them (at junctions they take another way, or turn back), whoever is in one
- *   walks out, away from its middle, and nobody goes in or out of a building through a door there.
- * - Children: smaller bodies with the same head; each walks right next to a parent and follows
- *   them everywhere (in and out of buildings too); if the parent dies, the child runs off.
- * - Front doors come from the app's own code (exact door position per building). Walking past
- *   a door on that side of the street, a resident sometimes goes in, stays inside for a while,
- *   and later comes out of some (other) door.
- * - Figures are four instanced meshes (trousers, shirt, head, hair): a few hundred people cost
- *   four draw calls. Each resident has their own colour combination.
- *   No animation: they're static shapes that glide.
+ *   the app's people in one are taken in and walk out, away from its middle.
+ * - Figures of ours are four instanced meshes (trousers, shirt, head, hair): a figure's colours are
+ *   copied from the app's when it's handed over. No animation: they're static shapes that glide,
+ *   and fall over, burn or lie in their blood.
+ * - Density: the 'residents' slider (2 = the app's own crowd) multiplies the app's crowd size; the
+ *   app's crowd setting still applies (it is the base).
  */
 (function () {
   'use strict';
@@ -49,15 +50,13 @@
 
 
   // ---- settings -------------------------------------------------------------------------
-  const PER_ROAD = 2;             // residents per road tile (a slider in the core's settings: 0.5 … 4)
-  const MAX_PEOPLE = 4000;
+  const MAX_PEOPLE = 4000;        // capacity of our instanced figure meshes (slots in use: at most MAX_OWN)
   const SPEED = 0.15;             // tiles per second (cars drive about 1–2)
   const SPEED_VARIATION = 0.35;   // ±35 %
   const SIDEWALK_OFFSET = 0.205;  // distance from the road line (middle of the sidewalk)
   const CROSS_CHANCE = 0.2;       // at a corner: chance to take the far side of the next street (cross over)
   const PASS_SHIFT = 0.022;       // how far people step aside to pass each other (the sidewalk is 0.09 wide)
   const PASS_LOOKAHEAD = 0.12;    // they start stepping aside when someone is this close in front
-  const CHILD_SHARE = 0.18;       // share of adults walking with a child
   const CHILD_HEIGHT = 0.62;      // a child's body is this much of an adult's (the head stays the same size)
   const CHILD_WIDTH = 0.78;
   const CHILD_GAP = 0.03;         // how far beside the parent (on the building side)
@@ -67,7 +66,6 @@
   const CROSSING_MARGIN = 0.5;    // seconds of extra room they keep from cars
   const ENTER_CHANCE = 0.25;      // chance to go in when passing a front door on that side
   const INSIDE_SECONDS = [8, 45]; // how long someone stays inside
-  const START_INSIDE = 0.2;       // share of people that start inside a building
   const SCALE = 1;                // size of the figures
   // Every resident gets their own combination: shirt, trousers, skin and hair are picked separately.
   const SHIRTS = ['#e25d5d', '#4f8fd8', '#f0a24a', '#7bc77b', '#f2f2f2', '#9b6fd8', '#f6e46f', '#3cb7b0',
@@ -202,7 +200,156 @@
   const rightOf = (dx, dz) => [-dz, dx];
 
   // ---------- people ----------
-  let people = [];
+  // The app's pedestrians walk the calm people (in the app's own list, one instanced figure each).
+  // When something happens to one of them they are handed over to this script: they leave the app's
+  // list (the last one takes the gap, colours and bald flag with it), and get a slot of ours (`own`),
+  // with the same colours. From then on our code moves and draws them. A runner (panicking, burning,
+  // in a place to stay away from) is removed when calm again; a lying one stays until the city changes
+  // (or its slot is needed, the oldest first). The API takes a person or their id (from hit()).
+  const own = [];                  // our figures, by slot (a gone figure's slot is reused)
+  const ownSet = new WeakSet();
+  const MAX_OWN = 1000;            // slots for people handed over
+  let idCounter = 0;
+  let crowdTarget = 0;             // the app's crowd: the length of its list after its last populate()
+  let zoneCheckAt = 0, topUpAt = 0;
+  const now = () => performance.now() / 1000;
+  const idOf = (p) => (p.scId === undefined ? (p.scId = ++idCounter) : p.scId);
+  const DENSITY_DEFAULT = 2;       // the 'residents' setting at which the app's own crowd is used
+
+  // the app's pedestrians (its list and instanced figures), or null before the app has its view
+  function nativeCrowd() {
+    const core = window.scCore;
+    const v = core && core.view ? core.view() : null;
+    const P = v && v.pedestrians;
+    return P && Array.isArray(P.list) && P.legs && P.torsos && P.heads && P.hairs && P.bald ? P : null;
+  }
+  // everyone there is: the app's pedestrians, then ours
+  function everyone() {
+    const P = nativeCrowd(), out = P ? P.list.slice() : [];
+    for (const p of own) if (p) out.push(p);
+    return out;
+  }
+  // a person from what another script passes: the object, or the id that hit() gave
+  function find(x) {
+    if (typeof x === 'number') {
+      for (const p of own) if (p && p.scId === x) return p;
+      const P = nativeCrowd();
+      if (P) for (const p of P.list) if (p.scId === x) return p;
+      return null;
+    }
+    if (!x || typeof x !== 'object') return null;
+    if (ownSet.has(x)) return x;
+    const P = nativeCrowd();
+    if (P && P.list.indexOf(x) >= 0) return x;
+    return x.scId === undefined ? null : find(x.scId);       // handed over since: their id finds the new figure
+  }
+  // a slot for a figure of ours: a gone one's, a new one, or (when full) the oldest one lying down
+  function freeSlot() {
+    let oldest = -1;
+    for (let i = 0; i < own.length; i++) {
+      const p = own[i];
+      if (!p || p.state === 'gone') return i;
+      if (p.state === 'down' && (oldest < 0 || p.since < own[oldest].since)) oldest = i;
+    }
+    if (own.length < MAX_OWN) return own.length;
+    if (oldest < 0) return -1;
+    own[oldest].state = 'gone';
+    return oldest;
+  }
+  // takes the app's figure at index i out of its list: the last one takes its place (colours too)
+  function removeNative(P, i) {
+    const last = P.list.length - 1;
+    if (i !== last) {
+      const Col = P.torsos.material.color.constructor, c = new Col();
+      for (const m of [P.legs, P.torsos, P.heads, P.hairs]) { m.getColorAt(last, c); m.setColorAt(i, c); m.instanceColor.needsUpdate = true; }
+      P.bald[i] = P.bald[last];
+      P.list[i] = P.list[last];
+    }
+    P.list.length = last;
+    if (i !== last) P.draw(i, P.list[i]);
+    for (const m of P.parts) { m.count = P.list.length; m.instanceMatrix.needsUpdate = true; }
+  }
+  // the app's person taken over into one of ours (their colours, bald flag and place); null if no slot
+  function adopt(p) {
+    const P = nativeCrowd();
+    if (!P || !built || !legs) return null;
+    const i = P.list.indexOf(p);
+    if (i < 0) return null;
+    const slot = freeSlot();
+    if (slot < 0) return null;
+    const Col = torsos.material.color.constructor, c = new Col();
+    for (const [src, dst] of [[P.legs, legs], [P.torsos, torsos], [P.heads, heads], [P.hairs, hairs]]) {
+      src.getColorAt(i, c); dst.setColorAt(slot, c); dst.instanceColor.needsUpdate = true;
+    }
+    bald[slot] = P.bald[i];
+    const r = { ...newPerson(), x: p.x, z: p.z, h: p.h, speed: p.speed || SPEED, slot, scId: idOf(p), temp: true, since: now() };
+    if (p.k) { r.k = CHILD_HEIGHT; r.kw = CHILD_WIDTH; }
+    if (p.parent) p.parent.child = null;     // a child taken over: the app's parent stays where they are
+    if (p.child) p.child.parent = null;      // a parent taken over: the app's child walks on alone
+    removeNative(P, i);
+    own[slot] = r; ownSet.add(r);
+    return r;
+  }
+  // our figure for this person (taking the app's one over if it's still the app's)
+  function ownOf(p) { if (!p) return null; return ownSet.has(p) ? p : adopt(p); }
+  // a living figure of ours for x (an id or a person), or null
+  function alive(x) {
+    const q = find(x);
+    if (!q || q.state === 'inside' || q.state === 'gone') return null;
+    return ownOf(q);
+  }
+  // a figure of ours with no slot yet (a runner from a car, a test): at (x, z)
+  function newOwnAt(x, z) {
+    const slot = freeSlot();
+    if (slot < 0) return null;
+    const r = { ...newPerson(), x, z, slot, scId: ++idCounter, temp: true, since: now() };
+    bald[slot] = Math.random() < BALD ? 1 : 0;
+    own[slot] = r; ownSet.add(r);
+    return r;
+  }
+  // a figure of ours that walks gets its place on the road network, where it stands
+  function ensurePlaced(p) {
+    if (p.a !== undefined || !net || !net.edges.length) return;
+    const e = nearestEdge(p.x, p.z);
+    if (!e) return;
+    const [ax, ay] = net.xy.get(e.a), [bx, by] = net.xy.get(e.b), r = rightOf(bx - ax, by - ay);
+    const side = r[0] * (p.x - (ax + (bx - ax) * e.s)) + r[1] * (p.z - (ay + (by - ay) * e.s)) >= 0 ? 1 : -1;
+    placeOnEdge(p, e.a, e.b, e.s, side);
+    const [tx, tz] = edgePoint(p.a, p.dir, p.side, p.s);
+    p.ox = p.x - tx; p.oz = p.z - tz; p.lat = 0;            // eases onto the sidewalk from where they stand
+  }
+  // someone who is inside a building is out of sight: removed from wherever they are kept
+  function dropInside(q) {
+    if (ownSet.has(q)) { q.state = 'gone'; return; }
+    const P = nativeCrowd(), i = P ? P.list.indexOf(q) : -1;
+    if (i >= 0) removeNative(P, i);
+  }
+
+  // Density: the 'residents' setting multiplies the app's crowd (its own 'crowd' setting is the base).
+  // The app's populate() is watched (its list length is the crowd size), and its density setter is
+  // replaced by one that keeps the base; the app caps the crowd at 4000 figures.
+  const densityMultiplier = () => {
+    const s = window.scCore && window.scCore.settings;
+    const v = s ? s.get('residents') : undefined;
+    return (typeof v === 'number' ? v : DENSITY_DEFAULT) / DENSITY_DEFAULT;
+  };
+  function applyDensity(P) {
+    const want = P.scBase * densityMultiplier();
+    if (P.share !== want) { P.share = want; P.populate(); }
+  }
+  function hookCrowd(P) {
+    P.scHooked = true;
+    P.scBase = P.share;
+    const populate = P.populate.bind(P);
+    P.populate = () => { populate(); crowdTarget = P.list.length; };
+    Object.defineProperty(P, 'density', {
+      configurable: true,
+      get: () => P.scBase,
+      set: (v) => { P.scBase = Math.min(1, Math.max(0, v)); applyDensity(P); },
+    });
+    crowdTarget = P.list.length;
+    applyDensity(P);
+  }
   const rnd = (a, b) => a + Math.random() * (b - a);
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
@@ -225,6 +372,7 @@
   // Run away from (x, z): turn round if heading towards it (unless halfway across the road: then
   // on to the other side first); faster and away at junctions for a while.
   function panic(p, x, z, seconds) {
+    ensurePlaced(p);
     if (!(p.panic > 0) && p.state !== 'inside' && Math.random() < SCREAM_CHANCE) scream(p, rnd(0, 0.5));
     if (!(p.panic > 0)) p.reckless = Math.random() < RECKLESS;
     p.panic = seconds * (0.8 + Math.random() * 0.4);
@@ -243,8 +391,9 @@
   // up and running on until the fire goes out. Dead bodies burn on for a while.
   let burning = 0;
   function ignite(p, fx, fz) {
-    if (!p || p.burn || !V || p.state === 'inside' || p.state === 'gone' || p.state === 'enter') return false;
-    if (p.burnSafe && performance.now() < p.burnSafe) return false;
+    if (!p || !V || p.state === 'inside' || p.state === 'gone' || p.state === 'enter') return false;
+    p = ownOf(p);
+    if (!p || p.burn || (p.burnSafe && performance.now() < p.burnSafe)) return false;
     fx = fx ?? p.x + rnd(-1, 1); fz = fz ?? p.z + rnd(-1, 1);
     if (p.state !== 'down') {
       if (p.parent) orphan(p);                                    // a child on fire runs on its own…
@@ -282,33 +431,13 @@
   function newPerson() {
     return { speed: SPEED * (1 + rnd(-SPEED_VARIATION, SPEED_VARIATION)), state: 'walk', x: 0, z: 0, h: 0, lat: 0, ox: 0, oz: 0 };
   }
-  // a child that walks next to adult p (and goes where p goes)
-  function makeChild(p) {
-    const c = { speed: p.speed, state: p.state, x: p.x, z: p.z, h: p.h, parent: p, k: CHILD_HEIGHT, kw: CHILD_WIDTH, cside: 1, fresh: true,
-      insideAt: p.insideAt, voice: rnd(1150, 1450) };
-    p.child = c;
-    return c;
-  }
-
+  // the road network was rebuilt (new city, or the highways changed): our figures stay (bodies, runners,
+  // frozen test subjects), walking ones get a place on the new network at their next step
   function spawn() {
-    people = [];
-    drops.length = 0;
-    loose.length = 0; for (const set of looseSets) { set.list.length = 0; set.ring = 0; }
-    if (!net.edges.length) return;
-    const perRoad = (window.scCore && window.scCore.settings && window.scCore.settings.get('residents')) || PER_ROAD;
-    const count = Math.min(MAX_PEOPLE, Math.round(net.edges.length * perRoad));
-    while (people.length < count) {
-      const p = newPerson();
-      const [a, b] = pick(net.edges);
-      const s0 = rnd(0.25, 0.75), side = Math.random() < 0.5 ? 1 : -1;   // start on the sidewalk, not in a junction
-      if (Math.random() < 0.5) placeOnEdge(p, a, b, s0, side); else placeOnEdge(p, b, a, s0, side);
-      if (net.doorList.length && Math.random() < START_INSIDE) {
-        p.state = 'inside'; p.timer = rnd(0, INSIDE_SECONDS[1]);
-        const k = pick(net.doorList), n = net.doors.get(k), mid = midOf(k);
-        p.insideAt = [mid[0] - n[0] * 0.35, mid[1] - n[1] * 0.35];
-      }
-      people.push(p);
-      if (people.length < count && Math.random() < CHILD_SHARE) people.push(makeChild(p));
+    for (const p of own) {
+      if (!p || (p.state !== 'walk' && p.state !== 'enter' && p.state !== 'exit')) continue;
+      if (p.state !== 'walk') p.state = 'walk';
+      p.a = undefined; p.planFor = null;
     }
   }
 
@@ -472,8 +601,7 @@
   const PASS_CELL = 0.25;
   function crowdCells() {
     const cells = new Map();
-    for (let i = 0; i < people.length && i < MAX_PEOPLE; i++) {
-      const p = people[i];
+    for (const p of everyone()) {
       if (p.state === 'inside' || p.state === 'gone') continue;
       const k = Math.floor(p.x / PASS_CELL) + ',' + Math.floor(p.z / PASS_CELL);
       (cells.get(k) || cells.set(k, []).get(k)).push(p);
@@ -646,7 +774,9 @@
 
   // Is this person inside a car's box (in the car's own coordinates)? Then they're knocked over in
   // the car's driving direction.
-  function hitByCar(i, p, byTile) {
+  // a car runs someone over: calm people don't walk in front of cars; only panicking people, or a car
+  // that suddenly speeds up (fleeing, police with siren), can still be hit. Returns true when hit.
+  function hitByCar(p, byTile) {
     const tx = Math.floor(p.x), tz = Math.floor(p.z), R = 0.02 * SCALE;
     for (let ox = -1; ox <= 1; ox++) for (let oz = -1; oz <= 1; oz++) {
       const list = byTile.get(tk(tx + ox, tz + oz)); if (!list) continue;
@@ -654,16 +784,15 @@
         const fx = Math.cos(c.heading), fz = Math.sin(c.heading);   // car forward (the app turns cars by −heading)
         const dx = p.x - c.x, dz = p.z - c.z;
         const lx = dx * fx + dz * fz, lz = -dx * fz + dz * fx;
-        // calm people don't walk in front of cars; only panicking people, or a car that suddenly
-        // speeds up (fleeing, police with siren), can still hit someone
         const faster = (c.boost || 1) > 1.01 || c.speed > c.base * 1.15;
         if (!(p.panic > 0) && !faster) continue;
         if (Math.abs(lx) < 0.115 + R && Math.abs(lz) < 0.0575 + R) {
-          window.scResidents.knockDown(i, { x: fx, y: 0, z: fz }, 'car');
-          return;
+          const q = ownOf(p);
+          return !!q && knockDownP(q, { x: fx, y: 0, z: fz }, 'car');
         }
       }
     }
+    return false;
   }
 
   // ---------- 3D figures ----------
@@ -722,8 +851,8 @@
     if (!pools) return;
     const hidden = new M().makeScale(0, 0, 0);
     for (let i = 0; i < n; i++) {
-      const b = people[i].blood;
-      if (!b || (people[i].state !== 'down' && people[i].state !== 'gone')) { pools.setMatrixAt(i, hidden); continue; }
+      const q = own[i], b = q && q.blood;
+      if (!b || (q.state !== 'down' && q.state !== 'gone')) { pools.setMatrixAt(i, hidden); continue; }
       b.t += dt;
       const g = b.t <= 0 ? 0 : 1 - Math.pow(1 - Math.min(1, b.t / BLOOD_POOL_SECONDS), 2.2);   // fast at first, then slower
       const r = b.size * Math.max(0.001, g);
@@ -766,9 +895,9 @@
   // From the neck of the falling body blood squirts in heartbeat pulses for a few seconds.
   let looseHeads = null, looseHair = null, looseLegs = null, looseTorsos = null;
   const loose = [];
-  function behead(i, d) {
-    const p = people[i];
+  function behead(p, d) {
     if (!p || p.state === 'down' || p.state === 'gone' || !V || !looseHeads) return false;
+    const i = p.slot;
     const l = Math.hypot(d.x, d.z) || 1, dx = d.x / l, dz = d.z / l;
     const neckY = SIDEWALK_HEIGHT + (HEAD_Y * (p.k || 1) + HEAD / 2) * SCALE;
     const h = { x: p.x, y: neckY, z: p.z, vx: dx * HEAD_SPEED * rnd(0.6, 1.2) + rnd(-0.2, 0.2), vy: HEAD_SPEED * rnd(0.4, 0.9) + Math.max(0, d.y || 0),
@@ -776,7 +905,7 @@
       rest: false, trail: 0.8, person: i, bald: bald[i] };
     heads.getColorAt(i, tmpC); const skin = tmpC.clone(); hairs.getColorAt(i, tmpC);
     addLoose(looseSets[0], h, skin, tmpC.clone());
-    window.scResidents.knockDown(i, d);
+    knockDownP(p, d);
     p.headless = true; p.squirt = BLOOD ? NECK_SQUIRT_SECONDS : 0;
     if (BLOOD) {   // a burst where the head was
       for (let k = 0; k < 18; k++) addDrop(p.x, neckY, p.z, dx * rnd(0, 1) * BLOOD_SPEED + rnd(-0.3, 0.3) * BLOOD_SPEED, rnd(0.1, 0.8) * BLOOD_SPEED, dz * rnd(0, 1) * BLOOD_SPEED + rnd(-0.3, 0.3) * BLOOD_SPEED, rnd(0.002, 0.005) * SCALE);
@@ -855,9 +984,9 @@
 
   // Blown apart (rocket): the resident is gone; legs, torso and head (with hair) fly off on their
   // own, away from the blast at (x, z), with a lot of blood. power ≈ how hard (tiles per second).
-  function gib(i, x, z, power = 1.2) {
-    const p = people[i];
+  function gib(p, x, z, power = 1.2) {
     if (!p || p.state === 'inside' || p.state === 'gone' || !looseHeads || !looseLegs) return false;
+    const i = p.slot;
     const dx0 = p.x - x, dz0 = p.z - z, l = Math.hypot(dx0, dz0) || 1, dx = dx0 / l, dz = dz0 / l;
     const base = SIDEWALK_HEIGHT;
     if (p.state !== 'down') died(p, 'blast');                      // (a body blown apart again doesn't count twice)
@@ -1038,22 +1167,42 @@
       if (appModule) net.triedDoors = true;
       spawn();
     }
-    const hidden = new M().makeScale(0, 0, 0);
+    const P = nativeCrowd();
+    if (P && !P.scHooked) hookCrowd(P);
+    // the app's list is topped up when people have been taken out of it (at most twice a second)
+    if (P && P.list.length < crowdTarget && t - topUpAt > 500) { topUpAt = t; P.populate(); }
     if (!tip) {
       tip = new M(); bodyM = new M(); headM = new M();
       childBody = new M().makeScale(CHILD_WIDTH, CHILD_HEIGHT, CHILD_WIDTH);
       childHead = new M().makeTranslation(0, -(1 - CHILD_HEIGHT) * HEAD_Y * SCALE, 0);
     }
+    const hidden = new M().makeScale(0, 0, 0);
     const m = new M();
-    const n = Math.min(people.length, MAX_PEOPLE);
-    burners.length = 0;
     const carsByTile = CAR_COLLISIONS ? movingCars() : null;
+    // the app's people: a place to stay away from takes them in (they walk out of it), cars can run them over
+    if (P) {
+      const zonesNow = zones.length > 0 && t - zoneCheckAt > 250;
+      if (zonesNow) zoneCheckAt = t;
+      for (const q of P.list.slice()) {
+        if (q.state === 'inside') continue;
+        if (zonesNow && zoneAt(q.x, q.z)) { const r = ownOf(q); if (r) r.panic = Math.max(r.panic || 0, 3); continue; }
+        if (carsByTile) hitByCar(q, carsByTile);
+      }
+    }
+    // our own figures: walking (runners), lying, burning
     const crowd = dt > 0 ? crowdCells() : null;
+    burners.length = 0;
+    const n = own.length;
     for (let i = 0; i < n; i++) {
-      const p = people[i];
+      const p = own[i];
+      if (!p) continue;
+      if (p.state === 'walk' && p.a === undefined) ensurePlaced(p);
       if (crowd) steer(p, crowd, dt);
       step(p, dt);
-      if (carsByTile && p.state !== 'inside' && p.state !== 'down' && p.state !== 'gone') hitByCar(i, p, carsByTile);
+      // calm again (no panic, not in a place to stay away from, not burning): back to the app's crowd
+      if (p.temp && p.state === 'walk' && !(p.panic > 0) && !(p.away > 0) && !p.burn && !p.frozen && !p.keep) p.state = 'gone';
+      if (p.temp && p.state === 'inside') p.state = 'gone';                  // indoors: out of sight
+      if (carsByTile && p.state !== 'inside' && p.state !== 'down' && p.state !== 'gone') hitByCar(p, carsByTile);
       if (p.state === 'inside' || p.state === 'gone') { for (const part of parts) part.setMatrixAt(i, hidden); continue; }
       m.makeRotationY(p.h);
       let y = SIDEWALK_HEIGHT;
@@ -1070,7 +1219,7 @@
         m.premultiply(tip);
         y += 0.011 * SCALE * f;                                 // lying on its back, not half in the sidewalk
       }
-      if (p.burn) burners.push(i);
+      if (p.burn) burners.push(p);
       m.setPosition(p.x, y, p.z);
       if (p.k) {                                                // a child: smaller body, the same head on top of it
         bodyM.multiplyMatrices(m, childBody); headM.multiplyMatrices(m, childHead);
@@ -1097,8 +1246,7 @@
     if (!flames) return;
     const e = flames.instanceMatrix.array, core = window.scCore;
     let k = 0;
-    for (const i of burners) {
-      const p = people[i];
+    for (const p of burners) {
       const lie = p.state === 'down' ? p.fall : p.lie || 0, ang = (Math.PI / 2) * lie * lie, sa = Math.sin(ang), ca = Math.cos(ang);
       const dx = p.axis ? -p.axis.z : 0, dz = p.axis ? p.axis.x : 0, kk = p.k || 1, y0 = SIDEWALK_HEIGHT + 0.004;
       const fade = p.burn.phase === 'up' ? Math.min(1, (BURN_AFTER - p.burn.t) / 2) : p.state === 'down' ? Math.min(1, (BURN_CORPSE - (p.burn.dead || 0)) / 2) : 1;
@@ -1120,15 +1268,14 @@
       smokeAcc += burners.length * 3 * dt;
       while (smokeAcc >= 1) {
         smokeAcc -= 1;
-        const p = people[burners[(Math.random() * burners.length) | 0]];
+        const p = burners[(Math.random() * burners.length) | 0];
         core.smoke('smoke', p.x + rnd(-0.01, 0.01), SIDEWALK_HEIGHT + (p.lie > 0.5 || p.state === 'down' ? 0.04 : 0.13), p.z + rnd(-0.01, 0.01),
           { vy: rnd(0.15, 0.3), rise: rnd(0.2, 0.35), size: rnd(0.02, 0.035), grow: 3, life: rnd(1.5, 2.5), drag: 1 });
       }
     }
     // touching someone on fire: alight too
     if (!crowd) return;
-    for (const i of burners) {
-      const p = people[i];
+    for (const p of burners) {
       const cx = Math.floor(p.x / PASS_CELL), cz = Math.floor(p.z / PASS_CELL);
       for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
         const list = crowd.get((cx + a) + ',' + (cz + b)); if (!list) continue;
@@ -1139,10 +1286,10 @@
   whenCore((c) => {
     c.onFrame(frame);
     if (c.settings) {
-      c.settings.define({ id: 'residents', label: 'Inwoners per stuk straat', min: 0.5, max: 4, step: 0.5, value: PER_ROAD,
-        format: (v) => `${v}${net ? ` (≈ ${Math.min(MAX_PEOPLE, Math.round(net.edges.length * v))} mensen)` : ''}`,
-        help: 'Meer mensen = drukker op straat, maar zwaarder. Iedereen begint opnieuw.' });
-      c.settings.onChange('residents', () => { seenVersion = -1; });   // new people at the next frame
+      c.settings.define({ id: 'residents', label: 'Drukte op straat', min: 0.5, max: 8, step: 0.5, value: DENSITY_DEFAULT,
+        format: (v) => `${+(v / DENSITY_DEFAULT).toFixed(2)}×`,
+        help: 'Hoeveel mensen er op de stoepen lopen, vergeleken met de standaard van de app (1×). Meer mensen = drukker, maar zwaarder.' });
+      c.settings.onChange('residents', () => { const P = nativeCrowd(); if (P && P.scHooked) applyDensity(P); });
     }
   });
 
@@ -1216,7 +1363,8 @@
   }
 
   // resident i's own colours, as hex strings (null when the figures aren't built yet)
-  function colorsOf(i) {
+  function colorsOf(p) {
+    const i = p.slot;
     try {
       const Col = torsos && torsos.material && torsos.material.color && torsos.material.color.constructor;
       if (!Col) return null;
@@ -1227,16 +1375,32 @@
 
   // ---------- for other scripts (walk mode shoots with this) ----------
   // hit(origin, direction, maxDistance) → { index, t } of the nearest standing resident on that line.
-  // knockDown(index, direction) → makes them fall over (away from the shot) and stay down.
+  // knockDown(id, direction) → makes them fall over (away from the shot) and stay down.
+  // knocks a figure of ours over, away from the shot; false if they're down already
+  function knockDownP(p, d, cause) {
+    if (!p || p.state === 'down' || p.state === 'gone' || !V) return false;
+    const l = Math.hypot(d.x, d.z) || 1;
+    p.since = now();
+    if (p.lie > 0.5 && p.axis) { p.state = 'down'; p.fall = p.lie; p.lie = 0; died(p, cause || 'shot'); return true; }   // already on the ground (on fire)
+    p.state = 'down'; p.fall = 0; p.lie = 0;
+    p.axis = new V(d.z / l, 0, -d.x / l);                    // horizontal axis ⟂ to the shot
+    died(p, cause || 'shot');
+    if (Math.random() < 0.3) scream(p, 0, true);
+    if (BLOOD) bleed(p, d.x / l, d.y || 0, d.z / l);
+    return true;
+  }
+
   window.scResidents = {
+    // hit(origin, direction, maxDistance) → { index, t, head, person } of the nearest standing person on that
+    // line. index is their id (for knockDown, skin, … later on, when the beam arrives).
     hit(o, d, max = 30) {
       const HR = 0.0125 * SCALE;
       const a = d.x * d.x + d.z * d.z;
       let best = null;
-      people.forEach((p, i) => {
-        if (i >= MAX_PEOPLE || p.state === 'inside' || p.state === 'down' || p.state === 'gone') return;
+      for (const p of everyone()) {
+        if (p.state === 'inside' || p.state === 'down' || p.state === 'gone') continue;
         const k = p.k || 1;                                       // children: shorter and slimmer, same head
-        const H = (0.135 - (1 - k) * HEAD_Y) * SCALE, R = 0.02 * (p.kw || 1) * SCALE, neck = SIDEWALK_HEIGHT + (HEAD_Y * k - 0.002) * SCALE;
+        const H = (0.135 - (1 - k) * HEAD_Y) * SCALE, R = 0.02 * (p.kw || (p.k ? CHILD_WIDTH : 1)) * SCALE, neck = SIDEWALK_HEIGHT + (HEAD_Y * k - 0.002) * SCALE;
         const ex = o.x - p.x, ez = o.z - p.z;
         const ts = [];
         if (a > 1e-9) {
@@ -1248,7 +1412,7 @@
         for (const t of ts) {
           if (!(t > 0 && t < max)) continue;
           const y = o.y + d.y * t, x = o.x + d.x * t - p.x, z = o.z + d.z * t - p.z;
-          if (y >= SIDEWALK_HEIGHT && y < neck && x * x + z * z <= R * R * 1.0001 && (!best || t < best.t)) best = { index: i, t, head: false };
+          if (y >= SIDEWALK_HEIGHT && y < neck && x * x + z * z <= R * R * 1.0001 && (!best || t < best.t)) best = { index: idOf(p), t, head: false, person: p };
         }
         // the head: narrower than the body, from the neck up (side or top)
         const hts = [];
@@ -1260,76 +1424,80 @@
         for (const t of hts) {
           if (!(t > 0 && t < max)) continue;
           const y = o.y + d.y * t, x = o.x + d.x * t - p.x, z = o.z + d.z * t - p.z;
-          if (y >= neck && y <= SIDEWALK_HEIGHT + H + 1e-6 && x * x + z * z <= HR * HR * 1.0001 && (!best || t < best.t)) best = { index: i, t, head: true };
+          if (y >= neck && y <= SIDEWALK_HEIGHT + H + 1e-6 && x * x + z * z <= HR * HR * 1.0001 && (!best || t < best.t)) best = { index: idOf(p), t, head: true, person: p };
         }
-      });
+      }
       return best;
     },
     // Skinned (the skinner script) or torn apart by a tree (the yuletide grenade): the person is
     // taken out of the city and their place is returned ({ x, z, y, h, k, th, colors }) so the
     // weapon can draw the body itself; null when there's nobody to take. cause: for the sc:kill
     // event (default 'skinned'). colors: their own shirt, trousers, skin and hair (hex), and bald.
-    skin(i, cause) {
-      const p = people[i];
-      if (!p || p.state === 'inside' || p.state === 'gone') return null;
+    skin(x, cause) {
+      const p = alive(x);
+      if (!p) return null;
       if (p.state !== 'down') died(p, cause || 'skinned');
       p.state = 'gone'; p.squirt = 0; p.burn = null;
       const k = p.k || 1;
-      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE, th: p.h, colors: colorsOf(i) };
+      return { x: p.x, z: p.z, y: groundAt(p.x, p.z), k, h: (0.135 - (1 - k) * HEAD_Y) * SCALE, th: p.h, colors: colorsOf(p) };
     },
     // Test hooks: freeze(x, z, facing) pins the walking adult nearest to (x, z) at exactly that
-    // spot (returns their index, or -1); unfreeze(i) lets them walk again.
+    // spot (returns their id, or -1); unfreeze(id) lets them walk again.
     freeze(x, z, facing = 0) {
-      let bi = -1, bd = Infinity;
-      people.forEach((p, i) => {
-        if (p.state !== 'walk' || p.parent) return;
-        const d = Math.hypot(p.x - x, p.z - z);
-        if (d < bd) { bd = d; bi = i; }
-      });
-      if (bi < 0) return -1;
-      const p = people[bi];
-      p.frozen = true; p.fx = x; p.fz = z; p.fh = facing; p.x = x; p.z = z; p.h = facing;
-      return bi;
+      let best = null, bd = Infinity;
+      for (const q of everyone()) {
+        if (q.state !== 'walk' || q.parent) continue;
+        const d = Math.hypot(q.x - x, q.z - z);
+        if (d < bd) { bd = d; best = q; }
+      }
+      const p = best && ownOf(best);
+      if (!p) return -1;
+      ensurePlaced(p);
+      p.frozen = true; p.keep = true; p.fx = x; p.fz = z; p.fh = facing; p.x = x; p.z = z; p.h = facing;
+      return idOf(p);
     },
-    unfreeze(i) { const p = people[i]; if (p) p.frozen = false; },
-    // An explosion at (x, z): everyone within knockRadius falls over (away from it), everyone
-    // within panicRadius runs away for about panicSeconds. People indoors notice nothing.
-    // Something scary (a gunshot) at (x, z): everyone outside within radius runs away from it.
-    // a place to stay away from: (x, z), radius r, for `seconds` (Infinity: for good)
+    unfreeze(id) { const p = find(id); if (p && ownSet.has(p)) { p.frozen = false; p.keep = false; } },
+    // a place to stay away from: (x, z), radius r, for `seconds` (Infinity: for good). The app's people in it
+    // are taken in and walk out (frame()).
     avoid(x, z, r, seconds = 60) {
       zones.push({ x, z, r, until: performance.now() + seconds * 1000 });
-      for (const p of people) if (p.state === 'walk' && !p.parent) { p.planFor = null; p.zoneT = rnd(0, 0.3); }
+      for (const q of everyone()) if (ownSet.has(q) && q.state === 'walk' && !q.parent) { q.planFor = null; q.zoneT = rnd(0, 0.3); }
       return zones.length;
     },
     get zones() { return zones.map((z) => ({ x: z.x, z: z.z, r: z.r })); },
+    // Something scary (a gunshot) at (x, z): everyone outside within radius runs away from it.
     alarm(x, z, radius, seconds) {
       let fled = 0;
-      people.forEach((p, i) => {
-        if (i >= MAX_PEOPLE || p.state === 'inside' || p.state === 'down' || p.state === 'gone') return;
-        if (Math.hypot(p.x - x, p.z - z) <= radius) { panic(p, x, z, seconds); fled++; }
-      });
+      for (const q of everyone()) {
+        if (q.state === 'inside' || q.state === 'down' || q.state === 'gone') continue;
+        if (Math.hypot(q.x - x, q.z - z) > radius) continue;
+        const p = ownOf(q);
+        if (p) { panic(p, x, z, seconds); fled++; }
+      }
       return fled;
     },
-    // fireFrom (an explosion; not the monster's stamping): people from there to BLAST_FIRE_BAND
-    // further out (about 5 m outside where people are blown apart) catch fire half of the time.
+    // An explosion at (x, z): everyone within knockRadius falls over (away from it), everyone within
+    // panicRadius runs away for about panicSeconds. fireFrom (an explosion; not the monster's stamping):
+    // people from there to BLAST_FIRE_BAND further out (about 5 m outside where people are blown apart)
+    // catch fire half of the time.
     blast(x, z, knockRadius, panicRadius, panicSeconds, fireFrom) {
       let down = 0, fled = 0, burned = 0;
-      people.forEach((p, i) => {
-        if (i >= MAX_PEOPLE || p.state === 'inside' || p.state === 'down' || p.state === 'gone') return;
-        const dx = p.x - x, dz = p.z - z, dist = Math.hypot(dx, dz);
-        if (fireFrom !== undefined && dist >= fireFrom && dist <= fireFrom + BLAST_FIRE_BAND && Math.random() < BLAST_FIRE_CHANCE && ignite(p, x, z)) burned++;
-        else if (dist <= knockRadius) { if (this.knockDown(i, { x: dx || 1e-3, y: 0, z: dz }, 'blast')) down++; }
-        else if (dist <= panicRadius) { panic(p, x, z, panicSeconds); fled++; }
-      });
+      for (const q of everyone()) {
+        if (q.state === 'inside' || q.state === 'down' || q.state === 'gone') continue;
+        const dx = q.x - x, dz = q.z - z, dist = Math.hypot(dx, dz);
+        if (fireFrom !== undefined && dist >= fireFrom && dist <= fireFrom + BLAST_FIRE_BAND && Math.random() < BLAST_FIRE_CHANCE && ignite(q, x, z)) burned++;
+        else if (dist <= knockRadius) { const p = ownOf(q); if (p && knockDownP(p, { x: dx || 1e-3, y: 0, z: dz }, 'blast')) down++; }
+        else if (dist <= panicRadius) { const p = ownOf(q); if (p) { panic(p, x, z, panicSeconds); fled++; } }
+      }
       return { down, fled, burned };
     },
-    // set resident i on fire (the fire came from fromX, fromZ: they run away from it); false when
+    // set this person on fire (the fire came from fromX, fromZ: they run away from it); false when
     // they can't burn now (indoors, already burning, just put out)
-    ignite(i, fromX, fromZ) { return ignite(people[i], fromX, fromZ); },
+    ignite(x, fromX, fromZ) { const p = find(x); return p ? ignite(p, fromX, fromZ) : false; },
     // everyone outside within r of (x, z) catches fire with this chance; returns how many
     igniteAround(x, z, r, chance = 1) {
       let n = 0;
-      people.forEach((p, i) => { if (i < MAX_PEOPLE && Math.hypot(p.x - x, p.z - z) <= r && Math.random() < chance && ignite(p, x, z)) n++; });
+      for (const q of everyone()) if (Math.hypot(q.x - x, q.z - z) <= r && Math.random() < chance && ignite(q, x, z)) n++;
       return n;
     },
     get burning() { return burning; },
@@ -1339,10 +1507,12 @@
     // people indoors within radius of (x, z) die (the nuke); returns how many
     killInside(x, z, radius) {
       let n = 0;
-      people.forEach((p, i) => {
-        if (i >= MAX_PEOPLE || p.state !== 'inside' || !p.insideAt) return;
-        if (Math.hypot(p.insideAt[0] - x, p.insideAt[1] - z) <= radius) { p.state = 'gone'; died({ x: p.insideAt[0], z: p.insideAt[1] }, 'inside'); n++; }
-      });
+      for (const q of everyone()) {
+        if (q.state !== 'inside') continue;
+        const at = q.insideAt || [q.x, q.z];
+        if (Math.hypot(at[0] - x, at[1] - z) > radius) continue;
+        dropInside(q); died({ x: at[0], z: at[1] }, 'inside'); n++;
+      }
       return n;
     },
     // a building with footprint x0..x1 × z0..z1 comes down: everyone inside dies, people on the
@@ -1350,22 +1520,24 @@
     crush(x0, z0, x1, z1, margin = CRUSH_MARGIN, panicRadius = 3) {
       let n = 0;
       const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
-      people.forEach((p, i) => {
-        if (i >= MAX_PEOPLE || p.state === 'down' || p.state === 'gone') return;
-        if (p.state === 'inside') {
-          const q = p.insideAt;
-          if (q && q[0] >= x0 - 0.1 && q[0] <= x1 + 0.1 && q[1] >= z0 - 0.1 && q[1] <= z1 + 0.1) { p.state = 'gone'; died({ x: q[0], z: q[1] }, 'collapse'); n++; }
-          return;
+      for (const q of everyone()) {
+        if (q.state === 'down' || q.state === 'gone') continue;
+        if (q.state === 'inside') {
+          const at = q.insideAt || [q.x, q.z];
+          if (at[0] >= x0 - 0.1 && at[0] <= x1 + 0.1 && at[1] >= z0 - 0.1 && at[1] <= z1 + 0.1) { dropInside(q); died({ x: at[0], z: at[1] }, 'collapse'); n++; }
+          continue;
         }
-        const ox = Math.max(x0 - p.x, 0, p.x - x1), oz = Math.max(z0 - p.z, 0, p.z - z1), d = Math.hypot(ox, oz);
-        if (d <= margin) { if (this.knockDown(i, { x: p.x - cx || 1e-3, y: -0.5, z: p.z - cz }, 'collapse')) n++; }
+        const ox = Math.max(x0 - q.x, 0, q.x - x1), oz = Math.max(z0 - q.z, 0, q.z - z1), d = Math.hypot(ox, oz);
+        const p = ownOf(q);
+        if (!p) continue;
+        if (d <= margin) { if (knockDownP(p, { x: p.x - cx || 1e-3, y: -0.5, z: p.z - cz }, 'collapse')) n++; }
         else if (d <= panicRadius) panic(p, cx, cz, 10);
-      });
+      }
       return n;
     },
     get deaths() { return deaths; },
-    get people() { return people; },                            // read-only use (tests, other scripts)
-    // someone jumps out of a car at (x, z) and runs away from (fromX, fromZ), screaming; returns their index
+    get people() { return everyone(); },                        // read-only use (tests, other scripts): the app's and ours
+    // someone jumps out of a car at (x, z) and runs away from (fromX, fromZ), screaming; returns their id
     addRunner(x, z, fromX, fromZ, seconds = 15) {
       if (!net || !net.edges.length || !V) return -1;
       const best = nearestEdge(x, z);                            // the nearest road line
@@ -1373,7 +1545,8 @@
       // run the way that leads away from the danger
       const [ax, ay] = net.xy.get(best.a), [bx, by] = net.xy.get(best.b);
       const away = Math.hypot(bx - fromX, by - fromZ) > Math.hypot(ax - fromX, ay - fromZ);
-      const p = newPerson(); p.x = x; p.z = z; p.side = 1;
+      const p = newOwnAt(x, z);
+      if (!p) return -1;
       if (away) placeOnEdge(p, best.a, best.b, best.s); else placeOnEdge(p, best.b, best.a, 1 - best.s);
       // on the sidewalk on the car's side of the road
       const r = rightOf(p.dir[0], p.dir[1]), lx = ax + (bx - ax) * best.s, lz = ay + (by - ay) * best.s;
@@ -1384,33 +1557,21 @@
       p.h = Math.atan2(p.to[0] - x, p.to[1] - z);
       p.next = [p.a, p.b]; p.nextS = p.s;
       p.panic = seconds; p.fleeFrom = [fromX, fromZ];
-      // a free figure: a new one, or one that's gone
-      let i = people.length < MAX_PEOPLE ? people.length : people.findIndex((q) => q.state === 'gone');
-      if (i < 0) i = people.findIndex((q) => q.state === 'inside' && !q.child && !q.parent);
-      if (i < 0) return -1;
-      people[i] = p;
       scream(p, 0.1);
-      return i;
+      return idOf(p);
     },
-    behead(i, d) { return HEADSHOTS ? behead(i, d) : this.knockDown(i, d); },
-    gib(i, x, z, power) { return gib(i, x, z, power); },
+    behead(x, d) { const p = alive(x); return p ? (HEADSHOTS ? behead(p, d) : knockDownP(p, d)) : false; },
+    gib(x, px, pz, power) { const p = alive(x); return p ? gib(p, px, pz, power) : false; },
     // everyone within radius of (x, z) blown apart; returns how many
     gibAround(x, z, radius, power) {
       let n = 0;
-      people.forEach((p, i) => { if (i < MAX_PEOPLE && p.state !== 'inside' && p.state !== 'gone' && Math.hypot(p.x - x, p.z - z) <= radius && gib(i, x, z, power)) n++; });
+      for (const q of everyone()) {
+        if (q.state === 'inside' || q.state === 'gone' || Math.hypot(q.x - x, q.z - z) > radius) continue;
+        const p = ownOf(q);
+        if (p && gib(p, x, z, power)) n++;
+      }
       return n;
     },
-    knockDown(i, d, cause) {
-      const p = people[i];
-      if (!p || p.state === 'down' || p.state === 'gone' || !V) return false;
-      const l = Math.hypot(d.x, d.z) || 1;
-      if (p.lie > 0.5 && p.axis) { p.state = 'down'; p.fall = p.lie; p.lie = 0; died(p, cause || 'shot'); return true; }   // already on the ground (on fire)
-      p.state = 'down'; p.fall = 0; p.lie = 0;
-      p.axis = new V(d.z / l, 0, -d.x / l);                    // horizontal axis ⟂ to the shot
-      died(p, cause || 'shot');
-      if (Math.random() < 0.3) scream(p, 0, true);
-      if (BLOOD) bleed(p, d.x / l, d.y || 0, d.z / l);
-      return true;
-    },
+    knockDown(x, d, cause) { const p = alive(x); return p ? knockDownP(p, d, cause) : false; },
   };
 })();
