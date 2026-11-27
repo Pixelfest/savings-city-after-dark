@@ -3,7 +3,7 @@
 // changes without a browser. Start local/server.js first.
 //
 //   node local/shot.js [url] [out.png] [--wait 12000] [--eval "js run in the page before the shot"]
-//   e.g. node local/shot.js 'http://localhost:8080/?plugins=nuke' nuke.png --eval "document.querySelector('[title*=Nuke]')?.click()" --wait 20000
+//   e.g. node local/shot.js 'http://localhost:8080/?plugins=nuke' nuke.png --eval "scCore.menu.open()" --wait 20000
 //   The test city: node local/shot.js 'http://localhost:8080/test?plugins=core,cops' test.png --wait 3000
 //   (waits for window.scTest.ready first, then --wait ms).
 //

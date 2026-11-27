@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – meteor shower
 // @namespace    savings-city-tweaks
-// @version      1.1
-// @description  A ☄ button: a shower of 10–40 burning meteors falls on the city at one angle. They smash through whatever is in their way, leave burning craters, and badly damaged buildings collapse. Only in your browser – reload to rebuild.
+// @version      1.2
+// @description  ☄ in the disasters menu: a shower of 10–40 burning meteors falls on the city at one angle. They smash through whatever is in their way, leave burning craters, and badly damaged buildings collapse. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -714,28 +714,18 @@
     } catch {}
   }
 
-  // ---------- button ----------
+  // ---------- menu entry ----------
   const SVG = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="g-ico" aria-hidden="true"';
   const ICON = `<svg ${SVG}><circle cx="7" cy="17" r="3.5"/><path d="M9.8 14.2 19 5"/><path d="M8 11.2 13.5 5.7"/><path d="M12.8 16 18.3 10.5"/></svg>`;
-  function updateButton() {
-    const b = document.getElementById('sc-meteors'); if (!b) return;
-    const busy = !!(shower && shower.pending.length);
-    const label = busy ? 'Meteorenregen stoppen' : 'Meteorenregen';
-    b.title = label; b.setAttribute('aria-label', label);
-    b.style.color = shower ? '#e0702a' : '';
-  }
-  function ensureButton() {
-    if (document.getElementById('sc-meteors')) return;
-    const row = document.querySelector('.hz-tr .menu-mini'); if (!row) return;
-    const b = document.createElement('button');
-    b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-meteors';
-    b.innerHTML = '<b class="s-bg"></b>' + ICON;
-    b.addEventListener('click', (e) => { e.stopPropagation(); try { ctx(); } catch {} if (shower && shower.pending.length) stop(); else start(); });
-    row.appendChild(b);
-    updateButton();
-  }
-  const begin = () => { ensureButton(); new MutationObserver(ensureButton).observe(document.body, { childList: true, subtree: true }); };
-  if (document.body) begin(); else document.addEventListener('DOMContentLoaded', begin);
+  // the entry in the core's disasters menu ("Rampen")
+  function updateButton() { const c = window.scCore; if (c && c.menu) c.menu.update(); }
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  whenCore((c) => c.menu && c.menu.add({
+    id: 'meteors', order: 20, icon: ICON,
+    label: () => (shower && shower.pending.length ? 'Meteorenregen stoppen' : 'Meteorenregen'),
+    active: () => !!shower,
+    onClick: () => { try { ctx(); } catch {} if (shower && shower.pending.length) stop(); else start(); },
+  }));
 
   window.scMeteors = {
     // start a shower; opts: count, aimed, azimuth (radians), elevation (degrees), duration (s), at ([x, z]: land near there)

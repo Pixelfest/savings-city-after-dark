@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – graphics
 // @namespace    savings-city-tweaks
-// @version      1.5
-// @description  Graphics settings in the settings popup (needs the core): winter on/off, day and night or always day/night, shadows, ambient occlusion, outlines, light shafts with a haze panel, lens effects and bigger pixels.
+// @version      1.6
+// @description  Graphics settings in the settings popup (needs the core): winter on/off, day and night or always day/night, shadows, ambient occlusion, outlines, light shafts and their haze, lens effects and bigger pixels.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -42,7 +42,7 @@
  * - Light shafts (Lichtstralen: off / explosions only / sun and explosions):
  *     sun: a layer of haze, ray-marched through the sun's shadow map, so the shadows of buildings
  *          become shafts in the haze (needs shadows, daytime; the heaviest effect, at half size);
- *          the haze panel (Nevelpaneel) sets its height, thickness, darkness in shadow, glow, colour
+ *          the settings' section "Nevel (zonnestralen)" sets its height, thickness, darkness in shadow, glow, colour
  *          and wind (drifting patches – shafts show best with movement), live, kept in localStorage;
  *     explosions: any script can add a light source to window.scLightBursts (the nuke does): rays
  *          fan out from it (radial blur), day and night. Costs nothing when nothing explodes.
@@ -60,8 +60,8 @@
   const AO_STRENGTH = 0.85;        // 0…1, how much of it is applied
   const EDGE_STRENGTH = 0.55;      // 0…1, how dark the outlines are
   const SHAFT_STEPS = 24;          // samples per pixel through the sun's shadow map (at half size)
-  // the haze for sun shafts – defaults; the haze panel (settings → Nevelpaneel) changes them live
-  // and keeps them in localStorage (HAZE_KEY)
+  // the haze for sun shafts – defaults of the settings in the section "Nevel (zonnestralen)"
+  // (HAZE_KEY: where graphics 1.5 kept them, read once)
   const HAZE_DEFAULTS = {
     top: 10,                       // world units: the haze layer goes from the ground up to here
     thick: 0.07,                   // per world unit: how thick the haze is
@@ -168,83 +168,35 @@
     });
   }
 
-  // ---------- haze for the sun shafts: values + a floating panel to play with them ----------
-  // The core's settings popup dims the city behind it, so the haze has its own small panel (no
-  // overlay, the city keeps moving): switched on with "Nevelpaneel" in the settings.
-  const haze = (() => {
-    let H = { ...HAZE_DEFAULTS };
-    try { Object.assign(H, JSON.parse(localStorage.getItem(HAZE_KEY)) || {}); } catch {}
-    const save = () => { try { localStorage.setItem(HAZE_KEY, JSON.stringify(H)); } catch {} };
-    const SLIDERS = [
-      { k: 'top', label: 'Hoogte', min: 2, max: 30, step: 0.5, fmt: (v) => `${v} (≈ ${Math.round(v * 20)} m)` },
-      { k: 'thick', label: 'Dikte', min: 0, max: 0.3, step: 0.005, fmt: (v) => v.toFixed(3) },
-      { k: 'dim', label: 'Schaduw in de nevel', min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
-      { k: 'glow', label: 'Gloed in de zon', min: 0, max: 0.4, step: 0.01, fmt: (v) => v.toFixed(2) },
-      { k: 'tint', label: 'Eigen kleur', min: 0, max: 1, step: 0.05, fmt: (v) => (v ? `${Math.round(v * 100)}%` : 'kleur van de zon') },
-      { k: 'wind', label: 'Wind (nevel in vlagen)', min: 0, max: 1, step: 0.05, fmt: (v) => (v ? `${Math.round(v * 100)}%` : 'stil') },
-    ];
-    let el = null;
-    function panel(S, show) {
-      if (!show) { if (el) el.remove(); el = null; return; }
-      if (el) return;
-      el = document.createElement('div');
-      el.id = 'sc-haze-panel';
-      el.innerHTML = `<style>
-          #sc-haze-panel{position:fixed;right:16px;top:96px;z-index:10040;width:min(270px,calc(100vw - 32px));max-height:calc(100vh - 200px);overflow:auto;
-            background:rgba(29,34,51,.92);color:#fff;border-radius:14px;padding:12px 14px;box-shadow:0 8px 28px rgba(0,0,0,.45);font:500 13px/1.35 system-ui,sans-serif}
-          #sc-haze-panel h3{margin:0;font:800 16px/1.2 system-ui,sans-serif;color:#ffd23f;flex:1}
-          #sc-haze-panel .top{display:flex;align-items:center;gap:8px;margin-bottom:4px}
-          #sc-haze-panel .x{border:0;background:#3a4160;color:#fff;border-radius:8px;width:28px;height:28px;font:700 16px system-ui;cursor:pointer}
-          #sc-haze-panel .row{margin-top:8px}
-          #sc-haze-panel .head{display:flex;justify-content:space-between;gap:8px}
-          #sc-haze-panel .head b{color:#ffd23f;font-variant-numeric:tabular-nums}
-          #sc-haze-panel input[type=range]{width:100%;margin:4px 0 0;accent-color:#ffd23f}
-          #sc-haze-panel input[type=color]{vertical-align:middle;margin-left:6px;width:34px;height:20px;border:0;padding:0;background:none;cursor:pointer}
-          #sc-haze-panel label.chk{display:flex;gap:8px;align-items:center;margin-top:6px;cursor:pointer}
-          #sc-haze-panel .note{font-size:12px;opacity:.75;margin-top:6px}
-          #sc-haze-panel .reset{margin-top:10px;width:100%;border:0;border-radius:8px;padding:7px;font:700 13px system-ui;background:#3a4160;color:#fff;cursor:pointer}
-        </style>
-        <div class="top"><h3>Nevel</h3><button class="x" title="Sluiten" aria-label="Sluiten">×</button></div>
-        <label class="chk"><input type="checkbox" class="sun"> Zonnestralen aan</label>
-        <div class="note"></div>
-        <div class="sliders"></div>
-        <button class="reset">Standaardwaarden</button>`;
-      const box = el.querySelector('.sliders'), note = el.querySelector('.note');
-      const inputs = {};
-      for (const d of SLIDERS) {
-        const row = document.createElement('div');
-        row.className = 'row';
-        row.innerHTML = `<div class="head"><span>${d.label}${d.k === 'tint' ? ' <input type="color" class="col" title="Kleur van de nevel">' : ''}</span><b></b></div>
-          <input type="range" class="sl" min="${d.min}" max="${d.max}" step="${d.step}">`;
-        const out = row.querySelector('b'), input = row.querySelector('input.sl');
-        input.addEventListener('input', () => { H[d.k] = parseFloat(input.value); out.textContent = d.fmt(H[d.k]); save(); });
-        inputs[d.k] = { input, out, d };
-        box.appendChild(row);
-      }
-      const col = el.querySelector('.col'), sun = el.querySelector('.sun');
-      col.addEventListener('input', () => { H.color = col.value; if (!H.tint) H.tint = 0.5; save(); sync(); });
-      sun.addEventListener('change', () => S.set('shafts', sun.checked ? 2 : 1));
-      el.querySelector('.reset').addEventListener('click', () => { H = { ...HAZE_DEFAULTS }; save(); sync(); });
-      el.querySelector('.x').addEventListener('click', () => S.set('hazePanel', false));
-      function sync() {
-        for (const k in inputs) { const { input, out, d } = inputs[k]; input.value = H[k]; out.textContent = d.fmt(H[k]); }
-        col.value = H.color;
-        sun.checked = S.get('shafts') === 2;
-        const why = [];
-        if (S.get('shafts') !== 2) why.push('Zet zonnestralen aan om de nevel te zien.');
-        else {
-          if (!S.get('shadows')) why.push('Zet schaduwen aan: de stralen komen uit de schaduwen.');
-          const v = window.scCore && window.scCore.view ? window.scCore.view() : null;
-          if (v && v.night > 0.5) why.push('Het is nacht: geen zon.');
-        }
-        note.textContent = why.join(' ') || 'Tip: een lage zon (ochtend, eind van de middag) geeft lange stralen; wind laat ze bewegen.';
-      }
-      sync();
-      el.sync = sync;
-      document.body.appendChild(el);
-    }
-    return { get: () => H, panel, sync: () => el && el.sync() };
-  })();
+  // ---------- haze for the sun shafts: settings in the core's popup ----------
+  // Section "Nevel (zonnestralen)", shown while Lichtstralen is "Zon en explosies". Up to graphics
+  // 1.5 these were in a floating panel of their own; its values (localStorage HAZE_KEY) are taken
+  // over once.
+  const HAZE_SETTINGS = [
+    { id: 'hazeTop', k: 'top', label: 'Hoogte van de nevel', min: 2, max: 30, step: 0.5, format: (v) => `${v} (≈ ${Math.round(v * 20)} m)`,
+      help: 'Zonnestralen zie je overdag, met schaduwen aan. Een lage zon (ochtend, eind van de middag) geeft lange stralen; wind laat ze bewegen.' },
+    { id: 'hazeThick', k: 'thick', label: 'Dikte', min: 0, max: 0.3, step: 0.005, format: (v) => v.toFixed(3) },
+    { id: 'hazeDim', k: 'dim', label: 'Schaduw in de nevel', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+    { id: 'hazeGlow', k: 'glow', label: 'Gloed in de zon', min: 0, max: 0.4, step: 0.01, format: (v) => v.toFixed(2) },
+    { id: 'hazeColor', k: 'color', label: 'Kleur van de nevel', type: 'color', help: 'Telt mee naarmate "Eigen kleur" hoger staat.' },
+    { id: 'hazeTint', k: 'tint', label: 'Eigen kleur', min: 0, max: 1, step: 0.05, format: (v) => (v ? `${Math.round(v * 100)}%` : 'kleur van de zon') },
+    { id: 'hazeWind', k: 'wind', label: 'Wind (nevel in vlagen)', min: 0, max: 1, step: 0.05, format: (v) => (v ? `${Math.round(v * 100)}%` : 'stil') },
+  ];
+  const haze = {
+    get() {
+      const H = { ...HAZE_DEFAULTS }, S = window.scCore && window.scCore.settings;
+      if (S) for (const d of HAZE_SETTINGS) { const v = S.get(d.id); if (v !== undefined) H[d.k] = v; }
+      return H;
+    },
+    define(S) {
+      for (const { k, ...d } of HAZE_SETTINGS) S.define({ ...d, value: HAZE_DEFAULTS[k], when: () => S.get('shafts') === 2 });
+      try {                                                        // the old panel's values, once
+        const old = JSON.parse(localStorage.getItem(HAZE_KEY));
+        if (old && typeof old === 'object') for (const d of HAZE_SETTINGS) if (old[d.k] !== undefined) S.set(d.id, old[d.k]);
+        localStorage.removeItem(HAZE_KEY);
+      } catch {}
+    },
+  };
 
   // ---------- post-processing: ambient occlusion, outlines, light shafts, lens ----------
   // One chain for every effect: the scene is drawn once into a target with a depth texture, then
@@ -646,16 +598,11 @@
       help: 'Stralen van licht uit de atoombom. Zon: zonnestralen door de nevel tussen de gebouwen (overdag, met schaduwen aan; zwaarder voor de computer).' });
     S.define({ id: 'lens', label: 'Lenseffect', options: ['Uit', 'Alleen bij explosies', 'Altijd'], value: 1,
       help: 'Kleurranden en een licht bolle lens, als door een camera. Bij explosies even veel sterker.' });
-    S.define({ id: 'hazePanel', label: 'Nevelpaneel', type: 'toggle', value: false,
-      help: 'Een los paneel om de nevel van de zonnestralen in te stellen (hoogte, dikte, kleur, wind) terwijl je kijkt.' });
     S.define({ id: 'pixel', label: 'Pixelgrootte', options: ['Normaal', '2×', '3×', '4×'], value: 0,
       help: 'Grotere pixels: blokkerig als een oude game, en lichter voor de computer.' });
 
     applyClock(S);
-    const hazePanel = () => { if (document.body) haze.panel(S, S.get('hazePanel')); else document.addEventListener('DOMContentLoaded', hazePanel, { once: true }); };
-    S.onChange('hazePanel', hazePanel);
-    for (const id of ['shafts', 'shadows']) S.onChange(id, () => haze.sync());
-    hazePanel();
+    haze.define(S);
     core.onRenderer((r) => setupRenderer(core, r, S));
     core.onDraw((s, c, draw) => post.draw(core, s, c, draw, S));
     // for testing: scGraphics.post.U.show.value = 1 AO buffer, 2 normals, 3 outlines, 4 shafts
