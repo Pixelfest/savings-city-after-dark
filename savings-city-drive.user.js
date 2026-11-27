@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – drive a car (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.4
-// @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Space handbrake, C camera, E to get out). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
+// @version      1.5
+// @description  In walk mode, walk up to a car and press E: the driver runs off and you drive it (W/S gas and brake, A/D steer, Space handbrake, E to get out; the camera follows behind the car). Bump into other cars, run people over; buildings, trees, lamps and fountains stop you.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -10,7 +10,7 @@
 
 /*
  * Needs the core script (city data, sound) and the walk-mode script (1.26 or newer): scWalk.setDriver lets this script move you and the
- * camera, scWalk.onKey gives it E, C and H, and scWalk.blocked / propsNear / trafficCars /
+ * camera, scWalk.onKey gives it E and H, and scWalk.blocked / propsNear / trafficCars /
  * parkedCars tell it what's in the way. Works with residents (running people over) and cops
  * (officers can be run over: sc:crush).
  *
@@ -29,8 +29,8 @@
  *   Other cars (traffic, parked on lots, ones you left, police cars of the cops script) are boxes:
  *   you're pushed apart and a traffic car you hit stops for a moment. No damage.
  * - People in front of the car when it moves are knocked down (dead); fast, they're blown apart.
- * - The camera: the driver's seat (bonnet in view, the mouse looks around), C switches to a camera
- *   behind the car. Ground height: road and sidewalk from the city data, lots from the buildings.
+ * - The camera: always behind the car, following it smoothly (the mouse turns it around the car;
+ *   no driver's-seat view). Ground height: road and sidewalk from the city data, lots from the buildings.
  * Units: tiles (1 tile ≈ 20 m); a car is 0.22 × 0.105.
  */
 (function () {
@@ -61,7 +61,6 @@
   const GIB_SPEED = 65 / 72;       // …faster than this (65 km/h), blown apart
   const EXIT_SPEED = 10 / 72;      // you can only get out below this (10 km/h)
   const EYE = 0.085;               // eye height above the car's bottom (driver's seat)
-  const SEAT = [-0.012, -0.022];   // seat position in the car: back from the middle, left of it
   const CHASE = [0.55, 0.2];       // camera behind the car: distance and height
   const LOOK_SENSITIVITY = 0.0022;
   const SOUND = true;
@@ -73,7 +72,7 @@
   let K = null;
   let car = null;                  // the car you're in: { mesh, x, z, h, y, v, steer, ... }
   const leftCars = [];             // cars you got out of: { mesh, x, z, h, y }
-  let chase = false, lookYaw = 0, lookPitch = -0.05, lookIdle = 0, camPos = null, bumpAt = 0, shake = 0;
+  let lookYaw = 0, lookPitch = -0.05, lookIdle = 0, camPos = null, bumpAt = 0, shake = 0;
 
   // ---------- roads (ground height) ----------
   let segs = null;                 // per tile: road lines [ax, az, bx, bz]
@@ -259,7 +258,7 @@
     car = { mesh, x, z, h, y: 0.04, v: 0, steer: 0, pitch: 0, roll: 0, accel: 0, source };
     lookYaw = 0; lookPitch = -0.05; camPos = null;
     w.setDriver({ step });
-    w.setHelp('W: gas · S: remmen / achteruit · A/D: sturen · spatie: handrem · muis: rondkijken · C: camera · H: toeter · E: uitstappen · Esc: stoppen');
+    w.setHelp('W: gas · S: remmen / achteruit · A/D: sturen · spatie: handrem · muis: rondkijken · H: toeter · E: uitstappen · Esc: stoppen');
     w.sound && w.sound('thud');
     engine(true);
     return true;
@@ -348,13 +347,9 @@
     lookYaw = Math.max(-2.4, Math.min(2.4, lookYaw));
     lookPitch = Math.max(-1.1, Math.min(0.8, lookPitch));
     shake = Math.max(0, shake - dt * 3);
-    const yaw = -Math.PI / 2 - c.h + lookYaw, f = fwd(c.h), s = side(c.h);
+    const yaw = -Math.PI / 2 - c.h + lookYaw;
     const j = () => (Math.random() - 0.5) * shake * 0.01;
     const eye = c.y + EYE;
-    if (!chase) {
-      const sx = c.x + f[0] * SEAT[0] + s[0] * SEAT[1], sz = c.z + f[1] * SEAT[0] + s[1] * SEAT[1];
-      return { x: c.x, z: c.z, eye, yaw, pitch: lookPitch - c.pitch * 0.6, roll: c.roll * 0.5, cam: { x: sx + j(), y: eye + j(), z: sz + j() } };
-    }
     // behind the car (closer when a wall is in the way), following smoothly
     let dist = CHASE[0];
     const back = (d) => [c.x + Math.sin(yaw) * d, c.z + Math.cos(yaw) * d];   // the view looks along (−sin yaw, −cos yaw)
@@ -433,7 +428,6 @@
     w.onKey((code, e) => {
       if (code === 'KeyE') { if (!e.repeat) { if (car) getOut(); else getIn(); } return true; }
       if (!car) return false;
-      if (code === 'KeyC') { if (!e.repeat) { chase = !chase; camPos = null; } return true; }
       if (code === 'KeyH') { if (!e.repeat) horn(); return true; }
       return false;
     });
@@ -507,6 +501,5 @@
 
   window.scDrive = { get driving() { return !!car; }, get car() { return car && { x: car.x, z: car.z, h: car.h, v: car.v, steer: car.steer, y: car.y }; },
     getIn: () => getIn(), getOut: () => getOut(),
-    get chase() { return chase; }, set chase(v) { chase = !!v; camPos = null; },
     place(x, z, h) { if (car) { car.x = x; car.z = z; if (h !== undefined) car.h = h; car.v = 0; } } };   // place: for tests
 })();
