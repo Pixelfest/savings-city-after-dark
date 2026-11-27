@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.15
+// @version      1.16
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -58,6 +58,8 @@
   const MISS_SPREAD = [0.05, 0.3]; // a miss goes this far past you (tiles), and anywhere from your knees to over your head
   const MISS_FAR = 0.3;            // …and a miss from further away goes this much wider per tile of distance
   const RUNNING_DODGE = 0.55;      // aim × this while you're running
+  const PINNED_AIM = 0.4;          // an officer pinned on a harpoon aims this much worse…
+  const PIN_BLEED = [6, 11];       // …and bleeds out after this many seconds
   const FIRST_SHOT_DELAY = 1.2;    // seconds before a fresh officer fires the first time
   // On fire (flamethrower, explosions, a burning person): like residents – run screaming, writhe on
   // the ground (less and less) and die there; the body burns on, the fire dies out, a charred body
@@ -419,6 +421,7 @@
     burningPeopleNear(now);
     for (const c of cars) if (!c.cops.length && now >= c.exitAt && !c.car.scWrecked && !c.car.wreck) getOut(c);
     for (const cop of cops) {
+      if (cop.pinned) { stepPinned(cop, dt, now, pl, w); continue; }   // on a harpoon: held by the harpoon script
       if (cop.burn) burnStep(cop, dt);
       if (cop.state === 'down') { cop.fall = Math.min(1, cop.fall + dt / 0.45); pose(cop); continue; }
       if (cop.state === 'gone') continue;
@@ -445,6 +448,50 @@
       pose(cop);
     }
   }
+  // ---------- pinned on a harpoon ----------
+  // The harpoon script holds the officer where the shaft goes through them (feet x, y, z, facing h,
+  // lean: tipped over towards the ground, 0…1). Alive, they keep shooting at you – badly – and
+  // bleed out after PIN_BLEED seconds (or when you shoot them); dead, they hang there limp.
+  function stepPinned(cop, dt, now, pl, w) {
+    const p = cop.pinned;
+    if (cop.state === 'gone') return;                              // blown apart (or swallowed) on the shaft
+    p.t += dt;
+    if (alive(cop) && p.t > p.bleed) kill(cop, { x: Math.sin(cop.h), y: 0, z: Math.cos(cop.h) }, 'harpoon');
+    const m = cop.mesh, limp = cop.state === 'down' ? Math.min(1, (p.deadT = (p.deadT || 0) + dt) / 0.6) : 0;
+    const twitch = alive(cop) ? 0.08 * Math.sin(now * 0.023 + cop.voice) : 0;
+    m.position.set(p.x, p.y, p.z);
+    if (alive(cop)) {                                              // turns towards you to shoot
+      const face = Math.atan2(pl.x - p.x, pl.z - p.z);
+      p.h += Math.atan2(Math.sin(face - p.h), Math.cos(face - p.h)) * Math.min(1, dt * 2);
+    }
+    cop.h = p.h; cop.x = p.x; cop.z = p.z;
+    const q = new K.Q().setFromAxisAngle(new K.V3(0, 1, 0), p.h);
+    const tilt = (p.lean || 0) * Math.PI / 2 + 0.35 * limp + twitch;            // slumped forward when dead
+    m.quaternion.setFromAxisAngle(new K.V3(Math.cos(p.h), 0, -Math.sin(p.h)), tilt).multiply(q);
+    if (!alive(cop) || !w || !w.walking) return;
+    const dx = pl.x - p.x, dz = pl.z - p.z, dist = Math.hypot(dx, dz) || 1e-6;
+    if (dist <= RANGE && now >= cop.nextShot) {
+      cop.nextShot = now + rnd(...SHOT_INTERVAL) * 1500;
+      const st = cop.steady; cop.steady = (st || 1) * PINNED_AIM;
+      shoot(cop, dist, { x: dx / dist, y: 0, z: dz / dist });
+      cop.steady = st;
+    }
+  }
+  // officer i is taken by a harpoon: returns a handle { set(x, y, z, h, lean), alive, release() } or null
+  function pinOfficer(i) {
+    const cop = cops[i];
+    if (!cop || !alive(cop) || cop.pinned) return null;
+    cop.state = 'fight'; cop.burn = null; cop.still = false;
+    cop.pinned = { x: cop.x, y: 0.038, z: cop.z, h: cop.h, lean: 0, t: 0, bleed: rnd(PIN_BLEED[0], PIN_BLEED[1]) };
+    cop.nextShot = performance.now() + 1500;                      // a moment to take it in
+    yell(cop, false);
+    return {
+      set(x, y, z, h, lean) { Object.assign(cop.pinned, { x, y, z, lean: lean || 0 }); if (h !== undefined && !alive(cop)) cop.pinned.h = h; },
+      get alive() { return alive(cop); },
+      release() { if (cop.pinned) { cop.pinned = null; cop.state = 'gone'; cop.mesh.removeFromParent(); } },
+    };
+  }
+
   // ---------- on fire ----------
   function ignite(cop, fx, fz) {
     if (!cop || cop.burn || cop.charred || cop.state === 'gone') return false;
@@ -815,7 +862,8 @@
           const ex = o.x - cop.x, ez = o.z - cop.z, b = 2 * (ex * d.x + ez * d.z), c = ex * ex + ez * ez - R * R, disc = b * b - 4 * a * c;
           if (disc < 0) continue;
           const t = (-b - Math.sqrt(disc)) / (2 * a), y = o.y + d.y * t;
-          if (t > 0 && t < maxT && y >= 0.038 && y <= 0.172 && (!best || t < best.t)) best = { t, cop, head: y >= 0.038 + 0.103 };
+          const y0 = cop.pinned ? cop.pinned.y : 0.038;
+          if (t > 0 && t < maxT && y >= y0 && y <= y0 + 0.134 && (!best || t < best.t)) best = { t, cop, head: y >= y0 + 0.103 };
         }
         return best;
       },
@@ -883,7 +931,7 @@
   whenCore((c) => c.onFrame(frame));
   window.scCops = { get hearts() { return hearts; }, get dead() { return dead; }, officers: () => cops.map((c) => ({ x: c.x, z: c.z, state: c.state, head: !!c.head, burning: !!c.burn })),
     cars: () => cars.map((c) => ({ own: !!c.car.own, driving: !!c.driving, x: c.car.x, z: c.car.z, wreck: !!c.car.wreck })), spawnCar: () => spawnCar(),
-    hurt: () => hurt(), skin: (i, cause) => skinOfficer(i, cause), placeAt: (x, z, h) => placeOfficer(x, z, h),
+    hurt: () => hurt(), skin: (i, cause) => skinOfficer(i, cause), pin: (i) => pinOfficer(i), placeAt: (x, z, h) => placeOfficer(x, z, h),
     // set officer i (as in officers()) on fire; the fire came from (fromX, fromZ)
     ignite: (i, fromX, fromZ) => ignite(cops[i], fromX, fromZ),
     burgers: () => burgers.map((b) => ({ x: b.x, z: b.z })) };

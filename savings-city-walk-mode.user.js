@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.35
+// @version      1.36
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -2133,7 +2133,7 @@
           #sc-walk-ui.touch .pad{display:block}#sc-walk-ui.touch .help{display:none}
         </style>
         <div class="cross"></div>
-        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–7: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
+        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–8: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
         <button class="stop" type="button">Stoppen met lopen</button>
         <div class="sc-note"></div>
         <div class="pad"><i></i></div>`;

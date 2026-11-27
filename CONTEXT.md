@@ -211,6 +211,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | flamethrower | registers weapon `flamethrower` (`auto: true`, fires every 0.05 s while held); its fire blobs are one InstancedMesh (unlit); sets residents in a cone along the stream alight (`scResidents.ignite`) |
 | rocket launcher | registers weapon `rocket` with walk mode; every explosion is `scCore.damage({ kind: 'blast', … })`; while it's the selected weapon (`scWalk.weapon`), cuts the building under the crosshair ahead (`scBuildings.prepare` / `expect(p, r, { dir, prio: 'aim' })`), and again when it fires (`prio: 'fire'`) |
 | black hole | registers weapon `blackhole` (key 7); takes people via `scResidents.skin(p, 'blackhole')` / `scCops.skin(i, 'blackhole')`, traffic cars (`scBurst`, proxy hidden, moved off the map like drive's `hideGhost`), props via `scWalk.takeProp`; buildings via `scBuildings.well`; `window.scBlackhole` test hooks |
+| harpoon | registers weapon `harpoon` (key 8); takes residents via `scResidents.skin(p, 'harpoon')`, pins officers with `scCops.pin(i)` (a handle: `set(x, y, z, h, lean)`, `alive`, `release()`), hooks traffic cars (taken like drive does: `scTaken`, proxy hidden, moved off the map); `window.scHarpoon` test hooks |
 | monster | `scBuildings.list()` / `alive()` / `collapse(bd, { at, push, force, spread })`; dust from `scCore.puff` |
 | nuke | plans its own ruins and flight with `scBuildings.geometry` + `chunkSet` + `launch`; claims the buildings it cuts (`claim`) at the flash; `blastWave` for buildings already in chunks |
 | car tyres | patches `BufferGeometry.translate` (route 1) and repairs car models in the scene (route 2) |
@@ -628,3 +629,30 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
 - Test hooks: `scBlackhole.open(x, z)`, `throw(start, dir)`, `collapse()`, `holes`, `bodyInfo()`.
   Headless: skip drawing between screenshots (`scCore.onDraw(() => skip)`) or the simulation
   crawls (SwiftShader; dt is clamped to 0.05 per frame).
+
+## Kebab harpoon (savings-city-harpoon 1.0, cops 1.16, walk mode 1.36)
+
+- A walk-mode weapon (key 8). The bolt is stepped every frame (speed `BOLT_SPEED`, a little drop):
+  per step the first solid thing on the segment – `rayBuildings`, `hitCar`, `hitProp`, the ground –
+  and before it every person whose body the segment crosses (`skewer`: residents from
+  `scResidents.people` with a bounding-box pre-check, officers from `scCops.officers()`; a cylinder
+  of `HIT_R` from the feet up to the head). Residents are taken with `skin(p, 'harpoon')` and drawn
+  by this script (instanced boxes, as in the black hole); officers stay the cops script's own.
+- On the shaft, victim i sits `TIP_GAP + i × GAP` behind the tip (sliding there), upright, with the
+  shaft through the torso; too low to stand (a bolt in the ground) they tip over towards the ground
+  (`lean`). Twitching is a rotation about the shaft that dies down, then a slump.
+- Cops 1.16 – `scCops.pin(i)`: the officer gets `cop.pinned` and `step` hands them to `stepPinned`
+  before anything else: the harpoon script sets their feet, they turn towards you and shoot with
+  `PINNED_AIM` (0.4 × their aim), and die after `PIN_BLEED` (6–11 s, cause `harpoon`); dead, they
+  hang limp. The officers' hit test uses the pinned height.
+- Cars: a traffic car that's hit becomes ours (batch geometry mesh, the traffic car moved off the
+  map, its driver out via `addRunner`); the bolt is stored in the car's coordinates. While the
+  mouse button is held (own `mousedown`/`mouseup` listeners, capture phase), the car accelerates
+  towards the gun point, turning so the hook trails; let go, it rolls on with friction; it stops
+  against you. A click while a car is hooked doesn't fire (walk mode still sends `sc:shot`). X
+  (`scWalk.onKey`), switching weapons, leaving walk mode, `CABLE_MAX` or a car pulled in all the
+  way cut the cable. Walk mode 1.36 only changes the help text (keys 0–8).
+- Test hooks: `scHarpoon.fire(o, d)`, `reel(on)`, `cut()`, `hooked`, `kebabs` (with `stop`: what
+  it stuck in). Headless, select the weapon first (`keyboard.press('Digit8')`), or the hook is cut
+  at once; `scResidents.freeze` keeps picking the same nearest person, so freeze far apart and set
+  `fx`/`fz` afterwards.
