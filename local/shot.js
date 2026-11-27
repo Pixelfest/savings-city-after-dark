@@ -4,6 +4,8 @@
 //
 //   node local/shot.js [url] [out.png] [--wait 12000] [--eval "js run in the page before the shot"]
 //   e.g. node local/shot.js 'http://localhost:8080/?plugins=nuke' nuke.png --eval "document.querySelector('[title*=Nuke]')?.click()" --wait 20000
+//   The test city: node local/shot.js 'http://localhost:8080/test?plugins=core,cops' test.png --wait 3000
+//   (waits for window.scTest.ready first, then --wait ms).
 //
 // Playwright is resolved from the global install (NODE_PATH=$(npm root -g) if require fails).
 'use strict';
@@ -21,6 +23,10 @@ const [url = 'http://localhost:8080/', out = 'city.png'] = args;
   page.on('pageerror', (e) => console.log('[pageerror]', e.message));
   await page.addInitScript(() => { try { localStorage.setItem('citysaver:welcome-seen', '1'); } catch {} });
   await page.goto(url);
+  // On the test page (/test) wait until the test scene is set up, so the waits below start there.
+  if (new URL(url).pathname.replace(/\/$/, '') === '/test') {
+    await page.waitForFunction(() => window.scTest && window.scTest.ready, null, { timeout: 120000 });
+  }
   if (evalJs) { await page.waitForTimeout(Math.min(wait, 8000)); console.log('eval →', await page.evaluate(evalJs)); }
   await page.waitForTimeout(wait);
   await page.screenshot({ path: out });

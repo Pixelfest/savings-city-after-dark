@@ -74,6 +74,35 @@ placeholder `https://your-savings-city-host.example/`.
   `renderer.autoClear = false`, so the AO's scene target was never cleared and every frame piled
   onto the last (anything moving – rain, snow, cars – smeared into streaks). The AO now clears its
   scene target (`renderer.clear()`) before drawing into it.
+  **Graphics 1.5: one post-processing chain** (`window.scGraphics.post`, also still `.ao`). The
+  scene is drawn once into the HalfFloat/FloatDepth target whenever any effect is active; then
+  optional passes: AO (full size, daylight) → `aoRT`; light shafts (half size, HalfFloat) →
+  `shaftRT`; and one composite into `prev` that does lens (barrel distortion + chromatic
+  aberration), AO, outlines, haze and rays, then tone mapping. Nothing active (no AO, outlines,
+  sun shafts, burst or lens kick) → the app draws as before, at no cost.
+  - Outlines: Laplacian of depth along x and y – view z for the orthographic camera, 1/z for a
+    perspective one (both linear on screen on a plane), divided by the world size of a pixel
+    (`2 / (proj[1][1] · height)`): zero on flat surfaces, large on creases and silhouettes.
+  - Sun shafts: each view ray is clipped to a haze slab `0 ≤ y ≤ top` and marched (24 steps,
+    jittered) through `sun.shadow.map.depthTexture` with `sun.shadow.matrix`. The app's shadow map
+    is PCF (`shadowMap.type = 1`) so the depth texture has a `compareFunction`: it must be read as a
+    `sampler2DShadow` (`texture(tShadow, vec3(uv, z + bias))` = lit 0…1), which three.js binds
+    fine in our replaced shaders. Not physical on purpose: haze in shadow darkens (`dim`), sunlit
+    haze adds a glow (`glow` × sun colour, or the panel's colour by `tint`), so shafts show without
+    fogging the city. Wind: value noise drifting with time modulates the density per step. The
+    haze values live in localStorage `sc-graphics:haze`; the haze panel (setting `hazePanel`) is a
+    floating div without overlay so the city stays visible while tuning.
+  - Bursts: `window.scLightBursts` (a Set, created by whoever loads first) of
+    `{ x, y, z, radius, strength, color: [r, g, b] }` in world units, updated by the owner every
+    frame and deleted when done. The strongest gets a radial blur (48 samples towards its point on
+    screen) of what's bright (> 0.6) within ~3 radii of it. Its strength also kicks the lens
+    (`BURST_KICK`); every `sc:blast` adds `BLAST_KICK`; the kick decays in `KICK_DECAY` s.
+    Nuke 3.6 adds its fireball (spike at the flash, the fireball, then the glowing cap, scaled with
+    the yield like its light boost).
+  - Debug views: `scGraphics.post.U.show.value` = 1 AO, 2 normals, 3 outlines, 4 shafts.
+  - Testing headless: SwiftShader draws about one frame a second, so a nuke's first frame is
+    already seconds after the flash. Slow the page's clock (wrap `performance.now` in an init
+    script and scale it after the click) to see the flash and fireball.
 
 ## Night lights and lights out (core 1.6, buildings 1.5, nuke 3.5)
 
@@ -570,6 +599,57 @@ welcome dialog suppressed – look at the PNG. For walk mode: click `#sc-walk-to
 on – hold one with `car.parked = Infinity; car.speed = 0` before each shot. A tall building cut
 into chunks is slow in SwiftShader (minutes). Missing from the copy: loading-screen PNGs (served as
 blank) and the Baloo font (fetched from Google if the network allows).
+
+**The test city (`/test`, since 27 Nov 2026)** – small and the same on every run. `local/server.js`
+serves `/test` with `local/test-scene.js` injected before the plugins and a second in-memory city
+from `local/test-city.json`, reset on every load of `/test`; `/api/*` calls go to it when their
+`Referer` is a `/test…` page. The city: a ring road (x 0…16, y 0…8; north road y = 0) with 3
+finished buildings facing north (gx 1, 5, 10; hours saved 12 / 40 / 130 → about 8, 12 and 20 floors).
+`test-scene.js` (plain script, no `@version`, not in the loader):
+
+- **Seeded `Math.random`** (mulberry32, `?seed=`, default 1) from document-start, so the app's
+  crowd and traffic (they take `Math.random` when constructed) and the scripts use it. Workers made
+  from a script `Blob` (the buildings' cutter) get their own seeded generator (`Blob`,
+  `URL.createObjectURL` and `Worker` are wrapped for that).
+- **Fixed frame step** (`?fps=60`; `0` = real time; default 60 when `navigator.webdriver` (Playwright),
+  else 0 – in a real browser a fixed 1/60 per frame would run double speed on a 120 Hz screen):
+  `requestAnimationFrame` callbacks all get the
+  same timestamp per browser frame, advanced by exactly 1/fps; `performance.now()` returns that
+  time plus 0.01 ms per call in this frame (a counter, not real time: with real time, checks like
+  "more than 500 ms since …" flipped between runs and changed the outcome), capped at 95 % of a
+  step; a frame that really takes over 250 ms gets the 95 % at once, so a busy-wait always ends
+  (the nuke's 10 ms slice: ~1000 calls). Headless, the game then runs in slow
+  motion (~5 frames per wall second in SwiftShader) – wait with `scTest.wait(seconds)` /
+  `scTest.frames(n)`. `Date.now`, `setTimeout` and `setInterval` stay real time.
+- **Fixed clock:** `?date=2026-06-22&time=14:00&timelapse=0.000001` added when missing (summer, no
+  snow or Christmas, daylight). Welcome dialog marked as seen.
+- **People:** once the app's crowd exists (`view.pedestrians` with a `net`), its `share` is raised
+  until it has `?people=` (100) adults, those are kept (no children), placed in rows of 50 on the
+  sidewalk lines (± 0.205) of the north road (city side, then outside), then the south road, facing
+  the road, and held: `populate` becomes a no-op (no top-ups, so the dead stay dead), `share` is
+  pinned (the residents' density setting does nothing here), `move` / `steer` skip people with
+  `scHold`. Whoever the residents take over (`ownOf`) is theirs as usual.
+- **Cars:** the app's 6 traffic cars (2 per building, no police under 4 buildings) on the south road's
+  eastbound lane from x 4.25, 0.5 apart, `parked = Infinity`, `speed = 0` (`?hold=0`: they drive).
+- **Officers:** `?cops=` (8) still officers (`scCops.placeAt`) at x 15.795, z 1…6.6, facing west.
+  `placeAt` needs walk mode's `classes()`, which needs its camera, so they are placed the first time
+  walk mode starts (`sc:walk`), or at once if that already works.
+- **Reseeding:** how many numbers are drawn while the page loads depends on timing (three.js
+  draws 4 per object uuid; the crowd and traffic draw when the data arrives), and things draw every
+  frame, so the generator is reset in place (`random.reseed`; the app holds a reference to
+  `Math.random`) before the crowd is made, at 'ready', and by `scTest.reseed()` – call it right
+  before the action a test checks (`local/test-run.js --do` does).
+- `window.scTest` = `{ seed, options, ready, whenReady, whenCops, people, cops, cars, buildings, view,
+  time(), frame(), frames(n), wait(s), reseed(n) }`; events `sc:test-ready`, `sc:test-cops`; a red
+  badge (`#sc-test-badge`). `local/shot.js` waits for `scTest.ready` on `/test`.
+- `local/test-run.js`: open `/test` with `--plugins`, optionally `--walk x,z --look x,y,z`, `--before`
+  js, then `--do` js right after `reseed()`, screenshots at `--at` game seconds, `report.json`
+  (events `sc:shot`, `sc:kill`, `sc:blast`, `sc:car-exploded`, deaths, the action's result).
+- Measured (core, walk mode, residents, cops; headless): ready at frame ~25 (a few seconds). A
+  `scResidents.blast(5, 0.2, 0.6, 2.5, 8, 0.3)` at the north row after `reseed()`: 4 deaths on every
+  run with seed 1 (6 runs), the same positions 1 s later in about two runs out of three – some
+  per-frame randomness still depends on timing (not found yet: no `Math.random` calls outside
+  frames are left, and `performance.now` is a counter). Compare counts and events, not pixels.
 
 Older approach, still useful for unit-level checks:
 
