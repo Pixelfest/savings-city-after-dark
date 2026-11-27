@@ -324,6 +324,35 @@ Nuke 3.3: outward blast about twice as hard (`BLAST_SPEED` 22, speed cap 60), sc
 its chunks are launched with `launch(…, slide = true)` (buildings 1.4): they keep 70 % of their
 speed on landing and slide with less friction, so buildings end up blown away from ground zero.
 
+Buildings 1.7 – the shell model (setting `buildingModel`, "Gebouwen bij vernielen": 0 *Massief*,
+1 *Vloeren en muren*; read in `prepare`, so a building keeps the model it was cut with, and `state()`
+says `model`). The cut message carries `model: { kind: 'shell', storey, wall, slab, core, coreSize }`
+and `shell()` in `cutterCore` builds every box as `round(height / 0.22)` storeys (the app's floor
+height `Jp` = 0.22, tiers start at 0.03 + floor × 0.22): four outer walls `SHELL_WALL` thick (the ±z
+ones over the whole width, the ±x ones between them) from the storey's floor up to a slab
+`SHELL_SLAB` thick that spans the whole footprint (its edge is part of the facade; the top storey's
+slab is the roof), plus a square concrete core in footprints ≥ `SHELL_CORE` both ways. Every plate
+is shattered on its own (plates: `shatter` always cuts the longest side, never the thickness).
+Face tags: outside faces `{ side, ext }` as before (facade texture, roof colour); inside faces
+`{ inner: 'floor' | 'ceil' | 'wall' }` take `box.inner[…]` in `pieceTriangles` (colours made from
+the wall colour in `shell()`), fractures stay concrete. `pack` adds `kind` (Uint8Array: 0 solid,
+1 wall, 2 slab, 3 core) → `fr.kind`; refined pieces keep their coarse piece's kind.
+Piece count: about 2.2–3 × plate area ÷ size² (measured in Node, `SHELL_PIECES_PER_AREA` 2.8), so
+`chunkSizeFor(bd, shell)` = max(`SHELL_CHUNK` ÷ √factor, √(2.8 × area ÷ (800 × factor))) – the same
+budget as the solid model; shell pieces are 6-faced (36 vertices). Craters: a hollow building has few
+pieces near the impact, so the "dig deeper" step only moves inwards through an empty hole (< 1
+standing piece, solid: < 6). A collapse leaves wall and core pieces standing up to a jagged height
+(`stumpOf`: sines along x and z, up to `SHELL_STUMP`, the same for pieces above each other); slabs fall.
+Rubble piles (only sets with `piles`, i.e. shell buildings): a global grid of `PILE_CELL` cells.
+A landed piece that's flat (tilt < 0.35) and slow (< 0.25 tiles/s), or at rest, is stamped: its
+thinnest side × `PILE_BULK` (1.6) is added to the cells under the middle 60 % of its footprint
+(`fr.bb`, written by `writeChunk`). Landing height = `GROUND` + the highest cell under the piece,
+without its own share. `launch` (and a well's pull) unstamps a piece; pieces stamped in those
+cells whose bottom is now above the heap drop (launched with no speed, from where they lie).
+A first version stamped each piece's top and landed pieces on the highest top: the heap grew
+taller than the building (pieces land on the highest point) – adding thickness keeps it to the
+amount of material. The nuke doesn't use the shell model (its own ruin planner cuts solid boxes).
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`

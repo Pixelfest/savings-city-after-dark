@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.6
+// @version      1.7
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -47,6 +47,18 @@
  *   (residents' crush, sc:crush), and walk mode rebuilds its walls (sc:geometry-changed).
  * - Chunk physics: gravity, tumbling, landing on the ground, tipping onto the largest face, rest.
  *
+ * - Two building models (the setting "Gebouwen bij vernielen", read when a building is first cut):
+ *     solid ("Massief"): every box is one solid block, cut into chunks (as above);
+ *     shell ("Vloeren en muren"): every box is built of storeys (SHELL_STOREY, the app's floor
+ *       height): four outer walls (SHELL_WALL thick; facade outside, plaster inside) standing on a
+ *       floor slab (SHELL_SLAB) that spans the whole footprint (its edge shows on the facade),
+ *       and a concrete core in wide buildings. Only these plates are cut, so a building is hollow:
+ *       a crater shows the floors inside, and the rubble is broken slabs and wall panels. Pieces
+ *       follow the plates' area, not the volume (budget MAX_CHUNKS, like the solid model).
+ *       Rubble of shell buildings piles up: a piece lands on the pieces that already lie still
+ *       (a height grid of PILE_CELL), and what lay on a piece that's taken away drops. When it
+ *       comes down, jagged wall stumps (up to SHELL_STUMP) stay standing.
+ *
  * - Gravity wells (the black hole): well({ x, y, z, radius, strength, eat, peel }) pulls every
  *   flying chunk within `radius` towards its middle on a swirl (lifted against gravity, stretched
  *   along the pull and shrinking near the middle), and peels chunks off the buildings in reach –
@@ -81,6 +93,16 @@
   const DUST = 1;                  // amount of dust when a building comes down
   const GROUND = 0.04;             // chunks come to rest on this height
   const PEEL_COLLAPSE = 0.3;       // a well that has peeled this share of a building's chunks brings the rest down
+  // the shell model (setting "Gebouwen bij vernielen" → "Vloeren en muren")
+  const SHELL_STOREY = 0.22;       // storey height (the app's floor height: the window rows)
+  const SHELL_WALL = 0.025;        // outer wall thickness (≈ 0.5 m: thicker than real, so it shows)
+  const SHELL_SLAB = 0.025;        // floor slab thickness
+  const SHELL_CORE = 0.6;          // footprints at least this wide (both ways) get a concrete core (stairs, lifts)…
+  const SHELL_CORE_SIZE = 0.16;    // …this wide (at most a quarter of the footprint)
+  const SHELL_CHUNK = 0.16;        // shell pieces are about this big (the plates are thin: more of them fit the budget)…
+  const SHELL_PIECES_PER_AREA = 2.8; // …measured: shatter makes about this × area ÷ size² pieces of the plates (2.2–3)
+  const SHELL_STUMP = 0.3;         // a collapse leaves jagged wall stumps up to this high
+  const PILE_CELL = 0.04;          // rubble piles: grid cell (tiles)
   // -------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
@@ -139,7 +161,7 @@
     mesh.castShadow = mesh.receiveShadow = true; mesh.frustumCulled = false; mesh.userData.scSolid = true;
     mesh.visible = !opts.hidden;
     (opts.parent || scene()).add(mesh);
-    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, center: opts.center || null };
+    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null };
     sets.add(set);
     return set;
   }
@@ -155,7 +177,8 @@
     for (let i = 0; i < d.P; i++) {
       const o = i * 14, start = M[o], count = M[o + 1];
       frs.push({ start, count, pivot: [M[o + 2], M[o + 3], M[o + 4]], normal: [M[o + 5], M[o + 6], M[o + 7]], lo: [M[o + 8], M[o + 9], M[o + 10]], hi: [M[o + 11], M[o + 12], M[o + 13]],
-        orig: d.orig.subarray(start * 3, (start + count) * 3), n0: d.n0.subarray(start * 3, (start + count) * 3), state: 'still', idx: d.src ? d.src[i] : i, fine: !!d.src });
+        orig: d.orig.subarray(start * 3, (start + count) * 3), n0: d.n0.subarray(start * 3, (start + count) * 3), state: 'still', idx: d.src ? d.src[i] : i, fine: !!d.src,
+        kind: d.kind ? d.kind[i] : 0 });
     }
     const total = d.pos.length / 3;
     g.setDrawRange(0, opts.hidden ? 0 : total);
@@ -167,6 +190,7 @@
   // a chunk starts moving: velocity v, after `delay` seconds, tumbling at `spin` rad/s; `slide`:
   // it keeps more of its speed when it lands and slides on (a blast wave)
   function launch(set, fr, v, delay = 0, spin = rnd(1, 5), slide = false) {
+    if (fr.stamp) unstamp(fr);                                     // rubble that's taken away: what lay on it drops
     let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
     Object.assign(fr, { state: 'flying', v, delay, R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0], axis: [ax / al, ay / al, az / al], w: spin, landed: false, age: 0, slide });
     set.active = true;
@@ -190,13 +214,15 @@
           const [x, y, z] = fr.normal, R = fr.R;
           const n = [R[0] * x + R[1] * y + R[2] * z, R[3] * x + R[4] * y + R[5] * z, R[6] * x + R[7] * y + R[8] * z];
           const tilt = Math.acos(Math.min(1, Math.max(-1, -n[1])));
+          fr.flat = tilt < 0.35;
           if (tilt > 0.01) { let ax = n[2], az = -n[0]; let l = Math.hypot(ax, az); if (l < 1e-6) { ax = 1; az = 0; l = 1; } fr.R = mul(rot(ax / l, 0, az / l, Math.min(tilt, 6 * dt)), R); }
           const f = Math.exp(-(fr.slide ? 2 : 5) * dt); fr.v[0] *= f; fr.v[2] *= f;
           if ((tilt <= 0.01 && Math.hypot(fr.v[0], fr.v[2]) < 0.05) || fr.age > 12) fr.state = 'rest';
         }
         let minY = writeChunk(set, fr);
-        if (minY < GROUND) {
-          fr.off[1] += GROUND - minY;
+        const floor = set.piles ? pileHeight(fr) : GROUND;          // the shell model's rubble piles up
+        if (minY < floor) {
+          fr.off[1] += floor - minY;
           if (!fr.landed) {
             fr.landed = true;
             // a puff of dust where debris of a collapsing building hits the ground, pushed outwards
@@ -210,6 +236,8 @@
           fr.v[1] = Math.max(0, fr.v[1]) * 0.1;
           minY = writeChunk(set, fr);
         }
+        // lying (nearly) still and (nearly) flat: other rubble lands on it from now on
+        if (set.piles && fr.landed && !fr.stamp && (fr.state === 'rest' || (fr.flat && Math.hypot(fr.v[0], fr.v[2]) < 0.25))) stamp(set, fr);
         lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count);
       }
       // upload only the part that moved (add ranges; never clear them first – see CONTEXT.md)
@@ -217,22 +245,74 @@
       if (!busy) set.active = false;
     }
   }
+  // returns the lowest point; fr.bb = [x0, z0, x1, z1, y0, y1] (where it is now)
   function writeChunk(set, fr) {
     const { orig, n0, R, pivot, off } = fr, pos = set.pos, nor = set.nor;
     // a chunk in a well: smaller (fr.scale) and stretched along the pull (fr.stretch: [dx, dy, dz, along, across])
     const sc = fr.scale ?? 1, st = fr.stretch;
-    let minY = Infinity;
+    let minY = Infinity, maxY = -Infinity, x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     for (let n = 0, k = fr.start; n < fr.count; n++, k++) {
       const a = orig[n * 3] * sc, b = orig[n * 3 + 1] * sc, c = orig[n * 3 + 2] * sc;
       let rx = R[0] * a + R[1] * b + R[2] * c, ry = R[3] * a + R[4] * b + R[5] * c, rz = R[6] * a + R[7] * b + R[8] * c;
       if (st) { const u = (rx * st[0] + ry * st[1] + rz * st[2]) * (st[3] - st[4]); rx = rx * st[4] + st[0] * u; ry = ry * st[4] + st[1] * u; rz = rz * st[4] + st[2] * u; }
-      const py = pivot[1] + off[1] + ry;
-      pos.setXYZ(k, pivot[0] + off[0] + rx, py, pivot[2] + off[2] + rz);
+      const px = pivot[0] + off[0] + rx, py = pivot[1] + off[1] + ry, pz = pivot[2] + off[2] + rz;
+      pos.setXYZ(k, px, py, pz);
       const p = n0[n * 3], q = n0[n * 3 + 1], r = n0[n * 3 + 2];
       nor.setXYZ(k, R[0] * p + R[1] * q + R[2] * r, R[3] * p + R[4] * q + R[5] * r, R[6] * p + R[7] * q + R[8] * r);
-      if (py < minY) minY = py;
+      if (py < minY) minY = py; if (py > maxY) maxY = py;
+      if (px < x0) x0 = px; if (px > x1) x1 = px; if (pz < z0) z0 = pz; if (pz > z1) z1 = pz;
     }
+    const bb = fr.bb || (fr.bb = [0, 0, 0, 0, 0, 0]);
+    bb[0] = x0; bb[1] = z0; bb[2] = x1; bb[3] = z1; bb[4] = minY; bb[5] = maxY;
     return minY;
+  }
+
+  // ---------- rubble piles (shell model) ----------
+  // A height grid of PILE_CELL cells. A piece that lies (nearly) still adds its thickness × PILE_BULK
+  // (the gaps between pieces) to the cells under the middle of its footprint; a falling piece
+  // lands on the highest cell under it (not counting its own share). So a heap grows with the
+  // amount of rubble, not with how pieces happen to lie. A piece that's taken away again (launch,
+  // a well) takes its share out of the grid, and what lay on it drops.
+  const pile = new Map();          // cell → { h (height above GROUND), list: [{ fr, set, add, bottom }] }
+  const PILE_INSET = 0.2;          // only the middle of a piece's footprint counts (corners of tilted pieces would make spikes)
+  const PILE_BULK = 1.6;           // a heap is this much higher than its pieces' thickness added up
+  function pileCells(bb, fn) {
+    const ix = (bb[2] - bb[0]) * PILE_INSET, iz = (bb[3] - bb[1]) * PILE_INSET;
+    const i0 = Math.floor((bb[0] + ix) / PILE_CELL), i1 = Math.floor((bb[2] - ix) / PILE_CELL);
+    const j0 = Math.floor((bb[1] + iz) / PILE_CELL), j1 = Math.floor((bb[3] - iz) / PILE_CELL);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) fn((i + 50000) * 100000 + (j + 50000));
+  }
+  function pileHeight(fr) {
+    let h = 0;
+    if (pile.size && fr.bb) pileCells(fr.bb, (key) => {
+      const c = pile.get(key); if (!c) return;
+      const t = fr.stamp && fr.stamp.has(key) ? c.h - fr.stampAdd : c.h;   // without its own share
+      if (t > h) h = t;
+    });
+    return GROUND + h;
+  }
+  // a piece's thickness: its thinnest side (the plates: the wall or slab thickness)
+  const thickness = (fr) => (fr.lo ? Math.max(0.01, Math.min(fr.hi[0] - fr.lo[0], fr.hi[1] - fr.lo[1], fr.hi[2] - fr.lo[2])) : 0.03);
+  function stamp(set, fr) {
+    const bb = fr.bb; if (!bb) return;
+    const add = thickness(fr) * PILE_BULK, e = { fr, set, bottom: bb[4] };
+    fr.stamp = new Set(); fr.stampAdd = add;
+    pileCells(bb, (key) => {
+      let c = pile.get(key); if (!c) pile.set(key, (c = { h: 0, list: [] }));
+      c.h += add; c.list.push(e); fr.stamp.add(key);
+    });
+  }
+  function unstamp(fr) {
+    const keys = fr.stamp; fr.stamp = null;
+    const drop = new Set();
+    for (const key of keys) {
+      const c = pile.get(key); if (!c) continue;
+      c.list = c.list.filter((e) => e.fr !== fr); c.h -= fr.stampAdd;
+      if (!c.list.length || c.h < 1e-4) { pile.delete(key); c.h = 0; }
+      // what lay on it (higher up than what's left here) loses its footing
+      for (const e of c.list) if (e.bottom > GROUND + c.h - e.fr.stampAdd + 0.01) drop.add(e);
+    }
+    for (const e of drop) if (e.fr.stamp) { const lying = { off: e.fr.off, R: e.fr.R }; launch(e.set, e.fr, [0, 0, 0], 0, 0.5); Object.assign(e.fr, lying); }
   }
 
   // ---------- gravity wells (the black hole) ----------
@@ -259,6 +339,7 @@
       const dx = w.x - x, dy = w.y - y, dz = w.z - z, d = Math.hypot(dx, dy, dz);
       if (d > w.radius * 1.2) continue;
       caught = true; fr.well = w; fr.landed = false;
+      if (fr.stamp) unstamp(fr);
       if (d < w.eat + 0.02 * sc) { swallow(fr, w); return true; }
       const a = Math.min(40, w.strength / Math.max(d * d, 0.004)), ux = dx / d, uy = dy / d, uz = dz / d;
       const h = Math.hypot(dx, dz) || 1, tx = -dz / h, tz = dx / h;     // around the well (one way)
@@ -390,11 +471,25 @@
   // Chunk size for a building: CHUNK_SIZE, or bigger so there are about MAX_CHUNKS at most
   // (measured: shatter makes about 7.7 × volume / size³ pieces – it cuts until every side is short).
   // The detail setting (core: 1 … 5) multiplies the number of chunks by 1, 2, 4, 8, 16.
-  function chunkSizeFor(bd) {
-    const volume = bd.boxes.reduce((v, b) => v + (b.x1 - b.x0) * (b.y1 - b.y0) * (b.z1 - b.z0), 0);
+  // The shell model cuts plates: about SHELL_PIECES_PER_AREA × area ÷ size² pieces (walls, slabs,
+  // core), so its size follows the area (and the detail factor divides it by √factor).
+  function chunkSizeFor(bd, shell = false) {
     const f = C() && C().detail ? C().detail().factor : 1;
+    if (shell) {
+      const area = bd.boxes.reduce((a, b) => a + shellArea(b), 0);
+      return Math.max(SHELL_CHUNK / Math.sqrt(f), Math.sqrt((SHELL_PIECES_PER_AREA * area) / (MAX_CHUNKS * f)));
+    }
+    const volume = bd.boxes.reduce((v, b) => v + (b.x1 - b.x0) * (b.y1 - b.y0) * (b.z1 - b.z0), 0);
     return Math.max(CHUNK_SIZE / Math.cbrt(f), Math.cbrt((7.7 * volume) / (MAX_CHUNKS * f)));
   }
+  // the plates of one box in the shell model (one side of each): walls, slabs, core
+  function shellArea(b) {
+    const w = b.x1 - b.x0, d = b.z1 - b.z0, h = b.y1 - b.y0, storeys = Math.max(1, Math.round(h / SHELL_STOREY));
+    const core = w >= SHELL_CORE && d >= SHELL_CORE ? 4 * Math.min(SHELL_CORE_SIZE, w / 4, d / 4) * h : 0;
+    return 2 * (w + d) * h + storeys * w * d + core;
+  }
+  // the building model the setting asks for: true = shell (floors and walls)
+  const shellModel = () => !!(C() && C().settings && C().settings.get('buildingModel') === 1);
   // The cutter: cutterCore (at the end of this file) runs in a worker made from its own source
   // text; the page only sends the boxes and gets finished arrays back. If no worker can be made
   // (or it fails), the same code runs here, in slices between frames. send(msg) → Promise(reply).
@@ -455,11 +550,13 @@
     const bd = byId(x);
     if (!bd || !classes()) return null;
     if (solids.has(bd.id)) return solids.get(bd.id);
-    const st = { bd, hits: 0, ready: false, set: null, sets: [], shown: false, down: false, wave: null, pending: [], spots: [], refining: 0, size: chunkSizeFor(bd), t0: performance.now() };
+    const shell = shellModel();
+    const st = { bd, hits: 0, ready: false, set: null, sets: [], shown: false, down: false, wave: null, pending: [], spots: [], refining: 0, shell, size: chunkSizeFor(bd, shell), t0: performance.now() };
     solids.set(bd.id, st);
-    getCutter().send({ op: 'cut', b: bd.id, boxes: plainBoxes(bd.boxes), size: st.size, prio }).then((m) => {
+    const model = shell ? { kind: 'shell', storey: SHELL_STOREY, wall: SHELL_WALL, slab: SHELL_SLAB, core: SHELL_CORE, coreSize: SHELL_CORE_SIZE } : null;
+    getCutter().send({ op: 'cut', b: bd.id, boxes: plainBoxes(bd.boxes), size: st.size, model, prio }).then((m) => {
       try {
-        st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, center: [bd.cx, bd.cz] });
+        st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, piles: shell, center: [bd.cx, bd.cz] });
         st.sets.push(st.set);
       } catch (e) { console.warn('[buildings] cut', e); }
       st.ready = true; st.cutMs = performance.now() - st.t0;
@@ -495,7 +592,7 @@
     const d = m.data; if (!d || !d.P || !st.set || st.claimed) return;
     const coarse = st.set.frs, still = (i) => coarse[i] && coarse[i].state === 'still';
     if (!m.victims.some(still)) return;
-    const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, center: [st.bd.cx, st.bd.cz] });
+    const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, piles: st.shell, center: [st.bd.cx, st.bd.cz] });
     st.sets.push(set);
     set.down = st.down;
     if (st.down) lightsOut(st);
@@ -566,7 +663,9 @@
     const R = Math.max(radius, fine ? 0 : st.size * 0.8) * rnd(0.85, 1.15), out = n || { x: 0, y: 0, z: 0 };
     // the hole is already there (an earlier hit at the same spot): the blast digs deeper, inwards
     const standing = (c) => { let k = 0; for (const set of st.sets) for (const fr of set.frs) if (fr.state === 'still' && Math.hypot(fr.pivot[0] - c.x, fr.pivot[1] - c.y, fr.pivot[2] - c.z) < R) k++; return k; };
-    for (let step = 0; step < 4 && n && standing(p) < 6; step++) p = { x: p.x - out.x * R * 0.8, y: p.y - (out.y || 0) * R * 0.8, z: p.z - out.z * R * 0.8 };
+    // (a shell building is hollow: only through a hole that's already empty)
+    const few = st.shell ? 1 : 6;
+    for (let step = 0; step < 4 && n && standing(p) < few; step++) p = { x: p.x - out.x * R * 0.8, y: p.y - (out.y || 0) * R * 0.8, z: p.z - out.z * R * 0.8 };
     let count = 0;
     for (const set of st.sets) for (const fr of set.frs) {
       if (fr.state !== 'still') continue;
@@ -603,9 +702,23 @@
     const res = window.scResidents;
     if (res && res.avoid) res.avoid(bd.cx, bd.cz, Math.hypot(bd.x1 - bd.x0, bd.z1 - bd.z0) / 2 + 0.4, RUBBLE_AVOID_SECONDS);
   }
+  // What stays standing when a building comes down: a jagged stump. In the shell model the walls
+  // (and the core) stay up to a height that goes up and down along them – the same for pieces
+  // above each other, so nothing floats – and the slabs fall.
+  function stumpOf(st) {
+    const plain = (fr) => fr.pivot[1] < 0.03 + Math.random() * STUMP;
+    if (!st.shell) return plain;
+    const a = rnd(0, 6.3), b = rnd(0, 6.3), k1 = rnd(6, 11), k2 = rnd(6, 11);
+    return (fr) => {
+      if (fr.kind !== 1 && fr.kind !== 3) return plain(fr);
+      const x = fr.pivot[0], z = fr.pivot[2];
+      return fr.pivot[1] < 0.03 + SHELL_STUMP * clamp01(0.35 + 0.65 * Math.sin(k1 * x + a) * Math.sin(k2 * z + b) + 0.3 * Math.sin(k1 * 2.3 * (x + z) + b));
+    };
+  }
   function fall(st, opts) {
     swapIn(st);
     lightsOut(st);
+    const stays = stumpOf(st);
     for (const set of st.sets) set.down = true;
     const bd = st.bd, cx = bd.cx, cz = bd.cz;
     const P = (v) => (Array.isArray(v) ? { x: v[0], y: v[1], z: v[2] } : v);
@@ -616,7 +729,7 @@
       const dv = P(opts.push), dl = Math.hypot(dv.x, dv.z) || 1, dir = [dv.x / dl, 0, dv.z / dl];
       const force = opts.force ?? 3, spread = opts.spread ?? COLLAPSE_SPREAD, H = bd.top;
       for (const set of st.sets) for (const fr of set.frs) {
-        if (fr.state !== 'still' || fr.pivot[1] < 0.03 + Math.random() * STUMP) continue;
+        if (fr.state !== 'still' || stays(fr)) continue;
         const d = Math.hypot(fr.pivot[0] - p.x, (fr.pivot[1] - p.y) * 0.6, fr.pivot[2] - p.z);
         const up = clamp01((fr.pivot[1] - 0.03) / Math.max(0.1, H - 0.03)), nearHit = clamp01(1 - d / 0.8);
         const push = force * (0.25 + 0.75 * up + nearHit) * rnd(0.6, 1.2), side = rnd(-0.35, 0.35);
@@ -638,7 +751,7 @@
       if (Math.hypot(nx, nz) < 0.3) { nx = p.x - cx; nz = p.z - cz; } const l2 = Math.hypot(nx, nz) || 1; nx /= l2; nz /= l2;
       const H = Math.max(0.1, bd.top - p.y);
       for (const set of st.sets) for (const fr of set.frs) {
-        if (fr.state !== 'still' || fr.pivot[1] < 0.03 + Math.random() * STUMP) continue;
+        if (fr.state !== 'still' || stays(fr)) continue;
         const dh = Math.hypot(fr.pivot[0] - p.x, fr.pivot[2] - p.z), dy = fr.pivot[1] - p.y;
         let delay, v;
         if (dy > -0.06) {
@@ -750,6 +863,8 @@
     c.onDamage(onDamage);
     if (c.settings) c.settings.define({ id: 'hitsToCollapse', label: 'Raketten tot een gebouw instort', min: 1, max: 20, step: 1, value: HITS_TO_COLLAPSE,
       format: (v) => (v === 1 ? '1 raket' : `${v} raketten`) });
+    if (c.settings) c.settings.define({ id: 'buildingModel', label: 'Gebouwen bij vernielen', options: ['Massief', 'Vloeren en muren'], value: 0,
+      help: 'Massief: een gebouw breekt in blokken. Vloeren en muren: gebouwen zijn hol, met verdiepingen; in een gat zie je de vloeren en het puin stapelt zich op. Geldt voor gebouwen die daarna geraakt worden.' });
   })();
 
   const geo = cutterCore(null);   // the geometry functions, here on the page (the nuke uses them)
@@ -761,7 +876,8 @@
     // how a building is doing: { solid, down, hits, chunks, standing } (null: not in chunks yet)
     state(x) { const id = x && typeof x === 'object' ? x.id : x, st = solids.get(id); if (!st || st.claimed) return st ? { claimed: true } : null;
       const all = st.sets.flatMap((x) => x.frs).filter((f) => f.state !== 'gone');
-      return { solid: true, ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length }; },
+      return { solid: true, model: st.shell ? 'shell' : 'solid', ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length,
+        flying: all.filter((f) => f.state === 'flying').length, pile: st.shell ? Math.round(Math.max(0, ...all.filter((f) => f.stamp).map((f) => f.bb[4])) * 1000) / 1000 : undefined }; },
     crater, hit, collapse, blastWave, claim, well,
     get cutter() { return cutter ? cutter.mode : null; },        // 'worker' or 'page' (no worker could be made)
     // low-level, for scripts with their own plans (the nuke)
@@ -927,6 +1043,7 @@
       for (const f of poly) {
         let c = concrete, uvOf = () => JF;
         const t = f.tag;
+        if (t && t.inner && box.inner) c = box.inner[t.inner];       // the shell model's insides: floor, ceiling, plaster
         if (t && t !== 'cut' && t.ext) {
           const mid = f.v.reduce((s, p) => [s[0] + p[0] / f.v.length, s[1] + p[1] / f.v.length, s[2] + p[2] / f.v.length], [0, 0, 0]);
           const out = [mid[0] + f.n[0] * 0.004, mid[1] + f.n[1] * 0.004, mid[2] + f.n[2] * 0.004];
@@ -957,7 +1074,7 @@
       let V = 0;
       const tris = pieces.map((pc) => { const t = pieceTriangles(pc.poly, pc.box, pc.tint); V += t.length * 3; return t; });
       const P = pieces.length, pos = new Float32Array(V * 3), nor = new Float32Array(V * 3), col = new Float32Array(V * 3), uv = new Float32Array(V * 2), orig = new Float32Array(V * 3);
-      const meta = new Float32Array(P * 14), src = withSrc ? new Int32Array(P) : null;
+      const meta = new Float32Array(P * 14), src = withSrc ? new Int32Array(P) : null, kind = new Uint8Array(P);
       let k = 0;
       for (let i = 0; i < P; i++) {
         const pc = pieces[i], start = k;
@@ -977,9 +1094,10 @@
         meta[o + 5] = n[0]; meta[o + 6] = n[1]; meta[o + 7] = n[2];
         meta[o + 8] = pc.lo[0]; meta[o + 9] = pc.lo[1]; meta[o + 10] = pc.lo[2]; meta[o + 11] = pc.hi[0]; meta[o + 12] = pc.hi[1]; meta[o + 13] = pc.hi[2];
         if (src) src[i] = pc.src;
+        kind[i] = pc.kind || 0;
       }
-      const data = { pos, nor, n0: nor.slice(), col, uv, orig, meta, src, P };
-      return { data, transfer: [pos.buffer, nor.buffer, data.n0.buffer, col.buffer, uv.buffer, orig.buffer, meta.buffer].concat(src ? [src.buffer] : []) };
+      const data = { pos, nor, n0: nor.slice(), col, uv, orig, meta, src, kind, P };
+      return { data, transfer: [pos.buffer, nor.buffer, data.n0.buffer, col.buffer, uv.buffer, orig.buffer, meta.buffer, kind.buffer].concat(src ? [src.buffer] : []) };
     }
     function piece(poly, box, tint, extra) { const { lo, hi } = bounds(poly); return { poly, box, tint, normal: largest(poly), lo, hi, ...extra }; }
 
@@ -992,6 +1110,7 @@
       for (const b of boxes) b.siblings = boxes;
       for (const b of boxes) {
         const wall = b.wallColor, concrete0 = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
+        if (msg.model && msg.model.kind === 'shell') { yield* shell(b, size, msg.model, concrete0, pieces); continue; }
         const tags = { '+x': { side: '+x', ext: true }, '-x': { side: '-x', ext: true }, '+z': { side: '+z', ext: true }, '-z': { side: '-z', ext: true } };
         // in slabs of about two chunk heights, so one cut never has to deal with a whole tower
         const layers = Math.max(1, Math.round((b.y1 - b.y0) / (size * 2)));
@@ -1007,6 +1126,30 @@
       const out = pack(pieces, false);
       bld.done = true;
       return { msg: { op: 'cut', job: msg.job, b: msg.b, data: out.data }, transfer: out.transfer };
+    }
+    // The shell model: a box as storeys of four outer walls on a floor slab (the slab spans the whole
+    // footprint, so its edge is part of the facade), with a concrete core in wide buildings. Every
+    // plate is cut on its own; kind: 1 wall, 2 slab, 3 core.
+    function* shell(b, size, m, concrete, pieces) {
+      const W = b.x1 - b.x0, D = b.z1 - b.z0, H = b.y1 - b.y0;
+      const T = Math.min(m.wall, W / 4, D / 4), n = Math.max(1, Math.round(H / m.storey)), S = Math.min(m.slab, H / n / 3);
+      const mix = (c, k, add) => c.map((v, i) => v * k + add[i]);
+      b.inner = { floor: mix(concrete, 0.8, [0.09, 0.085, 0.08]), ceil: mix(concrete, 0.6, [0.03, 0.03, 0.03]), wall: mix(b.wallColor, 0.25, [0.36, 0.34, 0.31]) };
+      const ext = (side) => ({ side, ext: true }), IN = (k) => ({ inner: k });
+      const add = (poly, kind) => { const out = []; shatter(poly, size, out); for (const ch of out) pieces.push(piece(ch, b, concrete.map((v) => v * rnd(0.88, 1.1)), { kind })); };
+      const core = W >= m.core && D >= m.core ? Math.min(m.coreSize, W / 4, D / 4) / 2 : 0, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+      for (let i = 0; i < n; i++) {
+        const ya = b.y0 + (H * i) / n, yb = b.y0 + (H * (i + 1)) / n, yw = yb - S, top = i === n - 1;
+        // walls: the ±z ones over the whole width (their ends are the corners), the ±x ones between them
+        add(boxPoly(b.x0, ya, b.z0, b.x1, yw, b.z0 + T, { '-z': ext('-z'), '+z': IN('wall'), '+x': ext('+x'), '-x': ext('-x') }), 1);
+        add(boxPoly(b.x0, ya, b.z1 - T, b.x1, yw, b.z1, { '+z': ext('+z'), '-z': IN('wall'), '+x': ext('+x'), '-x': ext('-x') }), 1);
+        add(boxPoly(b.x0, ya, b.z0 + T, b.x0 + T, yw, b.z1 - T, { '-x': ext('-x'), '+x': IN('wall') }), 1);
+        add(boxPoly(b.x1 - T, ya, b.z0 + T, b.x1, yw, b.z1 - T, { '+x': ext('+x'), '-x': IN('wall') }), 1);
+        if (core) add(boxPoly(cx - core, ya, cz - core, cx + core, yw, cz + core, { '+x': IN('wall'), '-x': IN('wall'), '+z': IN('wall'), '-z': IN('wall') }), 3);
+        // the slab on top: the roof (outside) or the next storey's floor; underneath, the ceiling
+        add(boxPoly(b.x0, yw, b.z0, b.x1, yb, b.z1, { '+x': ext('+x'), '-x': ext('-x'), '+z': ext('+z'), '-z': ext('-z'), '+y': top ? ext('+y') : IN('floor'), '-y': IN('ceil') }), 2);
+        yield;
+      }
     }
     function* refine(msg) {
       const bld = buildings.get(msg.b), empty = { msg: { op: 'refine', job: msg.job, b: msg.b, data: null, victims: [] }, transfer: [] };
@@ -1033,7 +1176,7 @@
         const pc = bld.pieces[i], out = [];
         shatter(pc.poly, msg.size, out);
         if (pieces.length && pieces.length + out.length > msg.cap) break;
-        for (const ch of out) pieces.push(piece(ch, pc.box, pc.tint, { src: i }));
+        for (const ch of out) pieces.push(piece(ch, pc.box, pc.tint, { src: i, kind: pc.kind }));
         pc.refined = true; victims.push(i);
         yield;
       }
