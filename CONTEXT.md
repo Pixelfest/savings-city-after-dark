@@ -212,6 +212,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | rocket launcher | registers weapon `rocket` with walk mode; every explosion is `scCore.damage({ kind: 'blast', … })`; while it's the selected weapon (`scWalk.weapon`), cuts the building under the crosshair ahead (`scBuildings.prepare` / `expect(p, r, { dir, prio: 'aim' })`), and again when it fires (`prio: 'fire'`) |
 | black hole | registers weapon `blackhole` (key 7); takes people via `scResidents.skin(p, 'blackhole')` / `scCops.skin(i, 'blackhole')`, traffic cars (`scBurst`, proxy hidden, moved off the map like drive's `hideGhost`), props via `scWalk.takeProp`; buildings via `scBuildings.well`; `window.scBlackhole` test hooks |
 | harpoon | registers weapon `harpoon` (key 8); takes residents via `scResidents.skin(p, 'harpoon')`, pins officers with `scCops.pin(i)` (a handle: `set(x, y, z, h, lean)`, `alive`, `release()`), hooks traffic cars (taken like drive does: `scTaken`, proxy hidden, moved off the map); `window.scHarpoon` test hooks |
+| balloon | registers weapon `balloon` (key 9); takes residents via `scResidents.skin(p, 'balloon')`, officers via `scCops.skin(i, 'balloon')`; `scWalk.addTarget` (shooting a balloon pops it), listens to `sc:blast`; `window.scBalloon` test hooks |
 | monster | `scBuildings.list()` / `alive()` / `collapse(bd, { at, push, force, spread })`; dust from `scCore.puff` |
 | nuke | plans its own ruins and flight with `scBuildings.geometry` + `chunkSet` + `launch`; claims the buildings it cuts (`claim`) at the flash; `blastWave` for buildings already in chunks |
 | car tyres | patches `BufferGeometry.translate` (route 1) and repairs car models in the scene (route 2) |
@@ -660,3 +661,36 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
   it stuck in). Headless, select the weapon first (`keyboard.press('Digit8')`), or the hook is cut
   at once; `scResidents.freeze` keeps picking the same nearest person, so freeze far apart and set
   `fx`/`fz` afterwards.
+
+## Balloonator (savings-city-balloon 1.0, walk mode 1.38)
+
+- A walk-mode weapon (key 9). The ampoule is a plain `K.Mesh` (vertex colours) stepped every frame
+  like the harpoon's bolt (`DART_SPEED`, a little drop): per step `rayBuildings`, `hitCar`,
+  `hitProp`, the ground, a floating balloon (ray–sphere) and the nearest person whose body the
+  segment crosses (residents from `scResidents.people` with a bounding-box pre-check, officers from
+  `scCops.officers()`, skipping pinned ones). The first of these wins; a solid thing shatters it.
+- A hit person is taken with `skin(…, 'balloon')` (killed at once for the bodycount) and drawn by
+  this script from four instanced pools: boxes (legs, the shrinking torso, head, hair, eyes, mouth),
+  smooth spheres (the bare belly inside the body, the cheeks around the box head), closed half
+  spheres (shirt on top, trousers underneath; pulled apart a little so a band of belly shows) and
+  icosahedron blobs (gore, blood splats, the pool). Lambert with `SNOW_COVER` `-0.50`.
+- `shape(b)` is a pure function of the balloon's time: inflation (smoothstep over `INFLATE`, a
+  decaying jiggle), radius `R_START`…`R_FULL` × the person's scale, over-inflation in the last `OVER`
+  s (+24 %, trembling, `tint()` lerps belly/cheeks/head to `FLUSH`), and the feet's height
+  `ALTITUDE × lift^1.6` from `LIFT_AT` to `POP_AT` (0.4 tiles ≈ 8 m at 10 s). The sphere's centre is
+  feet + leg length + 0.8 R; legs hang from it and kick; the whole figure swings (`rotX`/`rotZ`)
+  and turns slowly once airborne, and drifts with a per-balloon wind.
+- The pop: the insides are the skinner's `INSIDE` list plus 40 flesh lumps, spread out through
+  the sphere and sent outward (`POP_SPEED`); rags (thin boxes in shirt, trousers, skin, hair colours)
+  have air drag and land flat; the legs drop. Blood: `spatter` in 12 directions (`SPRAY` each),
+  a blood rain under the spot for `RAIN_TIME`, drips from falling meat, a flat splat blob and a
+  little spray where each piece lands, a pool growing to `POOL`. A red mist from the core's `dust`
+  puffs with a colour. `avoid` and `alarm` around the spot. Heaps stay `GORE_TIME` s.
+- Early pops: `scWalk.addTarget` (registered at the first shot) makes balloons shootable by every
+  walk-mode weapon; `sc:blast` pops those within its knock/gib radius.
+- Sounds: gas puff, glass tinkle, a rising hiss while swelling, a squeaky wail in bursts that
+  climbs in pitch (one oscillator per balloon, stopped at the pop), rubber creaks, the bang.
+  Positional by distance to the player (`near`).
+- Test hooks: `scBalloon.infect(x, z)` (freezes and inflates the nearest person), `fire(o, d)`,
+  `pop()`, `balloons` (t, position, feet height, R), `heaps`. A real headless click with the weapon
+  selected (`keyboard.press('Digit9')`) fires too.
