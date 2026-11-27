@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.38
+// @version      1.39
 // @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -1119,10 +1119,13 @@
 
   // Nearest building surface along the ray: { t, n } (n = surface normal facing the shooter).
   // Möller–Trumbore against the triangles of every building part whose box the ray crosses.
+  // Buildings in chunks (buildings script) are tested against their chunks that still stand, so
+  // shots go through the holes and hit what's inside.
   function rayBuildings(o, d, maxT) {
     if (!appScene) return null;
     let best = null;
-    eachMesh(buildingGroups(), (mesh, mw) => {
+    const B = window.scBuildings, chunked = B && B.ray && B.covers ? (g) => B.covers(g.userData.projectId) : () => false;
+    eachMesh(buildingGroups().filter((g) => !chunked(g)), (mesh, mw) => {
       const g = mesh.geometry, pos = g.attributes.position, idx = g.index, e = mw.elements;
       if (!g.boundingBox) g.computeBoundingBox();
       const bb = g.boundingBox;
@@ -1160,6 +1163,7 @@
         best = { t, n: { x: nx, y: ny, z: nz } };
       }
     });
+    if (B && B.ray) { const h = B.ray(o, d, best ? best.t : maxT); if (h) best = { t: h.t, n: h.n }; }
     return best;
   }
 

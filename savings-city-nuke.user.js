@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.6
+// @version      3.7
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -431,7 +431,7 @@
       const xs = [b.x0], zs = [b.z0];
       for (let i = 1; i < nx; i++) xs.push(b.x0 + (b.x1 - b.x0) * (i + rnd(-0.25, 0.25)) / nx); xs.push(b.x1);
       for (let i = 1; i < nz; i++) zs.push(b.z0 + (b.z1 - b.z0) * (i + rnd(-0.25, 0.25)) / nz); zs.push(b.z1);
-      const wall = b.wallColor, concreteBase = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];   // broken inside: the building's colour, dusty
+      const concreteBase = B().geometry.concreteOf ? B().geometry.concreteOf(b.wallColor) : [0.55, 0.54, 0.52];   // broken inside: grey concrete
       const H = Math.max(...b.siblings.map((s) => s.y1));
       for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
         const x0 = xs[i], x1 = xs[i + 1], z0 = zs[j], z1 = zs[j + 1];
@@ -499,7 +499,7 @@
       const keepAt = (x, z) => base + RUIN_JAGGED * (0.6 * Math.sin(q[0] * x + p[0]) * Math.sin(q[1] * z + p[1]) + 0.4 * Math.sin(q[2] * (x + z) + p[2]));
       const level = (y, up) => Math.min(b.y1, Math.max(b.y0, b.y0 + (up ? Math.ceil((y - b.y0) / step - 1e-6) : Math.floor((y - b.y0) / step + 1e-6)) * step));
       const ruinTop = base === -Infinity ? b.y0 : level(base - RUIN_JAGGED, false), split = base === -Infinity ? b.y0 : level(base + RUIN_JAGGED, true);
-      const wall = b.wallColor, concrete = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
+      const concrete = B().geometry.concreteOf ? B().geometry.concreteOf(b.wallColor) : [0.55, 0.54, 0.52];
       boxes.push({ b, d, keepAt, ruinTop, split, concrete });
     }
     const whole = (b) => ({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1 });

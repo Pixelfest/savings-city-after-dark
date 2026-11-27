@@ -376,6 +376,41 @@ ruins ~4.6k triangles (solid: size 0.81, 1662 pieces / 21k triangles); 15 kt ove
 the budget can't cut them). Lone facade panels can stay standing on the ruin's walls (a coarse
 chunk of the break storeys whose middle is under the line).
 
+Buildings 1.9 / walk mode 1.39 / nuke 3.7 – lower heaps, inside colours, local collapse, shots into holes.
+- Heaps: the pile grid still adds thickness × `PILE_BULK`, but the landing height is
+  `GROUND + heap(x)` with `heap(h) = PILE_MAX × (1 − e^(−h / PILE_MAX))`, `PILE_MAX` 0.25 (5 m): it
+  rises with the amount of rubble and never above 0.25. "Coming up from below": pieces of lower
+  storeys fell later than the ones above, so the heap was already there and each frame lifted them
+  to its surface. Now (1) a piece whose bottom was already more than 0.02 under the surface on the
+  previous step stays where it is (it's in the heap), and (2) shell collapses give way from the top:
+  a storey `dy` below the impact starts at 0.12 + √(dy ÷ 3) s, when the rubble from above reaches it.
+  Measured (the 1.2 × 1.2 × 1.57 tower, 704 pieces): highest piece top 0.27, 10th 0.22, median 0.10
+  (before: 0.67 highest), and no piece rose more than 0.06 in 0.1 s while not thrown up.
+- Inside colours: `insides(b)` in the cutter (per building, from a hash of its first box): plaster
+  0.78–0.9 (slightly warm), ceiling `[0.88, 0.83, 0.91]` – pink on purpose, because the app's
+  HemisphereLight lights faces that point down with its ground colour `#c9d6c0` (grey-green, ×1.7)
+  – and a floor of wood (two browns), concrete or tiles. Broken concrete (both models, and the nuke
+  through `geometry.concreteOf`) is `wall × 0.1 + [0.5, 0.49, 0.47]`, no longer the facade's colour.
+- Local collapse (`settle(st, p)` after every crater, both models): `graphOf(st)` makes a graph
+  of all pieces (AABBs that touch within 0.012, through a spatial hash of cell = chunk size; made
+  again after a refine), `holdCosts` runs Dijkstra from the pieces on the ground over the still
+  ones. A step costs its horizontal distance between the pieces' middles (on top: minus
+  `SUPPORT_SLACK` 0.06 – storeys are cut one by one, so stacked pieces don't line up and the noise
+  added up; hanging under a piece: dh + 2 × drop). Each piece's cost in the intact building is
+  its baseline `c0` (computed when the cut is ready; finer pieces inherit their coarse chunk's +
+  half its width). A still piece whose cost is more than `c0 + SUPPORT_SPAN` (0.2 = 4 m) falls.
+  The first version let "resting on top" cost nothing whenever the middle was higher than half
+  the offset: load walked down a staircase of wall → slab edge → wall at no cost, and a facade
+  above a 0.9-wide hole two storeys high stayed up. Measured now (mid-size towers, shell): two
+  craters side by side → 0–10 extra pieces fall; the front wall of storeys 1–2 removed over 0.9 of
+  1.2 → 17–23 fall (the facade above in a V); solid: 0–3. A falling piece lands on the highest
+  still piece under its middle (`landOn`: `fr.floorY`, `fr.holder`; the holder's `carried` list
+  drops it again when the holder goes) and isn't stamped into the ground heap.
+- `scBuildings.ray(o, d, maxT)` → `{ t, n, id }`: Möller–Trumbore against the still chunks of
+  buildings shown as chunks (AABB first). Walk mode's `rayBuildings` skips the groups of buildings
+  `scBuildings.covers(id)` and asks `ray` instead, so bullets and rockets (they use
+  `rayBuildings`) go through holes; a blast at that point makes the crater inside.
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`

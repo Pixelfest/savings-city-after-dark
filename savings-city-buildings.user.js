@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.8
+// @version      1.9
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -24,7 +24,7 @@
  *   Where no worker can be made, the same code runs on the page in slices of a few ms. A hit or
  *   collapse that arrives before the cut is done waits for it (the building stays as it is until
  *   then; the cut is moved to the front). Outside faces keep the facade, inside faces are broken
- *   concrete in the wall's colour. All chunks go into one mesh with the facade material; every
+ *   grey concrete (concreteOf: a hint of the wall's colour). All chunks go into one mesh with the facade material; every
  *   chunk keeps its own range of vertices.
  * - swapIn: the chunks are shown and the building's own triangles are hidden (collapsed to a point
  *   in the city-block meshes the app draws, kept hidden when the app redraws a block).
@@ -38,6 +38,14 @@
  *   the coarse chunks (and the finer pieces of chunks that already flew are dropped).
  * - crater(): chunks near a point fly out. hit() = a crater that counts; after HITS_TO_COLLAPSE
  *   the building comes down.
+ * - Local collapse (settle, after every crater): what isn't held up any more falls. The pieces form
+ *   a graph (boxes that touch); a piece's cost is the cheapest path of still pieces to the ground,
+ *   each step costing how far it goes sideways. A piece whose cost grew by more than SUPPORT_SPAN
+ *   since the building was intact (or that has no path left) falls, onto the floor below if that
+ *   still stands: the facade above a wide hole comes down in a V, slabs around a shot-away core
+ *   drop. With less than a third left standing, the rest comes down too.
+ * - ray(o, d, maxT): the nearest still chunk along a ray; walk mode uses it for buildings shown as
+ *   chunks (covers(id)), so shots and rockets go through holes and hit what's inside.
  * - collapse(building, opts) in two styles:
  *     from an impact (opts.at, opts.out): the floor there fails first, the failure spreads, what's
  *       above drops and leans towards the hole, the floors below pancake;
@@ -50,14 +58,16 @@
  * - Two building models (the setting "Gebouwen bij vernielen", read when a building is first cut):
  *     solid ("Massief"): every box is one solid block, cut into chunks (as above);
  *     shell ("Vloeren en muren"): every box is built of storeys (SHELL_STOREY, the app's floor
- *       height): four outer walls (SHELL_WALL thick; facade outside, plaster inside) standing on a
+ *       height): four outer walls (SHELL_WALL thick; facade outside, white-grey plaster inside, a
+ *       ceiling and a floor of wood, concrete or tiles: insides()) standing on a
  *       floor slab (SHELL_SLAB) that spans the whole footprint (its edge shows on the facade),
  *       and a concrete core in wide buildings. Only these plates are cut, so a building is hollow:
  *       a crater shows the floors inside, and the rubble is broken slabs and wall panels. Pieces
  *       follow the plates' area, not the volume (budget MAX_CHUNKS, like the solid model).
  *       Rubble of shell buildings piles up: a piece lands on the pieces that already lie still
- *       (a height grid of PILE_CELL), and what lay on a piece that's taken away drops. When it
- *       comes down, jagged wall stumps (up to SHELL_STUMP) stay standing.
+ *       (a height grid of PILE_CELL), at most PILE_MAX (5 m) high, and what lay on a piece that's
+ *       taken away drops. When it comes down, the storeys give way from the top as the rubble
+ *       reaches them, and jagged wall stumps (up to SHELL_STUMP) stay standing.
  *
  * - Gravity wells (the black hole): well({ x, y, z, radius, strength, eat, peel }) pulls every
  *   flying chunk within `radius` towards its middle on a swirl (lifted against gravity, stretched
@@ -103,6 +113,9 @@
   const SHELL_PIECES_PER_AREA = 2.8; // …measured: shatter makes about this × area ÷ size² pieces of the plates (2.2–3)
   const SHELL_STUMP = 0.3;         // a collapse leaves jagged wall stumps up to this high
   const PILE_CELL = 0.04;          // rubble piles: grid cell (tiles)
+  const PILE_MAX = 0.25;           // rubble heaps rise to at most this high (≈ 5 m; 1 tile ≈ 20 m): the more rubble, the nearer
+  const SUPPORT_SPAN = 0.2;        // local collapse: a part holds this much further (tiles) from what carries it than before the hit (≈ 4 m)…
+  const SUPPORT_SLACK = 0.06;      // …and a piece on top of another may sit this far off its middle for free
   // -------------------------------------------
 
   const rnd = (a, b) => a + Math.random() * (b - a);
@@ -161,7 +174,7 @@
     mesh.castShadow = mesh.receiveShadow = true; mesh.frustumCulled = false; mesh.userData.scSolid = true;
     mesh.visible = !opts.hidden;
     (opts.parent || scene()).add(mesh);
-    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null };
+    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null, st: opts.st || null };
     sets.add(set);
     return set;
   }
@@ -191,9 +204,21 @@
   // it keeps more of its speed when it lands and slides on (a blast wave)
   function launch(set, fr, v, delay = 0, spin = rnd(1, 5), slide = false) {
     if (fr.stamp) unstamp(fr);                                     // rubble that's taken away: what lay on it drops
+    fr.floorY = undefined; fr.holder = null;
+    if (fr.carried) {                                              // a piece that goes: what lay on it drops too
+      const list = fr.carried; fr.carried = null;
+      for (const c of list) if (c.fr.holder === fr && (c.fr.state === 'rest' || c.fr.state === 'flying')) drop(c.set, c.fr);
+    }
     let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
     Object.assign(fr, { state: 'flying', v, delay, R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0], axis: [ax / al, ay / al, az / al], w: spin, landed: false, age: 0, slide });
     set.active = true;
+  }
+  // a piece that loses what it lay on falls from where it is (no push)
+  function drop(set, fr) {
+    const lying = { off: fr.off, R: fr.R };
+    launch(set, fr, [0, 0, 0], 0, 0.5);
+    Object.assign(fr, lying);
+    if (set.st) landOn(set.st, set, fr);
   }
   function stepSets(dt) {
     if (!dt) return;
@@ -219,8 +244,13 @@
           const f = Math.exp(-(fr.slide ? 2 : 5) * dt); fr.v[0] *= f; fr.v[2] *= f;
           if ((tilt <= 0.01 && Math.hypot(fr.v[0], fr.v[2]) < 0.05) || fr.age > 12) fr.state = 'rest';
         }
+        const before = fr.bb ? fr.bb[4] : Infinity;                 // its lowest point last step
         let minY = writeChunk(set, fr);
-        const floor = set.piles ? pileHeight(fr) : GROUND;          // the shell model's rubble piles up
+        let floor = set.piles ? pileHeight(fr) : GROUND;            // the shell model's rubble piles up
+        if (fr.floorY > floor) floor = fr.floorY;                   // it falls onto a floor that still stands (local collapse)
+        // already below the heap's surface (the heap grew around it, or it tipped into it): it stays
+        // in the heap where it is instead of jumping up out of it
+        if (minY < floor && before < floor - 0.02) floor = Math.max(fr.floorY ?? GROUND, Math.min(floor, before));
         if (minY < floor) {
           fr.off[1] += floor - minY;
           if (!fr.landed) {
@@ -237,7 +267,7 @@
           minY = writeChunk(set, fr);
         }
         // lying (nearly) still and (nearly) flat: other rubble lands on it from now on
-        if (set.piles && fr.landed && !fr.stamp && (fr.state === 'rest' || (fr.flat && Math.hypot(fr.v[0], fr.v[2]) < 0.25))) stamp(set, fr);
+        if (set.piles && fr.landed && !fr.stamp && !(fr.floorY > GROUND + 0.01) && (fr.state === 'rest' || (fr.flat && Math.hypot(fr.v[0], fr.v[2]) < 0.25))) stamp(set, fr);
         lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count);
       }
       // upload only the part that moved (add ranges; never clear them first – see CONTEXT.md)
@@ -271,8 +301,9 @@
   // A height grid of PILE_CELL cells. A piece that lies (nearly) still adds its thickness × PILE_BULK
   // (the gaps between pieces) to the cells under the middle of its footprint; a falling piece
   // lands on the cells under it: halfway between their average and the highest (not counting its
-  // own share; on the highest alone, heaps grew like towers). So a heap grows with the
-  // amount of rubble, not with how pieces happen to lie. A piece that's taken away again (launch,
+  // own share; on the highest alone, heaps grew like towers), flattened by heap(): it rises with
+  // the amount of rubble towards PILE_MAX (5 m) but never above it. A piece that's already below
+  // the surface (the heap grew around it) stays where it is instead of jumping up out of it. A piece that's taken away again (launch,
   // a well) takes its share out of the grid, and what lay on it drops.
   const pile = new Map();          // cell → { h (height above GROUND), list: [{ fr, set, add, bottom }] }
   const PILE_INSET = 0.2;          // only the middle of a piece's footprint counts (corners of tilted pieces would make spikes)
@@ -283,6 +314,8 @@
     const j0 = Math.floor((bb[1] + iz) / PILE_CELL), j1 = Math.floor((bb[3] - iz) / PILE_CELL);
     for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) fn((i + 50000) * 100000 + (j + 50000));
   }
+  // a heap's height from the rubble added up: it rises with the amount but never above PILE_MAX
+  const heap = (h) => PILE_MAX * (1 - Math.exp(-Math.max(0, h) / PILE_MAX));
   function pileHeight(fr) {
     if (!pile.size || !fr.bb) return GROUND;
     let hi = 0, sum = 0, n = 0;
@@ -292,7 +325,7 @@
       const t = fr.stamp && fr.stamp.has(key) ? c.h - fr.stampAdd : c.h;   // without its own share
       sum += t; if (t > hi) hi = t;
     });
-    return GROUND + (n ? (hi + sum / n) / 2 : 0);
+    return GROUND + (n ? heap((hi + sum / n) / 2) : 0);
   }
   // a piece's thickness: its thinnest side (the plates: the wall or slab thickness)
   const thickness = (fr) => (fr.lo ? Math.max(0.01, Math.min(fr.hi[0] - fr.lo[0], fr.hi[1] - fr.lo[1], fr.hi[2] - fr.lo[2])) : 0.03);
@@ -313,7 +346,7 @@
       c.list = c.list.filter((e) => e.fr !== fr); c.h -= fr.stampAdd;
       if (!c.list.length || c.h < 1e-4) { pile.delete(key); c.h = 0; }
       // what lay on it (higher up than what's left here) loses its footing
-      for (const e of c.list) if (e.bottom > GROUND + c.h - e.fr.stampAdd + 0.01) drop.add(e);
+      for (const e of c.list) if (e.bottom > GROUND + heap(c.h - e.fr.stampAdd) + 0.01) drop.add(e);
     }
     for (const e of drop) if (e.fr.stamp) { const lying = { off: e.fr.off, R: e.fr.R }; launch(e.set, e.fr, [0, 0, 0], 0, 0.5); Object.assign(e.fr, lying); }
   }
@@ -560,8 +593,9 @@
     const model = shell ? shellSpec() : null;
     getCutter().send({ op: 'cut', b: bd.id, boxes: plainBoxes(bd.boxes), size: st.size, model, prio }).then((m) => {
       try {
-        st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, piles: shell, center: [bd.cx, bd.cz] });
+        st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, piles: shell, center: [bd.cx, bd.cz], st });
         st.sets.push(st.set);
+        graphOf(st);                                               // what holds what in the intact building (local collapse)
       } catch (e) { console.warn('[buildings] cut', e); }
       st.ready = true; st.cutMs = performance.now() - st.t0;
       runPending(st);
@@ -596,7 +630,7 @@
     const d = m.data; if (!d || !d.P || !st.set || st.claimed) return;
     const coarse = st.set.frs, still = (i) => coarse[i] && coarse[i].state === 'still';
     if (!m.victims.some(still)) return;
-    const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, piles: st.shell, center: [st.bd.cx, st.bd.cz] });
+    const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, piles: st.shell, center: [st.bd.cx, st.bd.cz], st });
     st.sets.push(set);
     set.down = st.down;
     if (st.down) lightsOut(st);
@@ -608,6 +642,7 @@
     };
     for (const fr of set.frs) if (!still(fr.idx)) collapse(set, fr);   // its coarse chunk is already gone
     for (const i of m.victims) if (still(i)) collapse(st.set, coarse[i]);
+    st.graph = null;                                               // new pieces: the support graph is made again
   }
   // the chunks in, the building's own triangles out
   function swapIn(st) {
@@ -679,7 +714,153 @@
       launch(set, fr, [(dx / l) * 0.5 * sp + out.x * sp + rnd(-0.3, 0.3), (dy / l) * 0.4 * sp + rnd(0.2, 1), (dz / l) * 0.5 * sp + out.z * sp + rnd(-0.3, 0.3)], 0, rnd(4, 12));
       count++;
     }
+    if (count) settle(st, p);
     return count;
+  }
+
+  // ---------- local collapse: what's no longer held up falls ----------
+  // A building's pieces form a graph: pieces whose boxes touch. A piece is held when a path of
+  // still pieces leads from it to the ground; each step costs the distance it goes sideways (a
+  // span, an overhang; straight up is free, a staircase isn't), hanging from the piece above more. The costs of
+  // the intact building are each piece's baseline (c0: the middle of a slab is a span already);
+  // after a hit, a piece whose cost grew by more than SUPPORT_SPAN, or that has no path left, falls:
+  // the wall above a wide hole, the slabs around a core that was shot away, a corner that lost
+  // both its walls. What falls lands on the floor below if that still stands.
+  function graphOf(st) {
+    if (st.graph) return st.graph;
+    const nodes = [];
+    for (const set of st.sets) for (const fr of set.frs) if (fr.state !== 'gone') nodes.push({ fr, set });
+    const E = 0.012, cell = Math.max(0.1, st.size), grid = new Map(), nb = nodes.map(() => []);
+    const touch = (a, b) => a.lo[0] <= b.hi[0] + E && b.lo[0] <= a.hi[0] + E && a.lo[1] <= b.hi[1] + E && b.lo[1] <= a.hi[1] + E && a.lo[2] <= b.hi[2] + E && b.lo[2] <= a.hi[2] + E;
+    let base = Infinity;
+    nodes.forEach((n, a) => {
+      const { lo, hi } = n.fr;
+      if (lo[1] < base) base = lo[1];
+      for (let i = Math.floor((lo[0] - E) / cell); i <= Math.floor((hi[0] + E) / cell); i++)
+        for (let j = Math.floor((lo[1] - E) / cell); j <= Math.floor((hi[1] + E) / cell); j++)
+          for (let k = Math.floor((lo[2] - E) / cell); k <= Math.floor((hi[2] + E) / cell); k++) {
+            const key = ((i + 2000) * 4096 + (j + 2000)) * 4096 + (k + 2000);
+            let c = grid.get(key); if (!c) grid.set(key, (c = []));
+            for (const b of c) if (!nb[a].includes(b) && touch(n.fr, nodes[b].fr)) { nb[a].push(b); nb[b].push(a); }
+            c.push(a);
+          }
+    });
+    const g = st.graph = { nodes, nb, base };
+    // pieces without a baseline: the intact building's costs; pieces cut finer later take their
+    // coarse chunk's (plus half its size: they lie anywhere in it)
+    if (nodes.some((n) => n.fr.c0 === undefined)) {
+      const cost = holdCosts(g);
+      nodes.forEach((n, i) => {
+        const fr = n.fr; if (fr.c0 !== undefined) return;
+        const src = fr.fine && st.set ? st.set.frs[fr.idx] : null;
+        fr.c0 = src && src.c0 !== undefined ? src.c0 + 0.5 * Math.max(src.hi[0] - src.lo[0], src.hi[2] - src.lo[2]) : cost[i];
+      });
+    }
+    return g;
+  }
+  // Dijkstra from the ground over the still pieces: what each costs to hold up
+  function holdCosts(g) {
+    const N = g.nodes.length, cost = new Float64Array(N).fill(Infinity), hc = [], hi = [];
+    const push = (c, i) => { let k = hc.length; hc.push(c); hi.push(i); while (k) { const p = (k - 1) >> 1; if (hc[p] <= c) break; hc[k] = hc[p]; hi[k] = hi[p]; k = p; } hc[k] = c; hi[k] = i; };
+    const pop = () => {
+      const c = hc[0], i = hi[0], lc = hc.pop(), li = hi.pop();
+      if (hc.length) { let k = 0; for (;;) { let m = 2 * k + 1; if (m >= hc.length) break; if (m + 1 < hc.length && hc[m + 1] < hc[m]) m++; if (hc[m] >= lc) break; hc[k] = hc[m]; hi[k] = hi[m]; k = m; } hc[k] = lc; hi[k] = li; }
+      return [c, i];
+    };
+    const still = (i) => g.nodes[i].fr.state === 'still';
+    for (let i = 0; i < N; i++) if (still(i) && g.nodes[i].fr.lo[1] < g.base + 0.02) { cost[i] = 0; push(0, i); }
+    while (hc.length) {
+      const [c, a] = pop();
+      if (c > cost[a] || c > 4) continue;
+      const A = g.nodes[a].fr.pivot;
+      for (const b of g.nb[a]) {
+        if (!still(b)) continue;
+        const B = g.nodes[b].fr.pivot, dy = B[1] - A[1], dh = Math.hypot(B[0] - A[0], B[2] - A[2]);
+        // the way sideways (on top of it: a little offset is free – pieces of storeys cut one by one
+        // don't line up); hanging from it costs more
+        const w = dy > 0.5 * dh ? Math.max(0, dh - SUPPORT_SLACK) : dy < -0.5 * dh ? dh - 2 * dy : dh;
+        if (c + w < cost[b]) { cost[b] = c + w; push(c + w, b); }
+      }
+    }
+    return cost;
+  }
+  // after a hit: what isn't held any more falls (onto the floor below, if that stands)
+  function settle(st, p) {
+    if (st.down || st.claimed || !st.ready) return 0;
+    const g = graphOf(st), cost = holdCosts(g), fallers = [];
+    g.nodes.forEach((n, i) => { if (n.fr.state === 'still' && cost[i] > n.fr.c0 + SUPPORT_SPAN) fallers.push(n); });
+    if (!fallers.length) return 0;
+    let mx = 0, my = Infinity, mz = 0;
+    for (const { fr, set } of fallers) {
+      launch(set, fr, [rnd(-0.08, 0.08), rnd(-0.25, 0), rnd(-0.08, 0.08)], rnd(0.05, 0.3), rnd(0.3, 2));
+      mx += fr.pivot[0] / fallers.length; mz += fr.pivot[2] / fallers.length; my = Math.min(my, fr.pivot[1]);
+    }
+    for (const { fr, set } of fallers) landOn(st, set, fr);
+    if (fallers.length > 8) {
+      sound('crack'); setTimeout(() => sound('boom'), 600);
+      if (DUST > 0) for (let k = 0; k < Math.min(14, fallers.length / 4) * DUST; k++) dust(mx + rnd(-0.15, 0.15), Math.max(0.06, my), mz + rnd(-0.15, 0.15),
+        { vx: rnd(-0.3, 0.3), vy: rnd(-0.1, 0.1), vz: rnd(-0.3, 0.3), rise: 0.03, drag: 0.8, size: rnd(0.06, 0.12), grow: 5, life: rnd(4, 7), alpha: 0.6, delay: rnd(0.3, 1) });
+    }
+    // so little left standing: the rest comes down too
+    let left = 0, all = 0; for (const n of g.nodes) { if (n.fr.state === 'gone') continue; all++; if (n.fr.state === 'still') left++; }
+    if (all && left / all < 0.35) collapse(st.bd, { at: p });
+    return fallers.length;
+  }
+  // the highest still piece of the building right under fr: it lands on that (and drops when that goes)
+  function landOn(st, set, fr) {
+    const x = fr.pivot[0] + (fr.off ? fr.off[0] : 0), z = fr.pivot[2] + (fr.off ? fr.off[2] : 0), bottom = fr.bb ? fr.bb[4] : fr.lo[1];
+    let y = -Infinity, holder = null;
+    for (const s of st.sets) for (const o of s.frs) {
+      if (o.state !== 'still' || o.hi[1] > bottom + 0.02 || o.hi[1] <= y) continue;
+      if (x < o.lo[0] || x > o.hi[0] || z < o.lo[2] || z > o.hi[2]) continue;
+      y = o.hi[1]; holder = o;
+    }
+    if (!holder || y < GROUND + 0.02) return;
+    fr.floorY = y; fr.holder = holder;
+    (holder.carried || (holder.carried = [])).push({ set, fr });
+  }
+
+  // The nearest still chunk along a ray o + t·d, t ≤ maxT, in buildings shown as chunks:
+  // { t, n (facing the shooter), id } or null. Shots and rockets go through holes this way.
+  function ray(o, d, maxT = Infinity) {
+    let best = null;
+    const O = [o.x, o.y, o.z], D = [d.x, d.y, d.z];
+    const box = (lo, hi, tmax) => {
+      let t0 = 0, t1 = tmax;
+      for (let k = 0; k < 3; k++) {
+        if (Math.abs(D[k]) < 1e-12) { if (O[k] < lo[k] - 1e-3 || O[k] > hi[k] + 1e-3) return false; continue; }
+        let a = (lo[k] - 1e-3 - O[k]) / D[k], b = (hi[k] + 1e-3 - O[k]) / D[k]; if (a > b) { const s = a; a = b; b = s; }
+        if (a > t0) t0 = a; if (b < t1) t1 = b; if (t0 > t1) return false;
+      }
+      return true;
+    };
+    for (const st of solids.values()) {
+      if (!st.shown || st.claimed || !st.sets) continue;
+      const bd = st.bd;
+      if (!box([bd.x0 - 0.1, 0, bd.z0 - 0.1], [bd.x1 + 0.1, bd.top + 0.1, bd.z1 + 0.1], best ? best.t : maxT)) continue;
+      for (const set of st.sets) {
+        const a = set.pos.array;
+        for (const fr of set.frs) {
+          if (fr.state !== 'still' || !box(fr.lo, fr.hi, best ? best.t : maxT)) continue;
+          for (let v = fr.start * 3, end = (fr.start + fr.count) * 3; v + 8 < end; v += 9) {
+            const e1x = a[v + 3] - a[v], e1y = a[v + 4] - a[v + 1], e1z = a[v + 5] - a[v + 2], e2x = a[v + 6] - a[v], e2y = a[v + 7] - a[v + 1], e2z = a[v + 8] - a[v + 2];
+            const px = d.y * e2z - d.z * e2y, py = d.z * e2x - d.x * e2z, pz = d.x * e2y - d.y * e2x;
+            const det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) continue;
+            const inv = 1 / det, sx = o.x - a[v], sy = o.y - a[v + 1], sz = o.z - a[v + 2];
+            const u = (sx * px + sy * py + sz * pz) * inv; if (u < 0 || u > 1) continue;
+            const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
+            const w = (d.x * qx + d.y * qy + d.z * qz) * inv; if (w < 0 || u + w > 1) continue;
+            const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+            if (t <= 1e-4 || t >= (best ? best.t : maxT)) continue;
+            let nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+            const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+            if (nx * d.x + ny * d.y + nz * d.z > 0) { nx = -nx; ny = -ny; nz = -nz; }
+            best = { t, n: { x: nx, y: ny, z: nz }, id: bd.id };
+          }
+        }
+      }
+    }
+    return best;
   }
   // a crater that counts: after HITS_TO_COLLAPSE of them the building comes down from this impact
   function hit(x, p, n, opts = {}) {
@@ -764,7 +945,9 @@
           const lean = COLLAPSE_LEAN * (0.25 + up) * rnd(0.7, 1.2);
           v = [nx * lean + (fr.pivot[0] - cx) * rnd(0, 0.3) + rnd(-0.08, 0.08), rnd(-0.3, 0), nz * lean + (fr.pivot[2] - cz) * rnd(0, 0.3) + rnd(-0.08, 0.08)];
         } else {
-          delay = 0.35 + dh / COLLAPSE_SPREAD + (-dy) * 1.8 + rnd(0, 0.15);
+          // (shell: a storey gives way when what falls from above reaches it, so nothing falls
+          // through floors that still stand and lands under them)
+          delay = st.shell ? 0.12 + dh / COLLAPSE_SPREAD * 0.6 + Math.sqrt(-dy / 3) + rnd(0, 0.1) : 0.35 + dh / COLLAPSE_SPREAD + (-dy) * 1.8 + rnd(0, 0.15);
           v = [(fr.pivot[0] - cx) * rnd(0, 0.5) + rnd(-0.1, 0.1), rnd(-0.2, 0.05), (fr.pivot[2] - cz) * rnd(0, 0.5) + rnd(-0.1, 0.1)];
         }
         last = Math.max(last, delay);
@@ -883,9 +1066,12 @@
       return { solid: true, model: st.shell ? 'shell' : 'solid', ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length,
         flying: all.filter((f) => f.state === 'flying').length, pile: st.shell ? Math.round(Math.max(0, ...all.filter((f) => f.stamp).map((f) => f.bb[4])) * 1000) / 1000 : undefined }; },
     crater, hit, collapse, blastWave, claim, well,
+    // shots against buildings in chunks: ray(o, d, maxT) → { t, n, id } | null; covers(id): the
+    // building is shown as chunks (rays should use ray(), not its own meshes)
+    ray, covers: (id) => { const st = solids.get(id); return !!(st && !st.claimed && st.shown); },
     get cutter() { return cutter ? cutter.mode : null; },        // 'worker' or 'page' (no worker could be made)
     // low-level, for scripts with their own plans (the nuke)
-    geometry: { readMasses, boxPoly: geo.boxPoly, shatter: geo.shatter, pieceTriangles: geo.pieceTriangles, newell: geo.newell, bounds: geo.bounds, shellPlates: geo.shellPlates, isFacade, JF },
+    geometry: { readMasses, boxPoly: geo.boxPoly, shatter: geo.shatter, pieceTriangles: geo.pieceTriangles, newell: geo.newell, bounds: geo.bounds, shellPlates: geo.shellPlates, concreteOf: geo.concreteOf, isFacade, JF },
     // the building model the setting asks for now: null (solid) or the shell's measures for
     // geometry.shellPlates { kind: 'shell', storey, wall, slab, core, coreSize, piecesPerArea }
     shellModel: () => (shellModel() ? shellSpec() : null),
@@ -1083,10 +1269,7 @@
     function shellPlates(b, m, r, ya, yb, k, out, whole = false) {
       const W = b.x1 - b.x0, D = b.z1 - b.z0, H = b.y1 - b.y0, E = 1e-6;
       const T = Math.min(m.wall, W / 4, D / 4), n = Math.max(1, Math.round(H / m.storey)), S = Math.min(m.slab, H / n / 3);
-      if (!b.inner) {
-        const w = b.wallColor, con = [w[0] * 0.55 + 0.15, w[1] * 0.55 + 0.145, w[2] * 0.55 + 0.14], mix = (c, f, add) => c.map((v, i) => v * f + add[i]);
-        b.inner = { floor: mix(con, 0.8, [0.09, 0.085, 0.08]), ceil: mix(con, 0.6, [0.03, 0.03, 0.03]), wall: mix(w, 0.25, [0.36, 0.34, 0.31]) };
-      }
+      if (!b.inner) b.inner = insides(b);
       const ext = (side) => ({ side, ext: true }), IN = (kk) => ({ inner: kk });
       const sx0 = Math.abs(r.x0 - b.x0) < E, sx1 = Math.abs(r.x1 - b.x1) < E, sz0 = Math.abs(r.z0 - b.z0) < E, sz1 = Math.abs(r.z1 - b.z1) < E;
       const add = (x0, y0, z0, x1, y1, z1, tags, kind) => {
@@ -1132,9 +1315,20 @@
       }
       return out;
     }
+    // Broken concrete: grey, a hint of the facade's colour (not the facade's colour itself).
+    const concreteOf = (w) => [w[0] * 0.1 + 0.5, w[1] * 0.1 + 0.49, w[2] * 0.1 + 0.47];
+    // The inside colours of a building (the same for all its boxes): plaster walls (white to light
+    // grey), a white-grey ceiling, and floors of wood (brown), concrete (grey) or tiles (beige). The
+    // ceiling is a little pink: it faces down and the app's sky light is grey-green from below.
+    const INSIDE_FLOORS = [[0.5, 0.36, 0.23], [0.4, 0.29, 0.19], [0.6, 0.59, 0.56], [0.7, 0.63, 0.53]];
+    function insides(b) {
+      const s0 = (b.siblings && b.siblings[0]) || b, h = Math.abs(Math.sin(s0.x0 * 12.9898 + s0.z0 * 78.233) * 43758.5453) % 1;
+      const p = 0.9 - (h * 7 % 1) * 0.12, warm = (h * 13 % 1) * 0.04;
+      return { wall: [p, p - 0.01 - warm * 0.5, p - 0.03 - warm], ceil: [0.88, 0.83, 0.91], floor: INSIDE_FLOORS[Math.floor(h * INSIDE_FLOORS.length)] };
+    }
     // the texture mapping of a wall at point p (the numbers from readMasses)
     function wallUV(w, p) { return [w.ua + (p[w.along] - w.sa) * w.du, w.va + (p[1] - w.ya) * w.dv]; }
-    const lib = { boxPoly, split, shatter, pieceTriangles, newell, bounds, shellPlates, JF };
+    const lib = { boxPoly, split, shatter, pieceTriangles, newell, bounds, shellPlates, concreteOf, JF };
     if (!port) return lib;
 
     // ---- pieces → flat arrays ----
@@ -1178,7 +1372,7 @@
       buildings.set(msg.b, bld);
       for (const b of boxes) b.siblings = boxes;
       for (const b of boxes) {
-        const wall = b.wallColor, concrete0 = [wall[0] * 0.55 + 0.15, wall[1] * 0.55 + 0.145, wall[2] * 0.55 + 0.14];
+        const concrete0 = concreteOf(b.wallColor);
         if (msg.model && msg.model.kind === 'shell') { yield* shell(b, size, msg.model, concrete0, pieces); continue; }
         const tags = { '+x': { side: '+x', ext: true }, '-x': { side: '-x', ext: true }, '+z': { side: '+z', ext: true }, '-z': { side: '-z', ext: true } };
         // in slabs of about two chunk heights, so one cut never has to deal with a whole tower
