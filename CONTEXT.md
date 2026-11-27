@@ -74,6 +74,35 @@ placeholder `https://your-savings-city-host.example/`.
   `renderer.autoClear = false`, so the AO's scene target was never cleared and every frame piled
   onto the last (anything moving – rain, snow, cars – smeared into streaks). The AO now clears its
   scene target (`renderer.clear()`) before drawing into it.
+  **Graphics 1.5: one post-processing chain** (`window.scGraphics.post`, also still `.ao`). The
+  scene is drawn once into the HalfFloat/FloatDepth target whenever any effect is active; then
+  optional passes: AO (full size, daylight) → `aoRT`; light shafts (half size, HalfFloat) →
+  `shaftRT`; and one composite into `prev` that does lens (barrel distortion + chromatic
+  aberration), AO, outlines, haze and rays, then tone mapping. Nothing active (no AO, outlines,
+  sun shafts, burst or lens kick) → the app draws as before, at no cost.
+  - Outlines: Laplacian of depth along x and y – view z for the orthographic camera, 1/z for a
+    perspective one (both linear on screen on a plane), divided by the world size of a pixel
+    (`2 / (proj[1][1] · height)`): zero on flat surfaces, large on creases and silhouettes.
+  - Sun shafts: each view ray is clipped to a haze slab `0 ≤ y ≤ top` and marched (24 steps,
+    jittered) through `sun.shadow.map.depthTexture` with `sun.shadow.matrix`. The app's shadow map
+    is PCF (`shadowMap.type = 1`) so the depth texture has a `compareFunction`: it must be read as a
+    `sampler2DShadow` (`texture(tShadow, vec3(uv, z + bias))` = lit 0…1), which three.js binds
+    fine in our replaced shaders. Not physical on purpose: haze in shadow darkens (`dim`), sunlit
+    haze adds a glow (`glow` × sun colour, or the panel's colour by `tint`), so shafts show without
+    fogging the city. Wind: value noise drifting with time modulates the density per step. The
+    haze values live in localStorage `sc-graphics:haze`; the haze panel (setting `hazePanel`) is a
+    floating div without overlay so the city stays visible while tuning.
+  - Bursts: `window.scLightBursts` (a Set, created by whoever loads first) of
+    `{ x, y, z, radius, strength, color: [r, g, b] }` in world units, updated by the owner every
+    frame and deleted when done. The strongest gets a radial blur (48 samples towards its point on
+    screen) of what's bright (> 0.6) within ~3 radii of it. Its strength also kicks the lens
+    (`BURST_KICK`); every `sc:blast` adds `BLAST_KICK`; the kick decays in `KICK_DECAY` s.
+    Nuke 3.6 adds its fireball (spike at the flash, the fireball, then the glowing cap, scaled with
+    the yield like its light boost).
+  - Debug views: `scGraphics.post.U.show.value` = 1 AO, 2 normals, 3 outlines, 4 shafts.
+  - Testing headless: SwiftShader draws about one frame a second, so a nuke's first frame is
+    already seconds after the flash. Slow the page's clock (wrap `performance.now` in an init
+    script and scale it after the click) to see the flash and fireball.
 
 ## Night lights and lights out (core 1.6, buildings 1.5, nuke 3.5)
 

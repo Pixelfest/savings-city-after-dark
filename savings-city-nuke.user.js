@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.5
+// @version      3.6
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -66,6 +66,7 @@
   const WAVE_TILES_PER_SECOND = 13;// how fast the shockwave travels outward (sets how long it takes)
   const CLOUD_PER_KT = 25;         // mushroom cloud height in tiles for 1 kt; grows with yield^0.25 (kept within view)
   const WAVE_DELAY = 0.2;          // the wave leaves after the flash, so you can see the buildings break
+  const BURST_FLASH = 1.5;         // light shafts (graphics script): extra strength right at the flash
   const FLASH_SECONDS = 0.6;       // white flash: short, so it doesn't hide the destruction
   const LIGHT_BOOST = 3.5;         // how much brighter the scene gets for a moment (was 7)
   const FOUNDATION_HEIGHT = 0.03;  // things lower than this survive even at ground zero
@@ -706,11 +707,24 @@
   }
 
   // ---------- flash, light and shake ----------
-  let lights = [], flashEl = null, countEl = null;
+  let lights = [], flashEl = null, countEl = null, burst = null;
   function stepLight(t) {
     const boost = 1 + (nuke.light - 1) * Math.exp(-t / 0.18) + 0.25 * Math.exp(-t / 3);
     for (const L of lights) L.o.intensity = L.i * boost;
     if (flashEl) flashEl.style.opacity = String(t < 0.08 ? 1 : Math.max(0, 1 - (t - 0.08) / FLASH_SECONDS) ** 2);
+    stepBurst(t);
+  }
+  // Light shafts and the lens kick (graphics script): the fireball is a light source in
+  // window.scLightBursts – a blinding spike at the flash, then the fireball, then the glowing cap.
+  function stepBurst(t) {
+    const set = window.scLightBursts = window.scLightBursts || new Set();
+    const size = (nuke.light - 1) / (LIGHT_BOOST - 1);             // 0.25…1.4 with the yield
+    const strength = size * (BURST_FLASH * Math.exp(-t / 0.3) + smooth(t / 0.8) * (1 - smooth((t - 2) / 3)) + 0.5 * Math.exp(-t / 3.5));
+    if (strength < 0.01 && t > 1) { if (burst) set.delete(burst); burst = null; return; }
+    if (!burst) { burst = { x: 0, y: 0, z: 0, radius: 1, strength: 0, color: [1, 0.82, 0.55], source: 'nuke' }; set.add(burst); }
+    burst.x = fireball.position.x; burst.y = fireball.position.y; burst.z = fireball.position.z;
+    burst.radius = Math.max(fireball.scale.x, 0.12 * nuke.H);
+    burst.strength = strength;
   }
   function stepShake(t) {
     const el = renderer && renderer.domElement; if (!el) return;
