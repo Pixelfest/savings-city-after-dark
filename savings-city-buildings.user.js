@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.10
+// @version      1.11
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -54,7 +54,9 @@
  *   Either way a jagged stump stays, dust rolls out, people inside and right next to it die
  *   (residents' crush, sc:crush), and walk mode rebuilds its walls (sc:geometry-changed).
  * - Chunk physics: gravity, tumbling, landing on the ground, tipping onto the largest face, rest.
- *   Settled rubble is left alone: only moving pieces are stepped and uploaded (set.awake).
+ *   Settled rubble is left alone: only moving pieces are stepped (set.awake). The GPU moves the
+ *   pieces (gpuPieces): a 3×4 transform per piece in a float texture, applied in the vertex
+ *   shader and in the shadow pass; the CPU only writes those 12 numbers and a piece's bounds.
  *
  * - Two building models (the setting "Gebouwen bij vernielen", read when a building is first cut):
  *     solid ("Massief"): every box is one solid block, cut into chunks (as above);

@@ -456,6 +456,33 @@ shell collapse of the 1.2 × 1.2 × 1.57 tower: 10–50 % of pieces moving 613 �
 save), 10–50 % 1160 → 682 KB, under 10 % 351 → 151 KB, 76.6 → 70.5 MB. Uploads per frame: about 2 →
 up to 48 calls per set.
 
+Buildings 1.11 – the GPU moves the pieces (`gpuPieces`, `GPU_PIECES`). Positions and normals of a
+set never change after it's made (still pieces and `ray()` keep using them). Per piece a 3×4
+transform `[L | t]` in a float texture (3 RGBA32F texels, `PIECE_ROW` 256 pieces a row; a vertex
+p goes to L·p + t with t = pivot + off − L·pivot, so the identity is "where it was cut"); every
+vertex has `aPiece`. L = stretch · R · scale (the black hole's spaghetti: st4·I + (st3 − st4)·d·dᵀ),
+normals are L·n (normalised by three). The core lends no DataTexture: it's the facade map's
+`Texture` class with `isDataTexture`, `image: {data, width, height}`, RGBA (1023), Float (1015),
+Nearest (1003), no mipmaps, no flipY. `pieceMat(m, set)` clones the material, runs its
+`onBeforeCompile` (the app's facade and night code read `transformed` / `objectNormal` after
+`begin_vertex` / `beginnormal_vertex`, so they follow) and then inserts the transform; cache key
+`facade+scPieces`. Lights out: `set.base` → `darkFacade(set.base)` → `pieceMat` again (the clone
+isn't `isFacade`). Shadows: the shadow pass would draw the pieces where they were cut, so the
+mesh's `onBeforeShadow` takes three's own `MeshDepthMaterial` the first time (the core can't lend
+the class), clones it with the same transform (`D` key) and sets `customDepthMaterial` (checked:
+the shadow of a collapsed building goes with it). `writePiece` replaces `writeChunk` for such sets:
+12 numbers and the bounds from the piece's distinct corners (`fr.hull`, ~8 points, made once)
+instead of 36+ vertices; `upload` sets `tex.needsUpdate` (the whole texture: 48 bytes a piece).
+Measured (same runs as 1.10): vertex uploads of moving pieces 8.9 MB → 0 for the collapse, 67.7 →
+0 for 1 kt; the texture adds 1.1 and 6.6 MB. Page script time in SwiftShader didn't change
+measurably (0.5 → 0.5 s, 2.9 → 3.2 s: most of it is elsewhere there).
+
+Nuke 3.8 – mushroom cloud twice as big: `CLOUD_PER_KT` 25 → 50 (1 km for 1 kt), minimum 1.2 → 2.4,
+`CLOUD_MAX` 150 → 170. The app's camera is orthographic about 150 units from its target with near 1:
+the cloud's top (≈ 1.2 × H, ×√3 nearer along the view) is cut off from about H 210, sooner when
+ground zero lies towards the camera. After `CLOUD_LINGER` (20 s) the cloud lifts off out of the
+view on purpose (its shadow stays a while).
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`

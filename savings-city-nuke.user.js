@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – nuke
 // @namespace    savings-city-tweaks
-// @version      3.7
+// @version      3.8
 // @description  A ☢ button: after a 10 second countdown a nuclear bomb goes off in the centre of the city. Flash, shockwave, buildings blown to pieces, mushroom cloud, camera shake. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -38,7 +38,7 @@
  * - Yield: clicking ☢ opens a popup to pick the yield in tonnes of TNT (presets from a hand grenade
  *   to the Tsar Bomba). Blast radii follow the cube root of the yield (TOTAL_PER_KT, EDGE_PER_KT
  *   per kiloton), the shockwave takes as long as it needs to get there, chunks fly harder, the
- *   mushroom cloud grows with yield^0.25 (kept within what the view can show), flash and shake too.
+ *   mushroom cloud grows with yield^0.25 (CLOUD_PER_KT: 1 km for 1 kt; at most CLOUD_MAX, what the view can show), flash and shake too.
  * - Target: after the popup the mouse is a crosshair with two red rings on the ground (flattened
  *   completely / edge of the damage); a click sets ground zero (in walk mode: where you look).
  * - B-2 bomber: during the countdown a flying wing crosses the city at BOMBER_ALTITUDE, from a
@@ -64,7 +64,10 @@
   const TOTAL_PER_KT = 10;         // tiles (≈ 200 m: the 20 psi ring of a 1 kt air burst)
   const EDGE_PER_KT = 37;          // tiles (≈ 740 m: ~2 psi, windows and light damage)
   const WAVE_TILES_PER_SECOND = 13;// how fast the shockwave travels outward (sets how long it takes)
-  const CLOUD_PER_KT = 25;         // mushroom cloud height in tiles for 1 kt; grows with yield^0.25 (kept within view)
+  const CLOUD_PER_KT = 50;         // mushroom cloud height in tiles for 1 kt (≈ 1 km); grows with yield^0.25 (kept within view: CLOUD_MAX)
+  const CLOUD_MAX = 170;           // the app's camera is orthographic, ~150 units from the city, near plane 1: a cloud
+                                   // (top ≈ 1.2 × height) over ~210 tiles is cut off by it, earlier when ground zero
+                                   // lies towards the camera; 170 keeps the top ~30 units clear
   const WAVE_DELAY = 0.2;          // the wave leaves after the flash, so you can see the buildings break
   const BURST_FLASH = 1.5;         // light shafts (graphics script): extra strength right at the flash
   const FLASH_SECONDS = 0.6;       // white flash: short, so it doesn't hide the destruction
@@ -917,7 +920,7 @@
       yield: tons, total, edge,
       wave: Math.min(16, Math.max(0.8, edge / WAVE_TILES_PER_SECOND)),                // seconds for the wave to reach the edge
       speed: Math.min(60, Math.max(4, BLAST_SPEED * Math.sqrt(total / (TOTAL_PER_KT * Math.cbrt(15))))),
-      H: Math.min(150, Math.max(1.2, CLOUD_PER_KT * Math.pow(kt, 0.25))),             // mushroom cloud height
+      H: Math.min(CLOUD_MAX, Math.max(2.4, CLOUD_PER_KT * Math.pow(kt, 0.25))),             // mushroom cloud height
       shake: SHAKE * Math.min(2, Math.max(0.15, Math.sqrt(edge / (EDGE_PER_KT * Math.cbrt(15))))),
       light: 1 + (LIGHT_BOOST - 1) * Math.min(1.4, Math.max(0.25, Math.pow(kt / 15, 0.15))),
     };
