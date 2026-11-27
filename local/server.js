@@ -3,10 +3,17 @@
 // file (in memory: edits in the app work until you restart) and injects the chosen userscripts
 // before the app starts, like Tampermonkey at document-start.
 //
-//   node local/server.js [--city local/city.json] [--port 8080] [--plugins walk-mode,residents]
+//   node local/server.js [--city local/city.json] [--test-city local/test-city.json] [--port 8080]
+//                        [--plugins walk-mode,residents]
 //
 // Open http://localhost:8080/ (plugins from --plugins, default: all) or pick them per page load:
 // http://localhost:8080/?plugins=graphics,nuke   (?plugins= for none). /plugins lists them.
+//
+// Test mode: http://localhost:8080/test (same ?plugins=) opens the small test city (3 buildings)
+// with local/test-scene.js injected before the plugins: seeded Math.random, a fixed frame step,
+// a fixed clock, ~100 people standing still, officers and cars lined up. The test city has its
+// own state, reset from its file on every load of /test; API calls are routed to it by the page
+// they come from (Referer /test…). Options: see local/test-scene.js.
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -19,6 +26,8 @@ const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? args[i + 1] : def; };
 const PORT = Number(opt('port', process.env.PORT || 8080));
 const CITY_FILE = path.resolve(opt('city', path.join(__dirname, 'city.json')));
+const TEST_CITY_FILE = path.resolve(opt('test-city', path.join(__dirname, 'test-city.json')));
+const TEST_SCENE = path.join(__dirname, 'test-scene.js');
 
 // --- plugins -------------------------------------------------------------------------------
 const PLUGINS = fs.readdirSync(ROOT)
@@ -39,17 +48,21 @@ function pickPlugins(query) {
 }
 
 // --- city state (in memory) ----------------------------------------------------------------
-const loaded = JSON.parse(fs.readFileSync(CITY_FILE, 'utf8'));
-const city = { projects: loaded.projects || [], roads: new Set(loaded.roads || []), water: new Set(loaded.water || []),
-  revision: loaded.revision || 1 };
-const cityJson = () => ({ projects: city.projects, roads: [...city.roads], water: [...city.water], revision: city.revision,
+function loadCity(file) {
+  const loaded = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return { file, projects: loaded.projects || [], roads: new Set(loaded.roads || []), water: new Set(loaded.water || []),
+    revision: loaded.revision || 1 };
+}
+const mainCity = loadCity(CITY_FILE);
+let testCity = loadCity(TEST_CITY_FILE);
+const cityJson = (city) => ({ projects: city.projects, roads: [...city.roads], water: [...city.water], revision: city.revision,
   server_time: new Date().toISOString() });
-const bump = () => { city.revision++; };
 
-function api(method, p, body) {
+function api(city, method, p, body) {
   const now = new Date().toISOString();
+  const bump = () => { city.revision++; };
   let m;
-  if (method === 'GET' && p === '/city') return [200, cityJson()];
+  if (method === 'GET' && p === '/city') return [200, cityJson(city)];
   if (method === 'GET' && p === '/city/revision') return [200, city.revision];
   if (method === 'GET' && p === '/city/changes') return [204];   // the page reloads to see changes
   if (p === '/roads') {
@@ -97,14 +110,15 @@ const INDEX_CSS = fs.readdirSync(APP).find((f) => /^index-.*\.css$/.test(f));
 
 const TRANSPARENT_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 
-function page(plugins) {
-  const tags = plugins.map((p) => `<script src="/plugins/${p.file}"></script>`).join('\n    ');
+function page(plugins, test) {
+  const tags = (test ? ['<script src="/local/test-scene.js"></script>'] : [])
+    .concat(plugins.map((p) => `<script src="/plugins/${p.file}"></script>`)).join('\n    ');
   return `<!DOCTYPE html>
 <html lang="nl"><head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="/assets/css2" rel="stylesheet">
-    <title>Savings City (lokaal)</title>
+    <title>Savings City (${test ? 'teststad' : 'lokaal'})</title>
     <!-- userscripts (document-start): ${plugins.map((p) => p.id).join(', ') || 'none'} -->
     ${tags}
     <script type="module" src="/assets/${INDEX_JS}"></script>
@@ -118,8 +132,10 @@ function pluginIndex() {
     ${DEFAULT_PLUGINS.split(',').includes(p.id) ? 'checked' : ''}> <b>${p.id}</b> – ${p.name}</label>`).join('<br>');
   return `<!DOCTYPE html><meta charset="UTF-8"><title>Plugins</title>
 <body style="font:15px system-ui;margin:2em;line-height:1.8"><h2>Savings City lokaal – plugins</h2>${rows}
-<p><button onclick="location.href='/?plugins='+[...document.querySelectorAll('input:checked')].map(i=>i.value).join(',')">Open stad</button></p>
-<p>City: ${CITY_FILE} (${city.projects.length} projecten, ${city.roads.size} wegvakken)</p>`;
+<p><button onclick="location.href='/?plugins='+[...document.querySelectorAll('input:checked')].map(i=>i.value).join(',')">Open stad</button>
+<button onclick="location.href='/test?plugins='+[...document.querySelectorAll('input:checked')].map(i=>i.value).join(',')">Open teststad</button></p>
+<p>City: ${CITY_FILE} (${mainCity.projects.length} projecten, ${mainCity.roads.size} wegvakken)<br>
+Teststad: ${TEST_CITY_FILE} (${testCity.projects.length} projecten, ${testCity.roads.size} wegvakken)</p>`;
 }
 
 const TYPES = { '.js': 'text/javascript', '.css': 'text/css', '.webp': 'image/webp', '.png': 'image/png', '.html': 'text/html' };
@@ -135,16 +151,25 @@ http.createServer((req, res) => {
   if (p.startsWith('/api/')) {
     let raw = '';
     req.on('data', (c) => { raw += c; });
+    // Calls from the test page (/test…) go to the test city.
+    let from = '';
+    try { from = new URL(req.headers.referer || '').pathname; } catch {}
+    const city = /^\/test(\/|$)/.test(from) ? testCity : mainCity;
     req.on('end', () => {
       try {
-        const [status, body] = api(req.method, p.slice(4), raw ? JSON.parse(raw) : {});
-        if (req.method !== 'GET') console.log(req.method, p, '→', status, '(revision', city.revision + ')');
+        const [status, body] = api(city, req.method, p.slice(4), raw ? JSON.parse(raw) : {});
+        if (req.method !== 'GET') console.log(req.method, p, '→', status, `(${city === testCity ? 'test city, ' : ''}revision`, city.revision + ')');
         send(res, status, body);
       } catch (e) { send(res, 500, { detail: String(e) }); }
     });
     return;
   }
   if (p === '/' || p === '/index.html') return send(res, 200, page(pickPlugins(url.searchParams)), 'text/html; charset=utf-8');
+  if (p === '/test' || p === '/test/') {
+    testCity = loadCity(TEST_CITY_FILE);   // every test run starts from the same city
+    return send(res, 200, page(pickPlugins(url.searchParams), true), 'text/html; charset=utf-8');
+  }
+  if (p === '/local/test-scene.js') return send(res, 200, fs.readFileSync(TEST_SCENE), 'text/javascript');
   if (p === '/plugins' || p === '/plugins/') return send(res, 200, pluginIndex(), 'text/html; charset=utf-8');
   let file = null;
   if (p.startsWith('/plugins/')) file = PLUGINS.find((x) => '/plugins/' + x.file === p) && path.join(ROOT, p.slice(9));
@@ -157,6 +182,7 @@ http.createServer((req, res) => {
   send(res, 404, 'not found', 'text/plain');
 }).listen(PORT, () => {
   console.log(`Savings City lokaal: http://localhost:${PORT}/  (plugins kiezen: http://localhost:${PORT}/plugins)`);
-  console.log(`city: ${CITY_FILE} – ${city.projects.length} projects, ${city.roads.size} roads`);
+  console.log(`city: ${CITY_FILE} – ${mainCity.projects.length} projects, ${mainCity.roads.size} roads`);
+  console.log(`test city: http://localhost:${PORT}/test – ${TEST_CITY_FILE}, ${testCity.projects.length} projects`);
   console.log(`default plugins: ${DEFAULT_PLUGINS || '(none)'}`);
 });

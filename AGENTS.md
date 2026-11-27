@@ -6,7 +6,8 @@ repository: scripts, local runner, app copy, test city, docs and releases.
 
 Before changing anything, read `CONTEXT.md`: it describes the app (three.js city, how buildings,
 cars, trees and lamps are built), how the scripts hook into it without changing app code, how the
-scripts talk to each other, and how to test without the real app.
+scripts talk to each other, and how to test without the real app. Test changes in the test city (`/test`, see "Testing" below)
+and finish by asking the user to test for real – don't loop on automated tests.
 
 ## Privacy rules (this repository is public)
 
@@ -51,7 +52,9 @@ request, issue and comment.
 | `app/Savings City.html`, `app/Savings City_files/` | Anonymised copy of the real app (browser "Save page as" + the lazily loaded `CityCanvas-*.js`): minified JS bundles, CSS, logo, Google Fonts CSS. Reference + what the local runner serves. Never edit the bundles' code. |
 | `local/server.js` | Serves `app/` with `/api/*` answered from a city JSON (in memory) and the scripts injected at document-start. |
 | `local/shot.js` | Headless Chromium screenshot of the local app (Playwright). |
-| `local/city.json` | Anonymous test city (the `/api/city` format). |
+| `local/city.json` | Anonymous example city (the `/api/city` format, 93 projects). |
+| `local/test-city.json`, `local/test-scene.js` | The small test city served at `/test` (3 buildings, 100 still people, officers, parked cars, seeded random, fixed frame step). Not a userscript. **Test here first** (see "Testing"). |
+| `local/test-run.js` | One repeatable test in the test city: action, screenshots at game times, JSON report. |
 | `tools/check-privacy.js` | The privacy guard (URLs, host names, e-mail addresses, city data, `.private-terms`). |
 | `.githooks/pre-push` | Runs the guard before every push (enable with `git config core.hooksPath .githooks`). |
 | `CONTEXT.md` | How the app works internally and how the scripts hook into it. Keep it current. |
@@ -104,14 +107,51 @@ hand, following these steps. Keep the given files outside the repository (a scra
 
 ## Testing
 
+**Test in the test city first, then hand over to the user.** The full city is big and slow in
+headless Chromium (a tall building cut into chunks takes minutes), people and cars wander off, and
+every run is different – that's how sessions turn into endless test loops. The test city (`/test`)
+is small, fast and the same on every run: 3 buildings (small, medium, large) in a ring road, 100
+people standing still in rows, 8 officers in a row (with cops + walk mode), 6 cars parked nose to
+tail, a fixed summer afternoon, seeded `Math.random`, a fixed 1/60 s frame step.
+
 ```bash
 node local/server.js --port 8123 &
-node local/shot.js 'http://localhost:8123/?plugins=core,graphics' /tmp/city.png --wait 15000
+# one action at a known random state, screenshots at game times after it, a JSON report:
+node local/test-run.js --plugins core,walk-mode,residents,cops --walk 7,1.6 --look 5,0.05,0.2 \
+  --do "scResidents.blast(5, 0.2, 0.6, 2.5, 8, 0.3)" --at 0,1,3 --out /tmp/run
+# or just a screenshot:
+node local/shot.js 'http://localhost:8123/test?plugins=core,graphics' /tmp/test.png --wait 3000
 ```
 
-Then look at the PNG. More in `CONTEXT.md` → "Testing without the real app" (walk mode, aiming,
-holding cars). Playwright comes pre-installed in most agent environments (`NODE_PATH=$(npm root -g)`
-if `require('playwright')` fails); otherwise `npm install`.
+Then look at the PNGs and `report.json`. Playwright comes pre-installed in most agent environments
+(`NODE_PATH=$(npm root -g)` if `require('playwright')` fails); otherwise `npm install`.
+
+How to test a change:
+
+1. **Use the test city by default** (`local/test-run.js`, or `local/shot.js` on `/test`). Load only
+   the scripts the change needs (`--plugins`). Where things stand: `local/test-scene.js` (header)
+   and `CONTEXT.md` → "Testing without the real app". Need a different setup (more people, no
+   officers)? Use the URL options (`--query "people=40&cops=0"`), not a new harness.
+2. **Wait in game time** (`--at`, `scTest.wait(s)`, `scTest.frames(n)`), never with long wall-clock
+   timeouts. Act right after `scTest.reseed()` (`test-run.js --do` does this) so the action
+   starts from the same random state each run.
+3. **Keep it short.** Check that the feature works and nothing throws (`[pageerror]` lines) – a
+   few runs, not dozens. Don't fine-tune looks, feel or timing through endless screenshot rounds:
+   that's what the user's own test is for. If you're on the third round of tweak-and-rerun for the
+   same thing, stop and ask the user.
+4. **Use the full city** (`/`) only for what the test city can't show: performance, highways, water,
+   auto layout, many buildings. One check is enough.
+5. **Then ask the user to test it for real**, in their own browser (Tampermonkey on the real app,
+   or `http://localhost:8080/test` / `/` locally). Say exactly what to try and what they should
+   see (e.g. "walk to the people on the north road, fire a rocket at them: 4–5 die, the rest run").
+   Their report (often with screenshots) decides what's next – don't replace it with more
+   automated rounds.
+
+Repeatability: with the same seed and the same steps, the outcome of an action (who dies, who's
+hit) has been the same on every run measured; exact positions afterwards matched in most runs but
+not all (some per-frame randomness still depends on timing). Compare counts and events, not pixels.
+The older full-city tools are still there: `local/harness.js` (fixed shots, `HARNESS_URL` can point
+at `http://localhost:8123/test`) and the walk-mode tips in `CONTEXT.md`.
 
 ## Releases
 

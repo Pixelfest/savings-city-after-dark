@@ -104,6 +104,7 @@ Options:
 |---|---|
 | `--port 9000` | Another port (default 8080, or `$PORT`). |
 | `--city other.json` | Another city file (the `/api/city` format). |
+| `--test-city other.json` | Another city file for the test city (below). |
 | `--plugins nuke,monster` | The scripts loaded when the address has no `?plugins=` (default: all). |
 | `?date=2026-07-01`, `?time=22:00`, `?timelapse=60` | In the address: date, time and clock speed, as in the real app (the graphics script sets these itself for winter and day/night). |
 
@@ -111,6 +112,43 @@ Edits you make in the app (placing projects, roads, …) are kept in memory unti
 `city.json` is never written. The scripts are served straight from the repository, so after editing
 a script just reload the page. The loading-screen images aren't in the copy (shown blank), and the
 font comes from Google Fonts when you're online.
+
+### Test city
+
+http://localhost:8080/test (with the same `?plugins=`, or the "Open teststad" button on `/plugins`)
+opens a small city that is the same every time, for quick and repeatable testing:
+
+- 3 buildings (small, medium, large) inside a ring road (`local/test-city.json`),
+- 100 people standing still in rows on the sidewalks of the north and south road,
+- 8 police officers in a row along the east road (with the cops and walk mode scripts; they appear
+  the first time you start walking),
+- the 6 cars parked nose to tail on the south road,
+- a summer afternoon that stands still and a seeded random generator; in automated runs
+  (Playwright) also a fixed frame step.
+
+Nothing walks or drives until something happens to it (a shot, a blast, a fire). Every load of
+`/test` starts again from the same city (edits are kept only until the next load) and doesn't
+touch the normal city. A red badge at the bottom left shows you're in the test city.
+
+| In the address | What it does |
+|---|---|
+| `?seed=2` | Another random sequence (default 1). Same seed, same run. |
+| `?people=40`, `?cops=0` | How many people (up to 200) and officers. |
+| `?fps=60` | A fixed step: each frame is exactly 1/60 s, however long it took (default in automated runs; `?fps=0` = real time, the default in your own browser). |
+| `?hold=0` | People and cars move as usual. |
+| `?date=`, `?time=`, `?timelapse=` | Another moment (default 22 June 2026, 14:00, standing still). |
+
+In the console, `scTest` has the people, officers, cars and buildings, and `scTest.wait(seconds)` /
+`scTest.frames(n)` wait in game time.
+
+`local/test-run.js` runs one repeatable test there headless: it opens the test city with the chosen
+scripts, can start walking and stand somewhere, runs an action at a known random state, and saves
+screenshots at set game times plus a JSON report of what happened (deaths, kills, blasts):
+
+```bash
+node local/test-run.js --plugins core,walk-mode,residents,cops --walk 7,1.6 --look 5,0.05,0.2 \
+  --do "scResidents.blast(5, 0.2, 0.6, 2.5, 8, 0.3)" --at 0,1,3 --out /tmp/run
+```
 
 ### Screenshots without a browser
 
@@ -124,7 +162,8 @@ node local/shot.js 'http://localhost:8123/?plugins=core,graphics' city.png --wai
 ```
 
 `--eval "js"` runs code in the page before the screenshot, e.g.
-`--eval "document.querySelector('[title*=Nuke]')?.click()"`.
+`--eval "document.querySelector('[title*=Nuke]')?.click()"`. On the test city
+(`http://localhost:8123/test?plugins=…`) it first waits until the test scene is set up.
 
 ## Development
 
@@ -134,7 +173,10 @@ node local/shot.js 'http://localhost:8123/?plugins=core,graphics' city.png --wai
 - `app/` – an anonymised copy of the app (`Savings City.html` and `Savings City_files/`: minified JS
   bundles, including the lazily loaded 3D code `CityCanvas-*.js`, CSS, logo). It's all in the
   repository; the local runner serves it. Reference only – don't edit the bundles.
-- `local/city.json` – the anonymous test city.
+- `local/city.json` – the anonymous example city; `local/test-city.json` + `local/test-scene.js` –
+  the small test city (`/test`); `local/test-run.js` – one repeatable test in it.
+- How changes are tested: first in the test city (a few automated runs), then by you, for real, in
+  the browser – see `AGENTS.md` → "Testing".
 
 When the real app changes, a developer can hand the newest app files to an agent; how to bring
 them in (anonymised) is described in `AGENTS.md` → "Updating the app files".
