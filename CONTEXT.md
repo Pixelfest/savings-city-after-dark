@@ -36,7 +36,27 @@ placeholder `https://your-savings-city-host.example/`.
   runner picks up whatever `index-*.js` / `index-*.css` is there. Search it rather than reading it:
   it's minified, one line per file (e.g. `grep -o '.{300}isMeshBasicMaterial.{300}'`). When a
   developer brings in a newer copy, follow `AGENTS.md` → "Updating the app files".
-- Menu buttons live in `.hz-tr .menu-mini` (scripts add `button.icon-btn.small` there).
+- Menu buttons live in `.hz-tr .menu-mini` (scripts add `button.icon-btn.small` there). The
+  disasters (monster, meteors, nuke) don't add their own: they're entries in the core's **Rampen**
+  dropdown (`#sc-disasters`, core 1.8: `scCore.menu.add({ id, label, icon, active, order, onClick })`,
+  `menu.update()` after a state change, `menu.items()`, `menu.open()`).
+- The HUD (`.hud`): `.hz-tl` left (logo `h1.brand`, `section.totals`, `nav#project-list`), `.hz-tr`
+  top right (menu row; the building's details card `.info-card` opens below it), `.hz-bc` bottom
+  centre (Nieuw project / Wegen / Water), `.hz-br` zoom and rotate. The keys 1–9 open the bottom
+  bar's tools (the app's `keydown` on window, bubbling; not in inputs, not with Ctrl/Alt/Meta).
+- Selecting: the view (`scCore.view()`) listens to `pointerdown/move/up` on its canvas. pointerdown
+  keeps `view.down = { x, y, button, ground, dragging }` (and captures the pointer), a move of more
+  than 5 px sets `dragging` (the map pans), pointerup clears `down` and – if it wasn't a drag, in
+  view mode – picks: a car (`selectCar`), the helicopter, the billboard (`callbacks.onBillboard`)
+  or a building (`callbacks.onSelect(projectId)`; `onSelect(null)` deselects). React sets
+  `view.callbacks` again on every render. **Don't swallow only the pointerup** (the nuke did before
+  4.0): `view.down` stays, the map then follows the mouse with no button held. To stop a click from
+  selecting, set `view.down.dragging = true` and let the pointerup through.
+- **Hiding the app's menus** (core 1.8, setting `hideAppUi`): CSS hides `.hz-tl`, `.hz-bc` and
+  `.info-card`; `view.callbacks` is made a getter/setter that wraps every new object so
+  `onSelect(id)` with an id is dropped; the hover label (`view.tooltip`, a `.city-tooltip` in
+  `.city-overlay`) loses its "Klik voor details" line; a capture `keydown` on window stops 1–9
+  (not while walking: walk mode's weapon keys).
 
 ## Clock, season, daylight (26 Nov 2026 build)
 
@@ -352,6 +372,23 @@ Nuke 3.3: outward blast about twice as hard (`BLAST_SPEED` 22, speed cap 60), sc
 ±35°), the force falls off with distance as `(1 − d/edge)^0.4` (was ^0.6) and goes mostly sideways;
 its chunks are launched with `launch(…, slide = true)` (buildings 1.4): they keep 70 % of their
 speed on landing and slide with less friction, so buildings end up blown away from ground zero.
+
+Nuke 4.0 – more than one bomb. Everything one bomb works out and moves is made by
+`makeBlast(target, tons)` (its own `nuke`, `jobs`, `prepared`, `solid`, rubble, cloud, frame loop and
+rescan); it returns `{ prepareInBackground, ready, detonate, cancel, sets, summary }`. One countdown
+at a time (`pending`); when it ends the bomb goes off and joins `blasts`, and the next one can be
+fired straight away. Stopping a countdown calls `cancel()` (the preparation stops, its hidden pieces
+are dropped: nothing was changed yet), so the popup always lets you pick a new yield and target.
+A later bomb's shockwave also breaks the meshes again (squashed further, scorched darker) and, at the
+flash, gathers the earlier bombs' chunks (`still` ruins and `rest` rubble, at `pivot + off`) within
+its reach, nearest first; as its front passes, whatever is above `keepHeight(d)` is launched again
+(`advanceOld`; a lying piece keeps its `off`/`R`, as in the buildings' `drop`). Buildings the rockets
+or the monster broke are still thrown only once (`blastWave` skips pieces with `waved`). Shared:
+the light boost (`setLightBoost`: the bombs' boosts add up on the lights' brightness from when the
+first one started; let go when all are back to 1) and the shake (`setShake`: the strongest wins).
+A car wrecked once is marked `car.scNuked`: no second `sc:car-exploded` / `sc:kill`. The B-2's
+frame loop belongs to its own flight (a new countdown may start while the last plane flies on).
+`window.scNuke` = `{ blasts() (each bomb's cx, cz, edge, …), counting, picking }`.
 
 Buildings 1.7 – the shell model (setting `buildingModel`, "Gebouwen bij vernielen": 0 *Massief*,
 1 *Vloeren en muren*; read in `prepare`, so a building keeps the model it was cut with, and `state()`
@@ -881,7 +918,7 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
 
 ## Meteor shower (savings-city-meteors 1.1, residents 2.5)
 
-- A ☄ menu button (`#sc-meteors`); clicking during a shower drops the meteors that haven't been
+- A ☄ entry in the core's Rampen menu (since meteors 1.2; was the `#sc-meteors` button); clicking during a shower drops the meteors that haven't been
   launched yet. Needs core and buildings; residents, walk mode and cops add people, cars and props.
 - `plan()`: 10–40 meteors, one direction for the whole shower (a random bearing, 35–60° above the
   horizon), each on its own parallel line. 25–40 % are aimed: picked at random, weighted by volume,

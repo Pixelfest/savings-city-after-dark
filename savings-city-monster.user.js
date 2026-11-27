@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – giant monster
 // @namespace    savings-city-tweaks
-// @version      1.4
-// @description  A 👾 button releases a giant green monster with round glasses that walks into the city and smashes buildings into solid chunks. Only in your browser – reload to rebuild.
+// @version      1.5
+// @description  👾 in the disasters menu releases a giant green monster with round glasses that walks into the city and smashes buildings into solid chunks. Only in your browser – reload to rebuild.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -450,25 +450,16 @@
     } catch {}
   }
 
-  // ---------- button ----------
+  // ---------- menu entry ----------
   const SVG = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="g-ico" aria-hidden="true"';
   const ICON = `<svg ${SVG}><path d="M12 3c4.5 0 7 3.5 7 8v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-8c0-4.5 2.5-8 7-8z"/><circle cx="9" cy="10" r="2.2"/><circle cx="15" cy="10" r="2.2"/><path d="M11.2 10h1.6"/><path d="M9.5 15.5c1.5 1 3.5 1 5 0"/></svg>`;
-  function updateButton() {
-    const b = document.getElementById('sc-monster'); if (!b) return;
-    const label = mon ? 'Monster wegsturen' : 'Monster loslaten';
-    b.title = label; b.setAttribute('aria-label', label);
-    b.style.color = mon ? '#2b8a46' : '';
-  }
-  function ensureButton() {
-    if (document.getElementById('sc-monster')) return;
-    const row = document.querySelector('.hz-tr .menu-mini'); if (!row) return;
-    const b = document.createElement('button');
-    b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-monster';
-    b.innerHTML = '<b class="s-bg"></b>' + ICON;
-    b.addEventListener('click', () => { try { audio = audio || new AudioContext(); } catch {} if (mon) sendAway(); else release(); });
-    row.appendChild(b);
-    updateButton();
-  }
-  const start = () => { ensureButton(); new MutationObserver(ensureButton).observe(document.body, { childList: true, subtree: true }); };
-  if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+  // the entry in the core's disasters menu ("Rampen")
+  function updateButton() { const c = window.scCore; if (c && c.menu) c.menu.update(); }
+  const whenCore = (fn) => (window.scCore ? fn(window.scCore) : (window.scCoreWaiting = window.scCoreWaiting || []).push(fn));
+  whenCore((c) => c.menu && c.menu.add({
+    id: 'monster', order: 10, icon: ICON,
+    label: () => (mon ? 'Monster wegsturen' : 'Monster loslaten'),
+    active: () => !!mon,
+    onClick: () => { try { audio = audio || new AudioContext(); } catch {} if (mon) sendAway(); else release(); },
+  }));
 })();

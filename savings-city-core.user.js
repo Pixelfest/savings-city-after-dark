@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – core
 // @namespace    savings-city-tweaks
-// @version      1.7
-// @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus. Install it first; other scripts build on it.
+// @version      1.8
+// @description  Shared base for the Savings City scripts: the app's scene and renderer, three.js classes, city data, traffic, sound, one frame loop, dust and the damage bus, the settings popup and the disasters menu. Install it first; other scripts build on it.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -48,6 +48,14 @@
  *   popup with all of them. The core's own: 'detail' (1 = normal … 5 = most detailed), read through
  *   detail() → { level, factor: 2^(level − 1) } – scripts multiply their piece budgets by it.
  *   'blood' (1 … 5), read through blood() → 1, 2, 4, 8 or 16: how much blood spatters.
+ *   The popup has two columns of sections; SETTINGS_LAYOUT below puts every known setting in its
+ *   place (a setting that isn't listed goes under its own `group`, or "Overig").
+ *   'hideAppUi': the app's own panels on the left (totals, project list) and at the bottom (new
+ *   project, roads, water) are gone, clicking a building opens no details (view.callbacks.onSelect
+ *   is wrapped) and the keys 1–9 (the bottom bar's tools) do nothing outside walk mode.
+ * - menu: one "Rampen" button in the app's menu for the disasters (monster, meteors, nuke):
+ *   menu.add({ id, label: string | () → string, icon: '<svg …>', active: () → bool, order, onClick }),
+ *   menu.update() after a script's state changed (labels, the red "something's going on" colour).
  * - damage(event) / onDamage(fn): the damage bus. Weapons and disasters describe what happens;
  *   whatever can break registers a handler and decides for itself:
  *     { kind: 'blast' | 'impact' | 'push' | 'crush', x, y, z, radius, power, dir: {x,y,z}, n: {x,y,z},
@@ -485,42 +493,82 @@
     help: 'Hoeveel bloed er spat als iemand geraakt wordt (inwoners en agenten): 1, 2, 4, 8 of 16 keer zoveel.' });
   const blood = () => 2 ** ((settings.get('blood') || 1) - 1);
 
+  // the app's own menus left and bottom off (see applyAppUi below)
+  settings.define({ id: 'hideAppUi', label: 'Menu\'s van de app verbergen', type: 'toggle', value: false,
+    help: 'Geen projectenlijst en totalen links, geen knoppen Nieuw project, Wegen en Water onder. Klikken op een gebouw opent dan geen details en de toetsen 1, 2 en 3 doen niets.' });
+
+  // Where each setting goes in the popup: two columns of sections, in this order. Settings that
+  // aren't listed here go under their own `group` (or "Overig") at the end of the second column.
+  const SETTINGS_LAYOUT = [
+    [['Scherm', ['hideAppUi']],
+     ['Beeld', ['pixel', 'shadows', 'ao', 'outlines', 'shafts', 'lens', 'hazePanel']]],
+    [['Tijd en seizoen', ['winter', 'daynight']],
+     ['Stad', ['residents', 'carTopSpeed']],
+     ['Vernielen', ['detail', 'buildingModel', 'hitsToCollapse', 'blood']]],
+  ];
+  function settingsColumns() {
+    const placed = new Set(), byId = new Map(defs.map((d) => [d.id, d]));
+    const cols = SETTINGS_LAYOUT.map((col) => col.map(([title, ids]) => {
+      const list = ids.map((id) => byId.get(id)).filter(Boolean);
+      for (const d of list) placed.add(d.id);
+      return [title, list];
+    }));
+    const extra = new Map();
+    for (const d of defs) if (!placed.has(d.id)) { const g = d.group || 'Overig'; if (!extra.has(g)) extra.set(g, []); extra.get(g).push(d); }
+    for (const [title, list] of extra) {
+      const known = cols.flat().find(([t]) => t === title);
+      if (known) known[1].push(...list); else cols[cols.length - 1].push([title, list]);
+    }
+    return cols.map((col) => col.filter(([, list]) => list.length));
+  }
+
+  function settingRow(d) {
+    const row = document.createElement('div');
+    row.className = 'set';
+    const v = settings.get(d.id), fmt = (x) => (d.format ? d.format(x) : String(x));
+    const help = (d.help ? d.help : '') + (d.reload ? (d.help ? ' ' : '') + '<i>Na herladen.</i>' : '');
+    const helpHtml = help ? `<div class="help">${help}</div>` : '';
+    if (d.type === 'toggle') {
+      row.innerHTML = `<div class="head tg"><label for="sc-set-${d.id}">${d.label}</label>
+        <input id="sc-set-${d.id}" class="sw" type="checkbox" role="switch"${v ? ' checked' : ''}></div>${helpHtml}`;
+      const input = row.querySelector('input');
+      input.addEventListener('change', () => { settings.set(d.id, input.checked); renderButtons(); });
+    } else if (d.options) {
+      row.innerHTML = `<div class="head"><label>${d.label}</label></div><div class="opts" role="radiogroup"></div>${helpHtml}`;
+      const opts = row.querySelector('.opts');
+      d.options.forEach((name, i) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = name; b.setAttribute('role', 'radio');
+        b.setAttribute('aria-checked', String(i === v)); if (i === v) b.className = 'on';
+        b.addEventListener('click', () => {
+          settings.set(d.id, i);
+          for (const x of opts.children) { const on = x === b; x.className = on ? 'on' : ''; x.setAttribute('aria-checked', String(on)); }
+          renderButtons();
+        });
+        opts.appendChild(b);
+      });
+    } else {
+      row.innerHTML = `<div class="head"><label for="sc-set-${d.id}">${d.label}</label><b></b></div>
+        <input id="sc-set-${d.id}" type="range" min="${d.min}" max="${d.max}" step="${d.step || 1}" value="${v}">${helpHtml}`;
+      const out = row.querySelector('b'), input = row.querySelector('input');
+      out.textContent = fmt(v);
+      input.addEventListener('input', () => { const x = parseFloat(input.value); out.textContent = fmt(x); settings.set(d.id, x); renderButtons(); });
+    }
+    return row;
+  }
   function renderPopup() {
     const list = popupEl.querySelector('.list');
     list.innerHTML = '';
-    for (const d of defs) {
-      const row = document.createElement('div');
-      row.className = 'set';
-      const v = settings.get(d.id), fmt = (x) => (d.format ? d.format(x) : String(x));
-      const help = (d.help ? d.help : '') + (d.reload ? (d.help ? ' ' : '') + '<i>Na herladen.</i>' : '');
-      const helpHtml = help ? `<div class="help">${help}</div>` : '';
-      if (d.type === 'toggle') {
-        row.innerHTML = `<div class="head tg"><label for="sc-set-${d.id}">${d.label}</label>
-          <input id="sc-set-${d.id}" class="sw" type="checkbox" role="switch"${v ? ' checked' : ''}></div>${helpHtml}`;
-        const input = row.querySelector('input');
-        input.addEventListener('change', () => { settings.set(d.id, input.checked); renderButtons(); });
-      } else if (d.options) {
-        row.innerHTML = `<div class="head"><label>${d.label}</label></div><div class="opts" role="radiogroup"></div>${helpHtml}`;
-        const opts = row.querySelector('.opts');
-        d.options.forEach((name, i) => {
-          const b = document.createElement('button');
-          b.type = 'button'; b.textContent = name; b.setAttribute('role', 'radio');
-          b.setAttribute('aria-checked', String(i === v)); if (i === v) b.className = 'on';
-          b.addEventListener('click', () => {
-            settings.set(d.id, i);
-            for (const x of opts.children) { const on = x === b; x.className = on ? 'on' : ''; x.setAttribute('aria-checked', String(on)); }
-            renderButtons();
-          });
-          opts.appendChild(b);
-        });
-      } else {
-        row.innerHTML = `<div class="head"><label for="sc-set-${d.id}">${d.label}</label><b></b></div>
-          <input id="sc-set-${d.id}" type="range" min="${d.min}" max="${d.max}" step="${d.step || 1}" value="${v}">${helpHtml}`;
-        const out = row.querySelector('b'), input = row.querySelector('input');
-        out.textContent = fmt(v);
-        input.addEventListener('input', () => { const x = parseFloat(input.value); out.textContent = fmt(x); settings.set(d.id, x); renderButtons(); });
+    for (const col of settingsColumns()) {
+      const colEl = document.createElement('div');
+      colEl.className = 'col';
+      for (const [title, defsIn] of col) {
+        const sec = document.createElement('section');
+        sec.innerHTML = `<h3>${title}</h3>`;
+        for (const d of defsIn) sec.appendChild(settingRow(d));
+        colEl.appendChild(sec);
       }
-      list.appendChild(row);
+      list.appendChild(colEl);
     }
     renderButtons();
   }
@@ -531,15 +579,18 @@
   }
   function openSettings() {
     if (popupEl) { closeSettings(); return; }
+    closeMenu();
     popupEl = document.createElement('div');
     popupEl.id = 'sc-settings-popup';
     popupEl.innerHTML = `
       <style>
         #sc-settings-popup{position:fixed;inset:0;z-index:10050;display:flex;align-items:center;justify-content:center;background:rgba(10,12,20,.45);font:500 15px/1.4 system-ui,sans-serif}
-        #sc-settings-popup .box{width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;background:#1d2233;color:#fff;border-radius:16px;padding:20px 22px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+        #sc-settings-popup .box{width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;background:#1d2233;color:#fff;border-radius:16px;padding:20px 22px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
         #sc-settings-popup h2{margin:0 0 4px;font:800 22px/1.2 system-ui,sans-serif;color:#ffd23f}
         #sc-settings-popup .sub{opacity:.75;font-size:13px;margin-bottom:8px}
-        #sc-settings-popup .set{background:#151927;border-radius:10px;padding:10px 12px;margin-top:10px}
+        #sc-settings-popup .list{display:grid;grid-template-columns:1fr 1fr;gap:0 20px;align-items:start}
+        #sc-settings-popup h3{margin:14px 0 0;font:800 12px/1.2 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#ffd23f;opacity:.85}
+        #sc-settings-popup .set{background:#151927;border-radius:10px;padding:10px 12px;margin-top:8px}
         #sc-settings-popup .head{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
         #sc-settings-popup .head label{font-weight:700}
         #sc-settings-popup .head b{font-variant-numeric:tabular-nums;text-align:right;color:#ffd23f}
@@ -557,6 +608,7 @@
         #sc-settings-popup .opts{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
         #sc-settings-popup .opts button{flex:1 1 auto;border:0;border-radius:8px;padding:6px 10px;font:700 13px system-ui,sans-serif;cursor:pointer;background:#3a4160;color:#fff}
         #sc-settings-popup .opts button.on{background:#ffd23f;color:#223}
+        @media (max-width:720px){#sc-settings-popup .list{grid-template-columns:1fr}}
       </style>
       <div class="box" role="dialog" aria-label="Instellingen">
         <h2>Instellingen</h2>
@@ -580,6 +632,7 @@
   const SVG = 'xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="g-ico" aria-hidden="true"';
   const ICON = `<svg ${SVG}><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></svg>`;
   function ensureButton() {
+    ensureMenuButton();
     if (document.getElementById('sc-settings')) return;
     const row = document.querySelector('.hz-tr .menu-mini'); if (!row) return;
     const b = document.createElement('button');
@@ -589,8 +642,173 @@
     b.addEventListener('click', (e) => { e.stopPropagation(); openSettings(); });
     row.appendChild(b);
   }
+
+  // ---------- the disasters menu: one "Rampen" button, a dropdown with the scripts' entries ----------
+  // Scripts add entries (the monster, the meteor shower, the nuke) instead of buttons of their own:
+  // menu.add({ id, label, icon, active, order, onClick }). The button turns red while any entry is
+  // active (a monster walking, meteors coming in, a countdown); the dropdown shows each entry's
+  // current label, so "Monster loslaten" becomes "Monster wegsturen" and so on.
+  const menuItems = [];
+  let menuEl = null;
+  // Lucide "flame"
+  const MENU_ICON = `<svg ${SVG}><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>`;
+  const itemLabel = (it) => { try { return typeof it.label === 'function' ? it.label() : it.label; } catch { return it.id; } };
+  const itemActive = (it) => { try { return !!(it.active && it.active()); } catch { return false; } };
+  const menu = {
+    add(it) {
+      if (!it || !it.id || typeof it.onClick !== 'function') return;
+      const i = menuItems.findIndex((x) => x.id === it.id);
+      if (i >= 0) menuItems[i] = it; else menuItems.push(it);
+      menuItems.sort((a, b) => (a.order || 0) - (b.order || 0));
+      ensureMenuButton(); menu.update();
+    },
+    update() {
+      const b = document.getElementById('sc-disasters');
+      if (b) {
+        const busy = menuItems.some(itemActive);
+        b.style.color = busy ? '#e33b3b' : '';
+        const label = busy ? 'Rampen (er is iets aan de gang)' : 'Rampen';
+        b.title = label; b.setAttribute('aria-label', label);
+      }
+      if (menuEl) renderMenu();
+    },
+    open: () => openMenu(), close: () => closeMenu(),
+    items: () => menuItems.map((it) => ({ id: it.id, label: itemLabel(it), active: itemActive(it) })),
+  };
+  function ensureMenuButton() {
+    if (!menuItems.length || document.getElementById('sc-disasters')) return;
+    const row = document.querySelector('.hz-tr .menu-mini'); if (!row) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'icon-btn small'; b.id = 'sc-disasters';
+    b.setAttribute('aria-haspopup', 'menu');
+    b.innerHTML = '<b class="s-bg"></b>' + MENU_ICON;
+    b.addEventListener('click', (e) => { e.stopPropagation(); if (menuEl) closeMenu(); else openMenu(); });
+    const settingsBtn = document.getElementById('sc-settings');
+    row.insertBefore(b, settingsBtn || null);                     // just before the settings button
+    menu.update();
+  }
+  function renderMenu() {
+    const list = menuEl.querySelector('.items');
+    list.innerHTML = '';
+    for (const it of menuItems) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.setAttribute('role', 'menuitem'); b.dataset.id = it.id;
+      if (itemActive(it)) b.className = 'on';
+      b.innerHTML = (it.icon || '') + '<span></span>';
+      b.querySelector('span').textContent = itemLabel(it);
+      b.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); try { it.onClick(e); } catch (err) { console.warn('[core] menu', it.id, err); } menu.update(); });
+      list.appendChild(b);
+    }
+  }
+  function placeMenu() {
+    const b = document.getElementById('sc-disasters'); if (!b || !menuEl) return;
+    const r = b.getBoundingClientRect();
+    menuEl.style.top = Math.round(r.bottom + 8) + 'px';
+    menuEl.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+  }
+  function openMenu() {
+    if (menuEl || !menuItems.length) return;
+    menuEl = document.createElement('div');
+    menuEl.id = 'sc-disasters-menu';
+    menuEl.setAttribute('role', 'menu'); menuEl.setAttribute('aria-label', 'Rampen');
+    menuEl.innerHTML = `
+      <style>
+        #sc-disasters-menu{position:fixed;z-index:10045;min-width:220px;background:#1d2233;color:#fff;border-radius:14px;padding:8px;box-shadow:0 10px 32px rgba(0,0,0,.5);font:700 15px/1.2 system-ui,sans-serif}
+        #sc-disasters-menu .items{display:flex;flex-direction:column;gap:4px}
+        #sc-disasters-menu button{display:flex;align-items:center;gap:10px;width:100%;border:0;border-radius:10px;padding:9px 12px;background:transparent;color:#fff;font:inherit;text-align:left;cursor:pointer}
+        #sc-disasters-menu button:hover,#sc-disasters-menu button:focus-visible{background:#2c3350;outline:none}
+        #sc-disasters-menu button.on{color:#ff6b6b}
+        #sc-disasters-menu svg{flex:none;width:20px;height:20px}
+      </style>
+      <div class="items"></div>`;
+    document.body.appendChild(menuEl);
+    renderMenu(); placeMenu();
+    menuEl.querySelector('button')?.focus();
+    document.addEventListener('pointerdown', menuOutside, true);
+    document.addEventListener('keydown', menuKey, true);
+    window.addEventListener('resize', placeMenu);
+  }
+  function closeMenu() {
+    if (!menuEl) return;
+    menuEl.remove(); menuEl = null;
+    document.removeEventListener('pointerdown', menuOutside, true);
+    document.removeEventListener('keydown', menuKey, true);
+    window.removeEventListener('resize', placeMenu);
+  }
+  function menuOutside(e) {
+    const b = document.getElementById('sc-disasters');
+    if (menuEl && !menuEl.contains(e.target) && !(b && b.contains(e.target))) closeMenu();
+  }
+  function menuKey(e) {
+    if (!menuEl) return;
+    if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closeMenu(); document.getElementById('sc-disasters')?.focus(); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const items = [...menuEl.querySelectorAll('button')], i = items.indexOf(document.activeElement);
+      const n = items.length; if (!n) return;
+      items[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].focus();
+      e.preventDefault(); e.stopPropagation();
+    }
+  }
+
   const startButton = () => { ensureButton(); new MutationObserver(ensureButton).observe(document.body, { childList: true, subtree: true }); };
   if (document.body) startButton(); else document.addEventListener('DOMContentLoaded', startButton);
+
+  // ---------- the app's own menus off (setting 'hideAppUi') ----------
+  // Left (.hz-tl: logo, totals, project list) and bottom (.hz-bc: new project, roads, water) are
+  // hidden with CSS, so they're gone, not folded up. Clicking a building would still select it
+  // (outline, details card): the view's callbacks object, which React sets again on every render,
+  // is wrapped so onSelect(projectId) is dropped (onSelect(null) – clicking a car, the helicopter
+  // or open ground – still goes through). The building's hover label keeps its name but loses
+  // "Klik voor details". The keys 1–9 open the bottom bar's tools: stopped before the app's own
+  // listener (on window, bubbling) sees them; not while walking (walk mode's weapons).
+  const appUiHidden = () => !!settings.get('hideAppUi');
+  let appUiStyle = null;
+  function applyAppUi(early) {
+    const on = appUiHidden();
+    if (on && !appUiStyle) {
+      appUiStyle = document.createElement('style');
+      appUiStyle.id = 'sc-hide-app-ui';
+      appUiStyle.textContent = '.hud .hz-tl, .hud .hz-bc, .info-card { display: none !important; }';
+      (document.head || document.documentElement).appendChild(appUiStyle);
+    } else if (!on && appUiStyle) { appUiStyle.remove(); appUiStyle = null; }
+    const v = early ? null : findView();                          // (at page start the view isn't there yet)
+    if (on && v && v.callbacks && v.callbacks.scOriginal && typeof v.callbacks.scOriginal.onSelect === 'function') {
+      try { v.callbacks.scOriginal.onSelect(null); } catch {}       // a building that was selected: let go
+    }
+  }
+  function wrapCallbacks(o) {
+    if (!o || typeof o !== 'object' || o.scOriginal) return o;
+    const w = Object.assign({}, o, { scOriginal: o });
+    if (typeof o.onSelect === 'function') w.onSelect = function (id) { if (id != null && appUiHidden()) return undefined; return o.onSelect.apply(this, arguments); };
+    return w;
+  }
+  function hookSelect(v) {
+    if (!v || v.scSelectHooked) return;
+    v.scSelectHooked = true;
+    let cbs = wrapCallbacks(v.callbacks);
+    try {
+      Object.defineProperty(v, 'callbacks', { configurable: true, enumerable: true, get: () => cbs, set: (o) => { cbs = wrapCallbacks(o); } });
+    } catch (e) { console.warn('[core] callbacks', e); }
+    // the hover label: "Klik voor details" is a lie while details are off
+    const tip = v.tooltip;
+    if (tip && typeof MutationObserver === 'function') {
+      new MutationObserver(() => {
+        if (!appUiHidden()) return;
+        for (const c of tip.children) if (c.textContent === 'Klik voor details') c.style.display = 'none';
+      }).observe(tip, { childList: true });
+    }
+  }
+  window.addEventListener('keydown', (e) => {
+    if (!appUiHidden() || e.ctrlKey || e.metaKey || e.altKey || !/^[1-9]$/.test(e.key)) return;
+    if (window.scWalk && window.scWalk.walking) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    e.stopPropagation();
+  }, true);
+  settings.onChange('hideAppUi', () => applyAppUi());
+  // the view turns up once the city is drawn: look for it until then (cheap), then apply
+  const lookForView = setInterval(() => { if (findView()) { clearInterval(lookForView); applyAppUi(); } }, 500);
+  applyAppUi(true);
 
   // ---------- small shared helpers ----------
   const isFacade = (m) => !!(m && m.map && typeof m.customProgramCacheKey === 'function' && m.customProgramCacheKey() === 'facade');
@@ -628,6 +846,7 @@
     return null;
   }
   function hookView(v) {
+    hookSelect(v);
     const gather = v.gatherStaticLights;
     v.gatherStaticLights = function () {
       if (!this.staticLightsDirty || (!darkIds.size && !deadLamps.size)) return gather.apply(this, arguments);
@@ -741,7 +960,7 @@
   });
 
   window.scCore = {
-    version: '1.7',
+    version: '1.8',
     get renderer() { return renderer; },
     get scene() { return scene; },
     get camera() { return camera; },
@@ -757,7 +976,7 @@
     traffic: () => trafficCars,
     out, audio, onFrame, puff, smoke, smokeStats, damage, onDamage, isFacade, projectOf,
     view: findView, lightsOut, lampsOut, darkFacade, isDark: (id) => darkIds.has(id),
-    settings, detail, blood, openSettings,
+    settings, detail, blood, openSettings, menu,
   };
   // scripts that loaded before the core and are waiting for it
   const waiting = Array.isArray(window.scCoreWaiting) ? window.scCoreWaiting : [];
