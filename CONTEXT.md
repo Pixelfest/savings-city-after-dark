@@ -214,6 +214,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | harpoon | registers weapon `harpoon` (key 8); takes residents via `scResidents.skin(p, 'harpoon')`, pins officers with `scCops.pin(i)` (a handle: `set(x, y, z, h, lean)`, `alive`, `release()`), hooks traffic cars (taken like drive does: `scTaken`, proxy hidden, moved off the map); `window.scHarpoon` test hooks |
 | balloon | registers weapon `balloon` (key 9); takes residents via `scResidents.skin(p, 'balloon')`, officers via `scCops.skin(i, 'balloon')`; `scWalk.addTarget` (shooting a balloon pops it), listens to `sc:blast`; `window.scBalloon` test hooks |
 | monster | `scBuildings.list()` / `alive()` / `collapse(bd, { at, push, force, spread })`; dust from `scCore.puff` |
+| meteors | `scBuildings.list()` / `near()` / `prepare()` / `crater()` / `collapse()`, `scResidents.gibAround` / `blast` / `avoid` / `alarm`, `scWalk.wreck` / `igniteCar` / `propsNear` / `knockProp`, `scCore.lampsOut` / `smoke`; sends `sc:blast` and `damage({ kind: 'meteor' })`; `window.scMeteors` test hooks |
 | nuke | plans its own ruins and flight with `scBuildings.geometry` + `chunkSet` + `launch`; claims the buildings it cuts (`claim`) at the flash; `blastWave` for buildings already in chunks |
 | car tyres | patches `BufferGeometry.translate` (route 1) and repairs car models in the scene (route 2) |
 
@@ -226,11 +227,11 @@ More events (CustomEvent on `window`, data in `detail`) – scripts announce, ot
 |---|---|---|
 | `sc:walk` | walk mode | `{ walking }` on start/stop |
 | `sc:shot` | walk mode | `{ x, y, z, weapon }` every shot of yours (cops respond) |
-| `sc:blast` | walk mode (car explosion, `blastResidents` for rockets), cops (their own cars) | `{ x, y, z, gib, knock, panic }` radii |
+| `sc:blast` | walk mode (car explosion, `blastResidents` for rockets), cops (their own cars), meteors (`source: 'meteor'`) | `{ x, y, z, gib, knock, panic }` radii |
 | `sc:crush` | buildings (a building coming down), heli-crane (a crane falling), drive (running officers over) | `{ x0, z0, x1, z1, margin }` something coming down |
 | `sc:kill` | residents, cops, walk mode (car occupants), nuke (car occupants), heli-crane (pilot) | `{ x, z, cause, who }` every death (bodycount) |
 | `sc:car-exploded` | walk mode (also via `wreck()`), nuke, cops, black hole | `{ x, z }` (cops) |
-| `sc:damage` | core (every `scCore.damage(ev)`) | the damage event: `{ kind: 'blast' \| 'impact' \| 'push' \| 'crush', x, y, z, radius, power, dir, n, source }` |
+| `sc:damage` | core (every `scCore.damage(ev)`) | the damage event: `{ kind: 'blast' \| 'impact' \| 'push' \| 'crush' \| 'meteor', x, y, z, radius, power, dir, n, source }` (buildings ignore `meteor`: the meteor script breaks buildings itself) |
 
 Walk mode 1.20 also gives `scWalk.player` (x, y = eye, z, yaw, pitch), `leave()`, `blocked(x, z)`,
 `tracer(start, end, cb)`, `addTarget({ hit(o, d, max), onHit(h, d, weapon) })` (things you can
@@ -694,3 +695,45 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
 - Test hooks: `scBalloon.infect(x, z)` (freezes and inflates the nearest person), `fire(o, d)`,
   `pop()`, `balloons` (t, position, feet height, R), `heaps`. A real headless click with the weapon
   selected (`keyboard.press('Digit9')`) fires too.
+
+## Meteor shower (savings-city-meteors 1.0, residents 2.4)
+
+- A ☄ menu button (`#sc-meteors`); clicking during a shower drops the meteors that haven't been
+  launched yet. Needs core and buildings; residents, walk mode and cops add people, cars and props.
+- `plan()`: 10–40 meteors, one direction for the whole shower (a random bearing, 35–60° above the
+  horizon), each on its own parallel line. 25–40 % are aimed: picked at random, weighted by volume,
+  from the 3 × (aimed count) biggest buildings; the aim point is random inside one of the building's
+  boxes (the tallest box 70 % of the time) at 30–90 % of its height, and the line is carried on to
+  the ground, so the meteor ploughs into the side or roof. Aimed meteors are on the big side. The
+  rest land uniformly over the city's box + 1.5 tiles, at least 0.7 apart. The order is shuffled and
+  the arrivals (exponential gaps) spread over 7–14 s, the first 3 s after the click. The first
+  building on every line is `prepare()`d at once (in arrival order), so the cut is ready in time.
+- Flight: `SPEED` 9 tiles/s, appears `START_DIST` 34 tiles up its line. Each frame the segment is
+  tested against the boxes of `scBuildings.list()` (slab test, list cached 300 ms). A building on
+  the line gets damage `SEVERE` and `collapse(bd, { at, push: meteor direction, force, spread })`;
+  the meteor keeps `PUNCH_KEEP` of its energy (energy = size / max size) and explodes there when it
+  drops below `MIN_ENERGY` – so the biggest go through one or two buildings.
+- Impact: blast radius 0.35…1.15 tiles by energy. Buildings within it get `BLAST_DAMAGE × e ×
+  (1 − d/R)^1.3` (footprint distance), summed per building over the shower (`damageOf`); at
+  `SEVERE` (1) they collapse pushed away from the impact, otherwise ≥ `CRATER_AT` blows a `crater`
+  into the side facing it. People: `gibAround` 0.4 R, `blast` knock 0.95 R / panic 3.5 R with the
+  fire band, `avoid` the crater; `sc:blast` for cops/billboard/balloons. Cars (traffic + walk mode's
+  parked ones): within 0.5 R `scWalk.wreck` (burnt shell, occupants dead), up to R `igniteCar` (they
+  explode a few seconds later; chain reactions); without walk mode they're squashed. Lamps:
+  `lampsOut(R × 1.15, fell < 0.6 R)`; props: `propsNear` + `knockProp` (only props walk mode knows).
+- Visuals: own InstancedMesh pools (ring buffers, 14 floats per particle, random rotation per slot):
+  `fire` (unlit, a colour ramp white → yellow → orange → red → smoky dark), `smoke` (Lambert grey
+  trail – the core's puffs are removed above 1.5 tiles, too low for a trail) and `debris` (rocks and
+  dirt, ballistic, they stay where they land). The meteor itself: a lumpy rock (subdivided
+  icosahedron, vertex colours, emissive) in two stretched unlit shells (orange outside, pale yellow
+  inside) pointing back along the path. Craters: one InstancedMesh (bowl, jagged rim, scorched ring;
+  80 at most); the rock stays in its crater and cools down over `ROCK_GLOW` s, smouldering.
+  All Lambert materials set `SNOW_COVER` `-0.50`.
+- Residents 2.4 – a fix found here: when a parent was taken over while walking out of a door
+  (`state` `exit`), the app's child (whose state copies the parent's) was left in `exit` without a
+  `next` street, and the app's walker threw in `move()` (`t.next[0]`) at the end of the door every
+  frame. Now the child takes over the parent's way out (`from`, `to`, `t`, `dur`, `next`), or the
+  parent's `enter` / `inside` with a timer of its own.
+- Test hooks: `scMeteors.start({ count, aimed, azimuth, elevation, duration })` (returns the plan),
+  `stop()`, `plan(opts)`, `meteors`, `shower`, `damage(id)`. Headless: skip drawing between
+  screenshots (`scCore.onDraw(() => skip)`), and zoom out (the zoom-out button) to see the city.

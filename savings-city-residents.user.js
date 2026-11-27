@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      2.3
+// @version      2.4
 // @description  The app's people (who walk the sidewalks, cross at junctions and go in and out of buildings) now react to everything: shot, blown up, set alight, run over, buried. Panicking people run, scream and hide. A density slider.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -295,7 +295,16 @@
     // parent's, or the app's walker throws on it every frame; with no street to give, ours takes it too
     if (kid && P.list.includes(kid)) {
       const walkNet = P["net"], ok = (k) => k && walkNet && walkNet.xy && walkNet.xy.get(k);
-      if (ok(p.a) && ok(p.b) && walkNet.links && walkNet.links.get(`${p.a}|${p.b}`) && typeof P.placeOnEdge === 'function') {
+      if (p.state === 'exit' && Array.isArray(p.next)) {
+        // coming out of a door: the child finishes the parent's way out (it has no `next` street of
+        // its own; the app's walker read kid.next[0] at the end of the door and threw every frame)
+        Object.assign(kid, { state: 'exit', from: (p.from || [p.x, p.z]).slice(), to: (p.to || [p.x, p.z]).slice(), t: p.t || 0, dur: p.dur || 0.01, h: p.h, side: p.side, next: p.next.slice() });
+      } else if (p.state === 'enter' || p.state === 'inside') {
+        // going in / inside: the child does the same, with a time of its own to come out again
+        kid.state = p.state;
+        if (p.state === 'enter') Object.assign(kid, { from: (p.from || [p.x, p.z]).slice(), to: (p.to || [p.x, p.z]).slice(), t: p.t || 0, dur: p.dur || 0.01, h: p.h });
+        kid.timer = p.timer > 0 ? p.timer : 2;
+      } else if (ok(p.a) && ok(p.b) && walkNet.links && walkNet.links.get(`${p.a}|${p.b}`) && typeof P.placeOnEdge === 'function') {
         try { P.placeOnEdge(kid, p.a, p.b, Math.max(0, p.s || 0), p.side); kid.planFor = undefined; } catch (e) { adopt(kid); }
       } else adopt(kid);
     }
