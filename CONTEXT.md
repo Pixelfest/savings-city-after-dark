@@ -551,6 +551,23 @@ turning on); otherwise it falls straight with a slow turn. `stepSets` places a b
 the block (`stepBlock` once per frame, `frameNo`); when one touches its floor the block breaks
 (`breakBlock`): every piece goes on alone with its point's speed. `state()` has `collapsing`.
 
+Buildings 1.13 – the support graph runs in the cutter (worker). Measured on the page at detail 5
+(~13,000 pieces a building): building the graph took 13–100 ms and the intact baseline 30–90 ms
+per building, and every wave 30–60 ms – a stutter five times a second while a building gave way.
+Now the cutter keeps `bld.all`: every piece it cut, by gid (the cut's pieces 0…P−1, then each
+refinement's, `gid0` in the refine reply; the page's `indexGids` sets `fr.gid` and `st.byGid`).
+Messages: `baseline` { b, still, slack, spread } – posted by the first `crater` before anything
+flies (`st.damaged`), the intact building; `wave` { b, still: Uint8Array[gid], extra:
+Float32Array[gid] (rubble lying on a piece + landing impact, taken from the page and reset),
+reserve, span, slack, spread } → { blocks: [{ gids, hinge }] } – computed between cutting slices
+(`graphOf` made again when the cutter has new pieces). The page's constants travel with the
+messages (cutterCore is rebuilt from its own text and can't see them). `requestWave` waits for the
+answer (one at a time per building; `settle` during a pending one makes the next go at once),
+`applyWave` maps gids back and `fallGroup` drops or blocks them (hinge from the cutter). Without a
+worker the same code answers on the page. Page script time while corner damage spread through a
+building at detail 5 (Zwak, 17,300 pieces): 11.7 s → 2.0 s; at detail 1 no measurable change (0.6
+→ 0.9 s, collapses of different sizes).
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`

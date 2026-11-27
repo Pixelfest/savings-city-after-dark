@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.12
+// @version      1.13
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -47,7 +47,8 @@
  *   way. Its load moves to its neighbours, so the next wave may find more – a hit can stop at a
  *   notch or grow until the building comes down. Connected sections fall as blocks: tipping around
  *   the side that still holds them, breaking up when they hit something. With less than a third
- *   left standing, the rest comes down too.
+ *   left standing, the rest comes down too. The graph, the baseline and the checks run in the
+ *   cutter's worker; the page sends which pieces stand and gets back what gives way.
  * - ray(o, d, maxT): the nearest still chunk along a ray; walk mode uses it for buildings shown as
  *   chunks (covers(id)), so shots and rockets go through holes and hit what's inside.
  * - collapse(building, opts) in two styles:
@@ -751,7 +752,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
       try {
         st.set = packedSet(m.data, facadeMat(bd), { hidden: true, dusty: true, piles: shell, center: [bd.cx, bd.cz], st });
         st.sets.push(st.set);
-        graphOf(st);                                               // what holds what in the intact building (local collapse)
+        indexGids(st, st.set, 0);
       } catch (e) { console.warn('[buildings] cut', e); }
       st.ready = true; st.cutMs = performance.now() - st.t0;
       runPending(st);
@@ -788,6 +789,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     if (!m.victims.some(still)) return;
     const set = packedSet(d, facadeMat(st.bd), { hidden: !st.shown, dusty: true, piles: st.shell, center: [st.bd.cx, st.bd.cz], st });
     st.sets.push(set);
+    indexGids(st, set, m.gid0);
     set.down = st.down;
     if (st.down) lightsOut(st);
     const collapse = (owner, fr) => {
@@ -798,7 +800,6 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     };
     for (const fr of set.frs) if (!still(fr.idx)) collapse(set, fr);   // its coarse chunk is already gone
     for (const i of m.victims) if (still(i)) collapse(st.set, coarse[i]);
-    st.graph = null;                                               // new pieces: the support graph is made again
   }
   // the chunks in, the building's own triangles out
   function swapIn(st) {
@@ -862,6 +863,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     const few = st.shell ? 1 : 6;
     for (let step = 0; step < 4 && n && standing(p) < few; step++) p = { x: p.x - out.x * R * 0.8, y: p.y - (out.y || 0) * R * 0.8, z: p.z - out.z * R * 0.8 };
     let count = 0;
+    baseline(st);                                                  // the first hit: the intact building is the baseline
     for (const set of st.sets) for (const fr of set.frs) {
       if (fr.state !== 'still') continue;
       const dx = fr.pivot[0] - p.x, dy = fr.pivot[1] - p.y, dz = fr.pivot[2] - p.z, d = Math.hypot(dx, dy, dz);
@@ -874,208 +876,117 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     return count;
   }
 
-  // ---------- local collapse: what's no longer held up falls ----------
-  // A building's pieces form a graph: pieces whose boxes touch. A piece is held when a path of
-  // still pieces leads from it to the ground; each step costs the distance it goes sideways (a
-  // span, an overhang; straight up is free, a staircase isn't), hanging from the piece above more. The costs of
-  // the intact building are each piece's baseline (c0: the middle of a slab is a span already);
-  // after a hit, a piece whose cost grew by more than SUPPORT_SPAN, or that has no path left, falls:
-  // the wall above a wide hole, the slabs around a core that was shot away, a corner that lost
-  // both its walls. What falls lands on the floor below if that still stands.
-  function graphOf(st) {
-    if (st.graph) return st.graph;
-    const nodes = [];
-    for (const set of st.sets) for (const fr of set.frs) if (fr.state !== 'gone') nodes.push({ fr, set });
-    const E = 0.012, cell = Math.max(0.1, st.size), grid = new Map(), nb = nodes.map(() => []);
-    const touch = (a, b) => a.lo[0] <= b.hi[0] + E && b.lo[0] <= a.hi[0] + E && a.lo[1] <= b.hi[1] + E && b.lo[1] <= a.hi[1] + E && a.lo[2] <= b.hi[2] + E && b.lo[2] <= a.hi[2] + E;
-    let base = Infinity;
-    nodes.forEach((n, a) => {
-      const { lo, hi } = n.fr;
-      if (lo[1] < base) base = lo[1];
-      for (let i = Math.floor((lo[0] - E) / cell); i <= Math.floor((hi[0] + E) / cell); i++)
-        for (let j = Math.floor((lo[1] - E) / cell); j <= Math.floor((hi[1] + E) / cell); j++)
-          for (let k = Math.floor((lo[2] - E) / cell); k <= Math.floor((hi[2] + E) / cell); k++) {
-            const key = ((i + 2000) * 4096 + (j + 2000)) * 4096 + (k + 2000);
-            let c = grid.get(key); if (!c) grid.set(key, (c = []));
-            for (const b of c) if (!nb[a].includes(b) && touch(n.fr, nodes[b].fr)) { nb[a].push(b); nb[b].push(a); }
-            c.push(a);
-          }
-    });
-    const g = st.graph = { nodes, nb, base };
-    // The baseline (c0: what it costs to hold a piece up, L0: the load it carries) is the intact
-    // building's: worked out again for all pieces as long as nothing was hit yet (finer pieces cut
-    // while aiming). Pieces cut finer after a hit take their coarse chunk's: its cost plus half its
-    // size (they lie anywhere in it), its load times their share of its footprint.
-    if (!st.damaged || nodes.some((n) => n.fr.c0 === undefined)) {
-      const cost = holdCosts(g), load = loadsOf(g, cost), foot = (f) => Math.max(1e-6, (f.hi[0] - f.lo[0]) * (f.hi[2] - f.lo[2]));
-      nodes.forEach((n, i) => {
-        const fr = n.fr; if (st.damaged && fr.c0 !== undefined) return;
-        const src = st.damaged && fr.fine && st.set ? st.set.frs[fr.idx] : null;
-        if (src && src.c0 !== undefined) {
-          fr.c0 = src.c0 + 0.5 * Math.max(src.hi[0] - src.lo[0], src.hi[2] - src.lo[2]);
-          fr.L0 = src.L0 * Math.min(1, foot(fr) / foot(src)) * 1.5;
-        } else { fr.c0 = cost[i]; fr.L0 = load[i]; }
-        if (fr.capF === undefined) fr.capF = 1 + rnd(-STRENGTH_SPREAD, STRENGTH_SPREAD);
-      });
-    }
-    return g;
-  }
+  // ---------- progressive collapse: what's no longer held up, or carries too much, gives way ----------
+  // The support graph lives in the cutter (worker): it knows every piece it cut (by gid: the cut's
+  // pieces first, then each refinement's), finds which touch, works out the intact building's
+  // baseline and runs the checks (see "the support graph" in cutterCore). The page only sends
+  // which pieces still stand and the extra loads on them (rubble lying or landing on them), and
+  // gets back the groups that give way. After a hit the building is checked in waves (WAVE_DT
+  // apart) until nothing more gives way: a hit can stop at a notch or spread – wider, up, and
+  // down floor by floor – until the building comes down.
   // a piece's weight: the volume of its box (a plate's: thickness × area)
   const weightOf = (fr) => fr.wt || (fr.wt = Math.max(1e-6, (fr.hi[0] - fr.lo[0]) * (fr.hi[1] - fr.lo[1]) * (fr.hi[2] - fr.lo[2])));
-  // What every still piece carries: its own weight, what lies on it and what lands on it, plus
-  // what the pieces above pass on. Pieces are handled from the top down (by height; at the same
-  // height the one furthest from its support first); each passes its load to the touching pieces
-  // below it, and a little sideways to neighbours at its height that are nearer to their support
-  // (a slab carries towards the walls). That depends only on where pieces are, so a hole changes
-  // the loads around it and nowhere else. Pieces on the ground pass theirs into the ground.
-  function loadsOf(g, cost) {
-    const N = g.nodes.length, load = new Float64Array(N), rank = new Int32Array(N).fill(-1), list = [];
-    for (let i = 0; i < N; i++) {
-      const fr = g.nodes[i].fr; if (fr.state !== 'still' || !(cost[i] < Infinity)) continue;
-      list.push(i);
-      load[i] = weightOf(fr) + (fr.impact || 0);
-      if (fr.carried) for (const c of fr.carried) if (c.fr.holder === fr && c.fr.state !== 'gone' && c.fr.state !== 'eaten') load[i] += weightOf(c.fr);
-    }
-    const yk = (i) => Math.round(g.nodes[i].fr.pivot[1] * 100);
-    list.sort((a, b) => yk(b) - yk(a) || cost[b] - cost[a]);
-    list.forEach((a, k) => { rank[a] = k; });
-    const ws = [];
-    for (let k = 0; k < list.length; k++) {
-      const a = list[k], A = g.nodes[a].fr;
-      if (A.lo[1] < g.base + 0.02) continue;                        // on the ground
-      let sum = 0, under = 0; ws.length = 0;
-      for (const b of g.nb[a]) {
-        if (rank[b] <= k) continue;                                  // above it, or already done
-        const B = g.nodes[b].fr.pivot, dy = A.pivot[1] - B[1], dh = Math.hypot(A.pivot[0] - B[0], A.pivot[2] - B[2]);
-        let w;
-        if (dy > 0.5 * dh) { w = 1 / (1 + 8 * dh); under++; }      // under it
-        else if (cost[b] < cost[a]) w = 0.25 / (1 + 8 * dh);        // beside it, nearer its support
-        else continue;
-        ws.push(b, w); sum += w;
-      }
-      if (sum) for (let j = 0; j < ws.length; j += 2) load[ws[j]] += load[a] * ws[j + 1] / sum;
-    }
-    return load;
+  // which pieces stand (by gid), and the extra load on each (what lies on it, what landed on it since the last check)
+  function stillOf(st) {
+    const a = new Uint8Array(st.gidN || 0);
+    for (const set of st.sets) for (const fr of set.frs) if (fr.state === 'still' && fr.gid !== undefined) a[fr.gid] = 1;
+    return a;
   }
-  // Dijkstra from the ground over the still pieces: what each costs to hold up
-  function holdCosts(g) {
-    const N = g.nodes.length, cost = new Float64Array(N).fill(Infinity), hc = [], hi = [];
-    const push = (c, i) => { let k = hc.length; hc.push(c); hi.push(i); while (k) { const p = (k - 1) >> 1; if (hc[p] <= c) break; hc[k] = hc[p]; hi[k] = hi[p]; k = p; } hc[k] = c; hi[k] = i; };
-    const pop = () => {
-      const c = hc[0], i = hi[0], lc = hc.pop(), li = hi.pop();
-      if (hc.length) { let k = 0; for (;;) { let m = 2 * k + 1; if (m >= hc.length) break; if (m + 1 < hc.length && hc[m + 1] < hc[m]) m++; if (hc[m] >= lc) break; hc[k] = hc[m]; hi[k] = hi[m]; k = m; } hc[k] = lc; hi[k] = li; }
-      return [c, i];
-    };
-    const still = (i) => g.nodes[i].fr.state === 'still', done = new Uint8Array(N), order = [];
-    for (let i = 0; i < N; i++) if (still(i) && g.nodes[i].fr.lo[1] < g.base + 0.02) { cost[i] = 0; push(0, i); }
-    while (hc.length) {
-      const [c, a] = pop();
-      if (c > cost[a] || done[a]) continue;
-      done[a] = 1; order.push(a);                                   // (in this order: nearer the ground first – loadsOf)
-      if (c > 4) continue;
-      const A = g.nodes[a].fr.pivot;
-      for (const b of g.nb[a]) {
-        if (!still(b)) continue;
-        const B = g.nodes[b].fr.pivot, dy = B[1] - A[1], dh = Math.hypot(B[0] - A[0], B[2] - A[2]);
-        // the way sideways (on top of it: a little offset is free – pieces of storeys cut one by one
-        // don't line up); hanging from it costs more
-        const w = dy > 0.5 * dh ? Math.max(0, dh - SUPPORT_SLACK) : dy < -0.5 * dh ? dh - 2 * dy : dh;
-        if (c + w < cost[b]) { cost[b] = c + w; push(c + w, b); }
-      }
+  function extraOf(st) {
+    const a = new Float32Array(st.gidN || 0);
+    for (const set of st.sets) for (const fr of set.frs) {
+      if (fr.state !== 'still' || fr.gid === undefined) continue;
+      let x = fr.impact || 0; fr.impact = 0;
+      if (fr.carried) for (const c of fr.carried) if (c.fr.holder === fr && c.fr.state !== 'gone' && c.fr.state !== 'eaten') x += weightOf(c.fr);
+      a[fr.gid] = x;
     }
-    cost.order = order;
-    return cost;
+    return a;
   }
-  // After a hit the building is checked in waves (WAVE_DT apart) until nothing more gives way: a
-  // piece falls when nothing holds it any more (its cost grew by more than SUPPORT_SPAN, or no path
-  // is left) or when it's crushed (it carries more than the Stevigheid setting × its load in the
-  // intact building, ± STRENGTH_SPREAD). Its load goes to its neighbours, rubble that lands on a
-  // floor pushes on it, and the next wave sees that: a hit can stop at a notch or spread – wider,
-  // up, and down floor by floor – until the building comes down.
-  function settle(st, p) {
-    if (st.down || st.claimed || !st.ready) return 0;
+  // the first hit: the intact building is the baseline (sent before anything flies)
+  function baseline(st) {
+    if (st.damaged || st.claimed || !st.ready) return;
     st.damaged = true;
+    getCutter().post({ op: 'baseline', b: st.bd.id, still: stillOf(st), slack: SUPPORT_SLACK, spread: STRENGTH_SPREAD });
+  }
+  function settle(st, p) {
+    if (st.down || st.claimed || !st.ready) return;
     const w = st.collapse || (st.collapse = { t: 0, n: 0, quiet: 0, p });
     w.p = p; w.n = 0; w.quiet = 0;
-    return wave(st);
+    if (w.pending) w.t = WAVE_DT; else requestWave(st);
   }
   // rubble landed on the building: check again soon
-  function poke(st) { if (st && !st.down && !st.claimed && st.ready && !st.collapse) st.collapse = { t: 0, n: 0, quiet: 0, p: null }; }
+  function poke(st) { if (st && !st.down && !st.claimed && st.ready && st.damaged && !st.collapse) st.collapse = { t: 0, n: 0, quiet: 0, p: null }; }
   function stepCollapses(dt) {
     for (const st of solids.values()) {
       const w = st.collapse; if (!w) continue;
       if (st.down || st.claimed) { st.collapse = null; continue; }
+      if (w.pending) continue;
       w.t += dt; if (w.t < WAVE_DT) continue;
       w.t = 0;
-      const n = wave(st);
-      if (n) w.quiet = 0;
-      else if (!st.sets.some((set) => set.awake.length)) w.quiet++;   // nothing gave way and nothing is still falling
-      if (w.quiet >= 3 || ++w.n > WAVE_MAX) st.collapse = null;
+      requestWave(st);
     }
   }
   const strength = () => STRENGTH[(C() && C().settings ? C().settings.get('buildingStrength') : 1) ?? 1] || STRENGTH[1];
-  function wave(st) {
-    if (st.down || st.claimed || !st.ready) return 0;
-    const g = graphOf(st), cost = holdCosts(g), load = loadsOf(g, cost), reserve = strength(), fail = new Set();
-    // overload: load ÷ the intact building's load; judged over a piece and the still pieces it
-    // touches (the material around a hole shares the load – one overloaded piece alone holds)
-    const N = g.nodes.length, ratio = new Float64Array(N);
-    g.nodes.forEach((n, i) => { const fr = n.fr; if (fr.state === 'still') ratio[i] = load[i] / Math.max(fr.L0 || 0, 3 * weightOf(fr)); });
-    g.nodes.forEach((n, i) => {
-      const fr = n.fr; if (fr.state !== 'still') return;
-      let r = ratio[i], k = 1; for (const b of g.nb[i]) if (g.nodes[b].fr.state === 'still') { r += ratio[b]; k++; }
-      r /= k;
-      if (cost[i] > fr.c0 + SUPPORT_SPAN) fail.add(i);              // nothing holds it up
-      else if (r > reserve * fr.capF) fail.add(i);                  // crushed
+  function requestWave(st) {
+    const w = st.collapse; if (!w) return;
+    w.pending = true;
+    getCutter().send({ op: 'wave', b: st.bd.id, still: stillOf(st), extra: extraOf(st), reserve: strength(), span: SUPPORT_SPAN, slack: SUPPORT_SLACK, spread: STRENGTH_SPREAD }).then((m) => {
+      w.pending = false;
+      if (st.collapse !== w || st.down || st.claimed) return;
+      let n = 0;
+      try { n = applyWave(st, (m && m.blocks) || []); } catch (e) { console.warn('[buildings] wave', e); }
+      if (n) w.quiet = 0;
+      else if (!st.sets.some((set) => set.awake.length)) w.quiet++;   // nothing gave way and nothing is still falling
+      if (w.quiet >= 3 || ++w.n > WAVE_MAX) st.collapse = null;
     });
-    for (const n of g.nodes) if (n.fr.impact) n.fr.impact = 0;
-    if (!fail.size) return 0;
-    fallBlocks(st, g, fail);
-    let mx = 0, my = Infinity, mz = 0;
-    for (const i of fail) { const fr = g.nodes[i].fr; mx += fr.pivot[0] / fail.size; mz += fr.pivot[2] / fail.size; my = Math.min(my, fr.pivot[1]); }
-    if (fail.size > 8) {
+  }
+  // what gave way in one wave: groups of gids, each with the middle of where it still touched
+  // what stands (its hinge) or null
+  function applyWave(st, blocks) {
+    let count = 0, mx = 0, my = Infinity, mz = 0;
+    for (const b of blocks) {
+      const list = []; for (const gid of b.gids) { const e = st.byGid[gid]; if (e && e.fr.state === 'still') list.push(e); }
+      if (!list.length) continue;
+      fallGroup(st, list, b.hinge);
+      for (const { fr } of list) { mx += fr.pivot[0]; mz += fr.pivot[2]; my = Math.min(my, fr.pivot[1]); }
+      count += list.length;
+    }
+    if (!count) return 0;
+    mx /= count; mz /= count;
+    if (count > 8) {
       sound('crack'); setTimeout(() => sound('boom'), 600);
-      if (DUST > 0) for (let k = 0; k < Math.min(14, fail.size / 4) * DUST; k++) dust(mx + rnd(-0.15, 0.15), Math.max(0.06, my), mz + rnd(-0.15, 0.15),
+      if (DUST > 0) for (let k = 0; k < Math.min(14, count / 4) * DUST; k++) dust(mx + rnd(-0.15, 0.15), Math.max(0.06, my), mz + rnd(-0.15, 0.15),
         { vx: rnd(-0.3, 0.3), vy: rnd(-0.1, 0.1), vz: rnd(-0.3, 0.3), rise: 0.03, drag: 0.8, size: rnd(0.06, 0.12), grow: 5, life: rnd(4, 7), alpha: 0.6, delay: rnd(0.3, 1) });
     }
     // so little left standing: the rest comes down too
-    let left = 0, all = 0; for (const n of g.nodes) { if (n.fr.state === 'gone') continue; all++; if (n.fr.state === 'still') left++; }
+    let left = 0, all = 0; for (const set of st.sets) for (const fr of set.frs) { if (fr.state === 'gone') continue; all++; if (fr.state === 'still') left++; }
     if (all && left / all < 0.35) collapse(st.bd, { at: (st.collapse && st.collapse.p) || { x: mx, y: my, z: mz } });
-    return fail.size;
+    return count;
   }
-  // What gives way in one wave, in connected sections: a section of a few pieces falls as one block
-  // – tipping over around the side that still holds it (a hinge), or straight down when it's held
-  // all round or not at all – and breaks up when it hits something; single pieces just drop.
-  function fallBlocks(st, g, fail) {
-    const seen = new Set();
-    for (const start of fail) {
-      if (seen.has(start)) continue;
-      const comp = [start]; seen.add(start);
-      for (let k = 0; k < comp.length; k++) for (const b of g.nb[comp[k]]) if (fail.has(b) && !seen.has(b)) { seen.add(b); comp.push(b); }
-      if (comp.length < 3) {
-        for (const i of comp) { const { fr, set } = g.nodes[i]; launch(set, fr, [rnd(-0.08, 0.08), rnd(-0.25, 0), rnd(-0.08, 0.08)], rnd(0, 0.15), rnd(0.3, 2)); landOn(st, set, fr); }
-        continue;
-      }
-      const c0 = [0, 0, 0]; for (const i of comp) for (let a = 0; a < 3; a++) c0[a] += g.nodes[i].fr.pivot[a] / comp.length;
-      // where it still touches what stands: the hinge
-      let hx = 0, hy = 0, hz = 0, hn = 0, ext = 0;
-      for (const i of comp) {
-        const fr = g.nodes[i].fr; ext = Math.max(ext, Math.hypot(fr.pivot[0] - c0[0], fr.pivot[2] - c0[2]));
-        if (g.nb[i].some((b) => !fail.has(b) && g.nodes[b].fr.state === 'still')) { hx += fr.pivot[0]; hy += fr.pivot[1]; hz += fr.pivot[2]; hn++; }
-      }
-      const blk = { frs: [], c0, P: c0.slice(), v: [rnd(-0.05, 0.05), -0.05, rnd(-0.05, 0.05)], R: [1, 0, 0, 0, 1, 0, 0, 0, 1], w: 0, theta: 0, hinge: null, free: true, broken: false, frame: -1 };
-      if (hn) {
-        const h = [hx / hn, hy / hn, hz / hn], dx = c0[0] - h[0], dz = c0[2] - h[2], dl = Math.hypot(dx, dz);
-        if (dl > Math.max(0.05, 0.25 * ext)) { blk.hinge = h; blk.free = false; blk.axis = [dz / dl, 0, -dx / dl]; }
-      }
-      if (blk.free) { const a = rnd(0, 6.3); blk.axis = [Math.cos(a), 0, Math.sin(a)]; blk.w = rnd(0.1, 0.5); }
-      for (const i of comp) {
-        const { fr, set } = g.nodes[i];
-        launch(set, fr, [0, 0, 0], 0, 0);
-        fr.block = blk; blk.frs.push(fr);
-      }
-      for (const i of comp) { const { fr, set } = g.nodes[i]; landOn(st, set, fr); }
+  // One group that gives way: a few pieces just drop; a bigger section falls as one block –
+  // tipping over around the side that still holds it (a hinge), or straight down when it's held
+  // all round or not at all – and breaks up when it hits something.
+  function fallGroup(st, list, hinge) {
+    if (list.length < 3) {
+      for (const { fr, set } of list) { launch(set, fr, [rnd(-0.08, 0.08), rnd(-0.25, 0), rnd(-0.08, 0.08)], rnd(0, 0.15), rnd(0.3, 2)); landOn(st, set, fr); }
+      return;
     }
+    const c0 = [0, 0, 0]; for (const { fr } of list) for (let a = 0; a < 3; a++) c0[a] += fr.pivot[a] / list.length;
+    let ext = 0; for (const { fr } of list) ext = Math.max(ext, Math.hypot(fr.pivot[0] - c0[0], fr.pivot[2] - c0[2]));
+    const blk = { frs: [], c0, P: c0.slice(), v: [rnd(-0.05, 0.05), -0.05, rnd(-0.05, 0.05)], R: [1, 0, 0, 0, 1, 0, 0, 0, 1], w: 0, theta: 0, hinge: null, free: true, broken: false, frame: -1 };
+    if (hinge) {
+      const dx = c0[0] - hinge[0], dz = c0[2] - hinge[2], dl = Math.hypot(dx, dz);
+      if (dl > Math.max(0.05, 0.25 * ext)) { blk.hinge = hinge; blk.free = false; blk.axis = [dz / dl, 0, -dx / dl]; }
+    }
+    if (blk.free) { const a = rnd(0, 6.3); blk.axis = [Math.cos(a), 0, Math.sin(a)]; blk.w = rnd(0.1, 0.5); }
+    for (const { fr, set } of list) { launch(set, fr, [0, 0, 0], 0, 0); fr.block = blk; blk.frs.push(fr); }
+    for (const { fr, set } of list) landOn(st, set, fr);
+  }
+  // gid → { fr, set } for a building's pieces (after the cut and after each refinement)
+  function indexGids(st, set, gid0) {
+    if (!st.byGid) st.byGid = [];
+    set.frs.forEach((fr, i) => { fr.gid = gid0 + i; st.byGid[fr.gid] = { fr, set }; });
+    st.gidN = Math.max(st.gidN || 0, gid0 + set.frs.length);
   }
   let frameNo = 0;
   // one step of a falling block: around its hinge, then free (gravity, turning on)
@@ -1658,6 +1569,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
           uv[k * 2] = v.uv[0]; uv[k * 2 + 1] = v.uv[1];
           k++;
         }
+        pc.pivot = [px, py, pz];
         const n = pc.normal || [0, -1, 0], o = i * 14;
         meta[o] = start; meta[o + 1] = k - start; meta[o + 2] = px; meta[o + 3] = py; meta[o + 4] = pz;
         meta[o + 5] = n[0]; meta[o + 6] = n[1]; meta[o + 7] = n[2];
@@ -1674,7 +1586,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     const buildings = new Map();   // b → { pieces, done }
     function* cut(msg) {
       const boxes = msg.boxes, size = msg.size, pieces = [];
-      const bld = { pieces, done: false };
+      const bld = { pieces, all: null, size, done: false };
       buildings.set(msg.b, bld);
       for (const b of boxes) b.siblings = boxes;
       for (const b of boxes) {
@@ -1693,6 +1605,7 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
         }
       }
       const out = pack(pieces, false);
+      bld.all = pieces.slice();                                     // gid = index: the cut's pieces first
       bld.done = true;
       return { msg: { op: 'cut', job: msg.job, b: msg.b, data: out.data }, transfer: out.transfer };
     }
@@ -1738,9 +1651,132 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
         yield;
       }
       if (!pieces.length) return empty;
-      const out = pack(pieces, true);
-      return { msg: { op: 'refine', job: msg.job, b: msg.b, data: out.data, victims }, transfer: out.transfer };
+      const out = pack(pieces, true), gid0 = bld.all.length;
+      for (const pc of pieces) bld.all.push(pc);                    // their gids follow
+      return { msg: { op: 'refine', job: msg.job, b: msg.b, data: out.data, victims, gid0 }, transfer: out.transfer };
     }
+    // ---- the support graph (the page's progressive collapse; the page sends its measures: span, slack, spread, reserve) ----
+    // bld.all: every piece cut for the building, by gid. graphOf: which touch (boxes within 0.012,
+    // through a spatial hash), made again when there are new pieces. The page sends still[gid] and
+    // extra[gid] (rubble on it); holdCosts: Dijkstra from the pieces on the ground over the still
+    // ones, a step costing how far it goes sideways (on top: minus slack; hanging: more); loadsOf:
+    // every still piece's weight + extra, handed down from the top (by height, the furthest from
+    // support first) to the touching pieces under it and a little sideways towards support.
+    // Baseline (the first hit, intact): c0 = cost, L0 = load, capF = 1 ± spread; pieces cut finer
+    // later inherit their coarse chunk's (cost + half its size, load × footprint share × 1.5).
+    // A wave: a piece gives way when its cost grew by more than span, or its overload (load ÷
+    // max(L0, 3 × weight), averaged over it and its still neighbours) is above reserve × capF.
+    const wt = (pc) => pc.wt || (pc.wt = Math.max(1e-6, (pc.hi[0] - pc.lo[0]) * (pc.hi[1] - pc.lo[1]) * (pc.hi[2] - pc.lo[2])));
+    function graphOf(bld) {
+      if (bld.adj && bld.adjN === bld.all.length) return bld.adj;
+      const A = bld.all, N = A.length, E = 0.012, cell = Math.max(0.1, bld.size || 0.2), grid = new Map(), nb = A.map(() => []);
+      const touch = (a, b) => a.lo[0] <= b.hi[0] + E && b.lo[0] <= a.hi[0] + E && a.lo[1] <= b.hi[1] + E && b.lo[1] <= a.hi[1] + E && a.lo[2] <= b.hi[2] + E && b.lo[2] <= a.hi[2] + E;
+      let base = Infinity;
+      for (let a = 0; a < N; a++) {
+        const { lo, hi } = A[a];
+        if (lo[1] < base) base = lo[1];
+        for (let i = Math.floor((lo[0] - E) / cell); i <= Math.floor((hi[0] + E) / cell); i++)
+          for (let j = Math.floor((lo[1] - E) / cell); j <= Math.floor((hi[1] + E) / cell); j++)
+            for (let k = Math.floor((lo[2] - E) / cell); k <= Math.floor((hi[2] + E) / cell); k++) {
+              const key = ((i + 2000) * 4096 + (j + 2000)) * 4096 + (k + 2000);
+              let c = grid.get(key); if (!c) grid.set(key, (c = []));
+              for (const b of c) if (!nb[a].includes(b) && touch(A[a], A[b])) { nb[a].push(b); nb[b].push(a); }
+              c.push(a);
+            }
+      }
+      bld.adj = { nb, base }; bld.adjN = N;
+      return bld.adj;
+    }
+    function holdCosts(A, g, still, SLACK) {
+      const N = A.length, cost = new Float64Array(N).fill(Infinity), hc = [], hi = [], done = new Uint8Array(N), order = [];
+      const push = (c, i) => { let k = hc.length; hc.push(c); hi.push(i); while (k) { const p = (k - 1) >> 1; if (hc[p] <= c) break; hc[k] = hc[p]; hi[k] = hi[p]; k = p; } hc[k] = c; hi[k] = i; };
+      const pop = () => {
+        const c = hc[0], i = hi[0], lc = hc.pop(), li = hi.pop();
+        if (hc.length) { let k = 0; for (;;) { let m = 2 * k + 1; if (m >= hc.length) break; if (m + 1 < hc.length && hc[m + 1] < hc[m]) m++; if (hc[m] >= lc) break; hc[k] = hc[m]; hi[k] = hi[m]; k = m; } hc[k] = lc; hi[k] = li; }
+        return [c, i];
+      };
+      for (let i = 0; i < N; i++) if (still[i] && A[i].lo[1] < g.base + 0.02) { cost[i] = 0; push(0, i); }
+      while (hc.length) {
+        const [c, a] = pop();
+        if (c > cost[a] || done[a]) continue;
+        done[a] = 1; order.push(a);
+        if (c > 4) continue;
+        const P = A[a].pivot;
+        for (const b of g.nb[a]) {
+          if (!still[b]) continue;
+          const Q = A[b].pivot, dy = Q[1] - P[1], dh = Math.hypot(Q[0] - P[0], Q[2] - P[2]);
+          const w = dy > 0.5 * dh ? Math.max(0, dh - SLACK) : dy < -0.5 * dh ? dh - 2 * dy : dh;
+          if (c + w < cost[b]) { cost[b] = c + w; push(c + w, b); }
+        }
+      }
+      cost.order = order;
+      return cost;
+    }
+    function loadsOf(A, g, still, cost, extra) {
+      const N = A.length, load = new Float64Array(N), rank = new Int32Array(N).fill(-1), list = [];
+      for (let i = 0; i < N; i++) { if (!still[i] || !(cost[i] < Infinity)) continue; list.push(i); load[i] = wt(A[i]) + ((extra && extra[i]) || 0); }
+      const yk = (i) => Math.round(A[i].pivot[1] * 100);
+      list.sort((a, b) => yk(b) - yk(a) || cost[b] - cost[a]);
+      list.forEach((a, k) => { rank[a] = k; });
+      const ws = [];
+      for (let k = 0; k < list.length; k++) {
+        const a = list[k], P = A[a].pivot;
+        if (A[a].lo[1] < g.base + 0.02) continue;                   // on the ground
+        let sum = 0; ws.length = 0;
+        for (const b of g.nb[a]) {
+          if (rank[b] <= k) continue;
+          const Q = A[b].pivot, dy = P[1] - Q[1], dh = Math.hypot(P[0] - Q[0], P[2] - Q[2]);
+          let w;
+          if (dy > 0.5 * dh) w = 1 / (1 + 8 * dh);                     // under it
+          else if (cost[b] < cost[a]) w = 0.25 / (1 + 8 * dh);         // beside it, nearer its support
+          else continue;
+          ws.push(b, w); sum += w;
+        }
+        if (sum) for (let j = 0; j < ws.length; j += 2) load[ws[j]] += load[a] * ws[j + 1] / sum;
+      }
+      return load;
+    }
+    const stillArr = (bld, s) => { const a = new Uint8Array(bld.all.length); if (s) a.set(s.length > a.length ? s.subarray(0, a.length) : s); return a; };
+    function baseline(msg) {
+      const bld = buildings.get(msg.b); if (!bld || !bld.all) return;
+      const A = bld.all, g = graphOf(bld), still = stillArr(bld, msg.still), cost = holdCosts(A, g, still, msg.slack), load = loadsOf(A, g, still, cost, null);
+      for (let i = 0; i < A.length; i++) if (still[i]) { A[i].c0 = cost[i]; A[i].L0 = load[i]; if (A[i].capF === undefined) A[i].capF = 1 + rnd(-msg.spread, msg.spread); }
+      bld.based = true;
+    }
+    function wave(msg) {
+      const bld = buildings.get(msg.b), reply = { op: 'wave', job: msg.job, b: msg.b, blocks: [] };
+      if (!bld || !bld.all) return reply;
+      const A = bld.all, g = graphOf(bld), still = stillArr(bld, msg.still), extra = msg.extra;
+      const cost = holdCosts(A, g, still, msg.slack), load = loadsOf(A, g, still, cost, extra);
+      const foot = (f) => Math.max(1e-6, (f.hi[0] - f.lo[0]) * (f.hi[2] - f.lo[2]));
+      for (let i = 0; i < A.length; i++) {                          // pieces without a baseline yet
+        const pc = A[i]; if (!still[i] || pc.c0 !== undefined) continue;
+        const src = pc.src !== undefined ? A[pc.src] : null;
+        if (src && src.c0 !== undefined) { pc.c0 = src.c0 + 0.5 * Math.max(src.hi[0] - src.lo[0], src.hi[2] - src.lo[2]); pc.L0 = src.L0 * Math.min(1, foot(pc) / foot(src)) * 1.5; }
+        else { pc.c0 = cost[i]; pc.L0 = load[i]; }
+        if (pc.capF === undefined) pc.capF = 1 + rnd(-msg.spread, msg.spread);
+      }
+      const N = A.length, ratio = new Float64Array(N), fail = new Set();
+      for (let i = 0; i < N; i++) if (still[i]) ratio[i] = load[i] / Math.max(A[i].L0 || 0, 3 * wt(A[i]));
+      for (let i = 0; i < N; i++) {
+        if (!still[i]) continue;
+        let r = ratio[i], k = 1; for (const b of g.nb[i]) if (still[b]) { r += ratio[b]; k++; }
+        r /= k;
+        if (cost[i] > A[i].c0 + msg.span || r > msg.reserve * A[i].capF) fail.add(i);
+      }
+      // in connected groups, each with the middle of where it still touches what stands
+      const seen = new Set();
+      for (const start of fail) {
+        if (seen.has(start)) continue;
+        const comp = [start]; seen.add(start);
+        for (let k = 0; k < comp.length; k++) for (const b of g.nb[comp[k]]) if (fail.has(b) && !seen.has(b)) { seen.add(b); comp.push(b); }
+        let hx = 0, hy = 0, hz = 0, hn = 0;
+        for (const i of comp) if (g.nb[i].some((b) => still[b] && !fail.has(b))) { const P = A[i].pivot; hx += P[0]; hy += P[1]; hz += P[2]; hn++; }
+        reply.blocks.push({ gids: comp, hinge: hn ? [hx / hn, hy / hn, hz / hn] : null });
+      }
+      return reply;
+    }
+
     const jobs = [];
     let running = false;
     function pick() {
@@ -1767,6 +1803,8 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
       if (m.op === 'cut' || m.op === 'refine') jobs.push({ kind: m.op, job: m.job, b: m.b, prio: m.prio || 1, gen: m.op === 'cut' ? cut(m) : refine(m) });
       else if (m.op === 'prio') { for (const j of jobs) if (j.b === m.b) j.prio = Math.max(j.prio, m.prio); }
       else if (m.op === 'drop') buildings.delete(m.b);
+      else if (m.op === 'baseline') baseline(m);
+      else if (m.op === 'wave') port.postMessage(wave(m));         // quick: between the cutting slices
       if (jobs.length && !running) { running = true; setTimeout(tick, 0); }
     };
     port.postMessage({ op: 'ready' });
