@@ -255,7 +255,7 @@
   const post = (() => {
     let RT = null, Depth = null;                  // WebGLRenderTarget, DepthTexture
     let frames = 0;
-    let sceneRT = null, aoRT = null, shaftRT = null, quad = null, quadScene = null, aoMat = null, shaftMat = null, outMat = null, failed = false;
+    let sceneRT = null, aoRT = null, shaftRT = null, quad = null, quadScene = null, aoMat = null, shaftMat = null, burstMat = null, outMat = null, failed = false;
     let sun = null, kick = 0, lastT = 0, windT = 0;
     const v3 = (x = 0, y = 0, z = 0) => ({ x, y, z, isVector3: true });
     const U = {
@@ -340,7 +340,9 @@
     //   screen, of what's bright near the fireball: rays fan out from it, cut off by what's in front.
     const SHAFT_FRAG = `
       uniform sampler2D tDepth, tColor;
+      #ifdef SUN
       uniform sampler2DShadow tShadow;
+      #endif
       uniform mat4 projInv, viewInv, shadowMat;
       uniform vec3 sunCol, burstUv, burstCol, hazeCol, windOff;
       uniform vec2 size;
@@ -362,6 +364,7 @@
         float jit = hash( gl_FragCoord.xy );
         vec3 light = vec3( 0.0 );
         float fog = 0.0;
+        #ifdef SUN
         if ( sunOn > 0.5 ) {
           float d = min( texture2D( tDepth, vUv ).x, 0.99999 );
           vec3 O = worldAt( vUv, 0.0 ), D = worldAt( vUv, d ) - O;
@@ -395,6 +398,7 @@
             fog = haze * ( 1.0 - litShare );
           }
         }
+        #endif
         if ( burstOn > 0.0 ) {
           vec2 asp = vec2( size.x / size.y, 1.0 );
           vec2 delta = burstUv.xy - vUv;
@@ -494,7 +498,10 @@
       const g = new K.Geometry();
       g.setAttribute('position', new K.Attr(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
       aoMat = shaderMat(core, AO_FRAG, 'sc-ssao', false);
-      shaftMat = shaderMat(core, SHAFT_FRAG, 'sc-shafts', false);
+      // two builds: with the sun's shadow map, and without it for bursts only (a sampler2DShadow with
+      // no shadow map bound makes WebGL skip the whole draw – the rays never showed)
+      shaftMat = shaderMat(core, '#define SUN\n' + SHAFT_FRAG, 'sc-shafts-sun', false);
+      burstMat = shaderMat(core, SHAFT_FRAG, 'sc-shafts', false);
       outMat = shaderMat(core, OUT_FRAG, 'sc-post-out', true);
       quad = new K.Mesh(g, aoMat);
       quad.frustumCulled = false;
@@ -543,7 +550,7 @@
       const shafts = S.get('shafts'), lens = S.get('lens');
       const L = findSun(core);
       const burst = shafts > 0 ? strongestBurst() : null;
-      if (burst && lens > 0) kick = Math.max(kick, Math.min(1, burst.strength * BURST_KICK));
+      if (burst && lens > 0) kick = Math.max(kick, Math.min(1, (burst.strength - 0.6) * BURST_KICK));   // the flash, not the glow after it
       const aoOn = S.get('ao') && !night;
       const edgeOn = S.get('outlines');
       const sunOn = shafts === 2 && !night && L && L.castShadow && r.shadowMap.enabled && L.shadow && L.shadow.map
@@ -603,7 +610,7 @@
         const ac = r.autoClear;
         r.autoClear = false;
         if (aoOn) { quad.material = aoMat; r.setRenderTarget(aoRT); raw(quadScene, c); }
-        if (U.shaftOn.value) { quad.material = shaftMat; r.setRenderTarget(shaftRT); raw(quadScene, c); }
+        if (U.shaftOn.value) { quad.material = sunOn ? shaftMat : burstMat; r.setRenderTarget(shaftRT); raw(quadScene, c); }
         quad.material = outMat;
         r.setRenderTarget(prev);
         raw(quadScene, c);
