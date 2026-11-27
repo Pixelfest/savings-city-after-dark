@@ -411,6 +411,22 @@ Buildings 1.9 / walk mode 1.39 / nuke 3.7 – lower heaps, inside colours, local
   `scBuildings.covers(id)` and asks `ray` instead, so bullets and rockets (they use
   `rayBuildings`) go through holes; a blast at that point makes the crater inside.
 
+Buildings 1.10 – settled rubble is left alone. Before, `stepSets` looped over every piece of an
+active set and uploaded one range from the lowest to the highest moving piece: nearly the whole
+buffer every frame as long as one piece moved. Now `launch` puts a piece on `set.awake` (flag
+`fr.awake`); `stepSets` only steps that list, drops pieces that came to rest, were swallowed or are
+gone (after their last upload), and `upload()` sends only the moved pieces' vertices: sorted by
+`start`, runs less than `UPLOAD_GAP` (256) vertices apart merged, the gap doubled until there are
+at most `MAX_UPLOAD_RUNS` (48) runs (three.js makes one `bufferSubData` per range and only merges
+ranges that touch). Pieces launched during the step (drops) are appended to `set.awake` and kept.
+Measured in the local runner (SwiftShader: a frame advances 0.05 s, so the tail has few frames;
+in a real browser at 60 fps the tail, pieces sliding and tipping, is most of the frames), upload of
+the chunk meshes per frame (counted with a patched `addUpdateRange`), old → new:
+shell collapse of the 1.2 × 1.2 × 1.57 tower: 10–50 % of pieces moving 613 → 392 KB, under 10 %
+580 → 61 KB, 12.3 → 8.7 MB in all; 1 kt nuke (1470 pieces): all moving 1212 → 1212 KB (nothing to
+save), 10–50 % 1160 → 682 KB, under 10 % 351 → 151 KB, 76.6 → 70.5 MB. Uploads per frame: about 2 →
+up to 48 calls per set.
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`
