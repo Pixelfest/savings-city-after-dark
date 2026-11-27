@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – graphics
 // @namespace    savings-city-tweaks
-// @version      1.3
+// @version      1.4
 // @description  Graphics settings in the settings popup (needs the core): winter on/off, day and night or always day/night, shadows, ambient occlusion and bigger pixels.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -262,6 +262,9 @@
         }
         const prev = r.getRenderTarget();
         r.setRenderTarget(sceneRT);
+        // The app's bloom composer clears its own target and then renders with autoClear off, so our
+        // target would never be cleared: every frame piled onto the last (moving things smeared).
+        r.clear(true, true, true);
         raw(s, c);
         U.tDepth.value = sceneRT.depthTexture; U.tColor.value = sceneRT.texture; U.tAO.value = aoRT.texture;
         U.proj.value.copy(c.projectionMatrix); U.projInv.value.copy(c.projectionMatrixInverse);

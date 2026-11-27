@@ -66,6 +66,10 @@ placeholder `https://your-savings-city-host.example/`.
   target, and the AO output goes back into the composer's target (`prev`) for the composer to finish
   (tone mapping and colour space come from its last pass). Daylight only: `scCore.view().night > 0.5`
   skips it. Check with `window.scGraphics.ao.state()` (`frames` grows when it runs).
+  **Graphics 1.4:** the composer's render pass clears its own target and then renders with
+  `renderer.autoClear = false`, so the AO's scene target was never cleared and every frame piled
+  onto the last (anything moving – rain, snow, cars – smeared into streaks). The AO now clears its
+  scene target (`renderer.clear()`) before drawing into it.
 
 ## Night lights and lights out (core 1.6, buildings 1.5, nuke 3.5)
 
