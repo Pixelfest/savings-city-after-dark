@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      2.2
+// @version      2.3
 // @description  The app's people (who walk the sidewalks, cross at junctions and go in and out of buildings) now react to everything: shot, blown up, set alight, run over, buried. Panicking people run, scream and hide. A density slider.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -208,7 +208,7 @@
   // (or its slot is needed, the oldest first). The API takes a person or their id (from hit()).
   const own = [];                  // our figures, by slot (a gone figure's slot is reused)
   const ownSet = new WeakSet();
-  const MAX_OWN = 1000;            // slots for people handed over
+  const MAX_OWN = MAX_PEOPLE;      // slots for people handed over (the app's crowd is capped at 4000 too)
   let idCounter = 0;
   let crowdTarget = 0;             // the app's crowd: the length of its list after its last populate()
   let zoneCheckAt = 0, topUpAt = 0;
@@ -243,8 +243,9 @@
     if (P && P.list.indexOf(x) >= 0) return x;
     return x.scId === undefined ? null : find(x.scId);       // handed over since: their id finds the new figure
   }
-  // a slot for a figure of ours: a gone one's, a new one, or (when full) the oldest one lying down
-  function freeSlot() {
+  // a slot for a figure of ours: a gone one's, a new one, or (when full and evict) the oldest one
+  // lying down. Only someone who dies takes a body's slot: a runner never makes a body disappear.
+  function freeSlot(evict = true) {
     let oldest = -1;
     for (let i = 0; i < own.length; i++) {
       const p = own[i];
@@ -252,7 +253,7 @@
       if (p.state === 'down' && (oldest < 0 || p.since < own[oldest].since)) oldest = i;
     }
     if (own.length < MAX_OWN) return own.length;
-    if (oldest < 0) return -1;
+    if (oldest < 0 || !evict) return -1;
     own[oldest].state = 'gone';
     return oldest;
   }
@@ -270,12 +271,13 @@
     for (const m of P.parts) { m.count = P.list.length; m.instanceMatrix.needsUpdate = true; }
   }
   // the app's person taken over into one of ours (their colours, bald flag and place); null if no slot
-  function adopt(p) {
+  // (evict = false: not at the cost of a body, for someone who only runs)
+  function adopt(p, evict = true) {
     const P = nativeCrowd();
     if (!P || !built || !legs) return null;
     const i = P.list.indexOf(p);
     if (i < 0) return null;
-    const slot = freeSlot();
+    const slot = freeSlot(evict);
     if (slot < 0) return null;
     const Col = torsos.material.color.constructor, c = new Col();
     for (const [src, dst] of [[P.legs, legs], [P.torsos, torsos], [P.heads, heads], [P.hairs, hairs]]) {
@@ -299,8 +301,8 @@
     }
     return r;
   }
-  // our figure for this person (taking the app's one over if it's still the app's)
-  function ownOf(p) { if (!p) return null; return ownSet.has(p) ? p : adopt(p); }
+  // our figure for this person (taking the app's one over if it's still the app's); evict: see adopt
+  function ownOf(p, evict = true) { if (!p) return null; return ownSet.has(p) ? p : adopt(p, evict); }
   // a living figure of ours for x (an id or a person), or null
   function alive(x) {
     const q = find(x);
@@ -1208,8 +1210,9 @@
     }
     const P = nativeCrowd();
     if (P && !P.scHooked) hookCrowd(P);
-    // the app's list is topped up when people have been taken out of it (at most twice a second)
-    if (P && P.list.length < crowdTarget && t - topUpAt > 500) { topUpAt = t; P.populate(); }
+    // the app's list is topped up when people have been taken out of it (at most twice a second);
+    // not after a nuke (a zone that stays for good): the dead stay dead, nobody new walks the ruins
+    if (P && P.list.length < crowdTarget && t - topUpAt > 500 && !zones.some((z) => z.until === Infinity)) { topUpAt = t; P.populate(); }
     if (!tip) {
       tip = new M(); bodyM = new M(); headM = new M();
       childBody = new M().makeScale(CHILD_WIDTH, CHILD_HEIGHT, CHILD_WIDTH);
@@ -1224,7 +1227,7 @@
       if (zonesNow) zoneCheckAt = t;
       for (const q of P.list.slice()) {
         if (q.state === 'inside') continue;
-        if (zonesNow && zoneAt(q.x, q.z)) { const r = ownOf(q); if (r) r.panic = Math.max(r.panic || 0, 3); continue; }
+        if (zonesNow && zoneAt(q.x, q.z)) { const r = ownOf(q, false); if (r) r.panic = Math.max(r.panic || 0, 3); continue; }
         if (carsByTile) hitByCar(q, carsByTile);
       }
     }
@@ -1511,7 +1514,7 @@
       for (const q of everyone()) {
         if (q.state === 'inside' || q.state === 'down' || q.state === 'gone') continue;
         if (Math.hypot(q.x - x, q.z - z) > radius) continue;
-        const p = ownOf(q);
+        const p = ownOf(q, false);
         if (p) { panic(p, x, z, seconds); fled++; }
       }
       return fled;
@@ -1527,7 +1530,7 @@
         const dx = q.x - x, dz = q.z - z, dist = Math.hypot(dx, dz);
         if (fireFrom !== undefined && dist >= fireFrom && dist <= fireFrom + BLAST_FIRE_BAND && Math.random() < BLAST_FIRE_CHANCE && ignite(q, x, z)) burned++;
         else if (dist <= knockRadius) { const p = ownOf(q); if (p && knockDownP(p, { x: dx || 1e-3, y: 0, z: dz }, 'blast')) down++; }
-        else if (dist <= panicRadius) { const p = ownOf(q); if (p) { panic(p, x, z, panicSeconds); fled++; } }
+        else if (dist <= panicRadius) { const p = ownOf(q, false); if (p) { panic(p, x, z, panicSeconds); fled++; } }
       }
       return { down, fled, burned };
     },
@@ -1568,7 +1571,7 @@
           continue;
         }
         const ox = Math.max(x0 - q.x, 0, q.x - x1), oz = Math.max(z0 - q.z, 0, q.z - z1), d = Math.hypot(ox, oz);
-        const p = ownOf(q);
+        const p = ownOf(q, d <= margin);
         if (!p) continue;
         if (d <= margin) { if (knockDownP(p, { x: p.x - cx || 1e-3, y: -0.5, z: p.z - cz }, 'collapse')) n++; }
         else if (d <= panicRadius) panic(p, cx, cz, 10);

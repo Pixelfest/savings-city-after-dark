@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 /*
- * Needs walk mode (1.36 or newer: plugin weapons, rayBuildings, hitCar, hitProp, onKey), the core
+ * Needs walk mode (1.37 or newer: plugin weapons, rayBuildings, hitCar, hitProp, onKey), the core
  * (classes, frame loop, sound output) and residents (skin(i, cause) with the person's colours,
  * spatter, screamAt, addRunner, knockDown). Officers are pinned with cops 1.16 or newer (pin).
  *
