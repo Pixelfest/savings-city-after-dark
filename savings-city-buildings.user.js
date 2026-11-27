@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.9
+// @version      1.10
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -54,6 +54,7 @@
  *   Either way a jagged stump stays, dust rolls out, people inside and right next to it die
  *   (residents' crush, sc:crush), and walk mode rebuilds its walls (sc:geometry-changed).
  * - Chunk physics: gravity, tumbling, landing on the ground, tipping onto the largest face, rest.
+ *   Settled rubble is left alone: only moving pieces are stepped and uploaded (set.awake).
  *
  * - Two building models (the setting "Gebouwen bij vernielen", read when a building is first cut):
  *     solid ("Massief"): every box is one solid block, cut into chunks (as above);
@@ -174,7 +175,7 @@
     mesh.castShadow = mesh.receiveShadow = true; mesh.frustumCulled = false; mesh.userData.scSolid = true;
     mesh.visible = !opts.hidden;
     (opts.parent || scene()).add(mesh);
-    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null, st: opts.st || null };
+    const set = { mesh, g, pos: g.attributes.position, nor: g.attributes.normal, col: g.attributes.color, frs, active: false, dusty: !!opts.dusty, piles: !!opts.piles, center: opts.center || null, st: opts.st || null, awake: [] };
     sets.add(set);
     return set;
   }
@@ -211,6 +212,7 @@
     }
     let ax = rnd(-1, 1), ay = rnd(-0.5, 0.5), az = rnd(-1, 1); const al = Math.hypot(ax, ay, az) || 1;
     Object.assign(fr, { state: 'flying', v, delay, R: [1, 0, 0, 0, 1, 0, 0, 0, 1], off: [0, 0, 0], axis: [ax / al, ay / al, az / al], w: spin, landed: false, age: 0, slide });
+    if (!fr.awake) { fr.awake = true; set.awake.push(fr); }        // the frame loop looks at this one again
     set.active = true;
   }
   // a piece that loses what it lay on falls from where it is (no push)
@@ -220,17 +222,23 @@
     Object.assign(fr, lying);
     if (set.st) landOn(set.st, set, fr);
   }
+  // Settled rubble is left alone: every set keeps a list of its pieces that move (set.awake, filled
+  // by launch), the frame loop only looks at those, and only their vertices go to the GPU again –
+  // in runs (pieces close together in the buffer in one upload; MAX_UPLOAD_RUNS calls at most). A
+  // piece that comes to rest (or is swallowed) drops off the list after its last upload; the GPU
+  // keeps its vertices where they are. Before, one range from the lowest to the highest moving
+  // piece went up every frame: nearly the whole buffer as long as anything moved.
   function stepSets(dt) {
     if (!dt) return;
     for (const set of sets) {
       if (!set.active) continue;
-      let lo = Infinity, hi = -1, busy = false;
-      for (const fr of set.frs) {
-        if (fr.state !== 'flying') continue;
-        busy = true;
-        if (fr.delay > 0) { fr.delay -= dt; continue; }
+      const moved = [], awake = [], list = set.awake, n0 = list.length;
+      for (let i = 0; i < n0; i++) {
+        const fr = list[i];
+        if (fr.state !== 'flying') { fr.awake = false; continue; }
+        if (fr.delay > 0) { fr.delay -= dt; awake.push(fr); continue; }
         fr.age += dt;
-        if (wells.size && pull(fr, dt)) { lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count); continue; }
+        if (wells.size && pull(fr, dt)) { moved.push(fr); if (fr.state === 'flying') awake.push(fr); else fr.awake = false; continue; }
         fr.v[1] -= 6 * dt * (fr.lift ? 1 - fr.lift : 1);             // gravity (less inside a well)
         for (let a = 0; a < 3; a++) fr.off[a] += fr.v[a] * dt;
         if (!fr.landed) fr.R = mul(rot(...fr.axis, fr.w * dt), fr.R);   // tumbling through the air
@@ -268,11 +276,35 @@
         }
         // lying (nearly) still and (nearly) flat: other rubble lands on it from now on
         if (set.piles && fr.landed && !fr.stamp && !(fr.floorY > GROUND + 0.01) && (fr.state === 'rest' || (fr.flat && Math.hypot(fr.v[0], fr.v[2]) < 0.25))) stamp(set, fr);
-        lo = Math.min(lo, fr.start); hi = Math.max(hi, fr.start + fr.count);
+        moved.push(fr);
+        if (fr.state === 'flying') awake.push(fr); else fr.awake = false;
       }
-      // upload only the part that moved (add ranges; never clear them first – see CONTEXT.md)
-      if (hi > 0) for (const a of [set.pos, set.nor]) { if (a.addUpdateRange) a.addUpdateRange(lo * 3, (hi - lo) * 3); a.needsUpdate = true; }
-      if (!busy) set.active = false;
+      // pieces launched during this step (a drop, what lay on a piece) were added at the end
+      for (let i = n0; i < list.length; i++) if (list[i].awake && list[i].state === 'flying') awake.push(list[i]);
+      set.awake = awake;
+      if (moved.length) upload(set, moved);
+      if (!awake.length) set.active = false;
+    }
+  }
+  const UPLOAD_GAP = 256;          // vertices: pieces less far apart in the buffer go up in one run…
+  const MAX_UPLOAD_RUNS = 48;      // …and never more than this many runs (uploads) per set and frame
+  // the moved pieces' vertices to the GPU (add ranges; never clear them first – see CONTEXT.md)
+  function upload(set, moved) {
+    moved.sort((a, b) => a.start - b.start);
+    let runs, gap = UPLOAD_GAP;
+    for (;;) {
+      runs = [];
+      for (const fr of moved) {
+        const last = runs[runs.length - 1];
+        if (last && fr.start - last[1] <= gap) last[1] = Math.max(last[1], fr.start + fr.count);
+        else runs.push([fr.start, fr.start + fr.count]);
+      }
+      if (runs.length <= MAX_UPLOAD_RUNS) break;
+      gap *= 2;
+    }
+    for (const a of [set.pos, set.nor]) {
+      if (a.addUpdateRange) for (const [lo, hi] of runs) a.addUpdateRange(lo * 3, (hi - lo) * 3);
+      a.needsUpdate = true;
     }
   }
   // returns the lowest point; fr.bb = [x0, z0, x1, z1, y0, y1] (where it is now)
