@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – cops (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.14
+// @version      1.15
 // @description  Shoot in walk mode and nearby police cars stop: two officers get out and shoot back. You have 10 hearts; lose them all and you die. Hit? Hamburgers drop on the sidewalk: walk over one to fix a heart.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -59,9 +59,11 @@
   const MISS_FAR = 0.3;            // …and a miss from further away goes this much wider per tile of distance
   const RUNNING_DODGE = 0.55;      // aim × this while you're running
   const FIRST_SHOT_DELAY = 1.2;    // seconds before a fresh officer fires the first time
-  // On fire (flamethrower, explosions, a burning person): like residents – run screaming, writhe,
-  // get up and run on until it goes out; they don't shoot while burning.
-  const BURN_RUN = [1, 5], BURN_WRITHE = 5, BURN_AFTER = 10, BURN_CORPSE = 8, BURN_TOUCH = 0.035;
+  // On fire (flamethrower, explosions, a burning person): like residents – run screaming, writhe on
+  // the ground (less and less) and die there; the body burns on, the fire dies out, a charred body
+  // stays. They don't shoot while burning.
+  const BURN_RUN = [1, 5], BURN_WRITHE = 5, BURN_CORPSE = 8, BURN_TOUCH = 0.035;
+  const CHAR_COLOR = 0x1c1915;     // a burnt officer ends up this dark (multiplies the model's colours)
   const BLAST_FIRE_BAND = 0.25;    // tiles just outside where an explosion blows people apart…
   const BLAST_FIRE_CHANCE = 0.5;   // …this chance to catch fire instead of being knocked down
   // No police car close by? Now and then one comes from out of sight, along the roads:
@@ -445,8 +447,7 @@
   }
   // ---------- on fire ----------
   function ignite(cop, fx, fz) {
-    if (!cop || cop.burn || cop.state === 'gone') return false;
-    if (cop.burnSafe && performance.now() < cop.burnSafe) return false;
+    if (!cop || cop.burn || cop.charred || cop.state === 'gone') return false;
     cop.burn = { phase: 'run', t: 0, run: rnd(...BURN_RUN), from: [fx ?? cop.x + rnd(-1, 1), fz ?? cop.z + rnd(-1, 1)], fireAcc: 0, smokeAcc: 0 };
     if (cop.state === 'exit') cop.state = 'fight';
     if (cop.state !== 'down') yell(cop);
@@ -455,20 +456,22 @@
   function yell(cop, short) { const r = window.scResidents; if (r && r.screamAt) r.screamAt(cop.x, cop.z, cop.voice, short); }
   function burnStep(cop, dt) {
     const b = cop.burn, w = W(); b.t += dt;
+    char(cop, b.t, cop.state === 'down' ? (b.dead || 0) : 0, b.phase);
     // flames on the body (along it when lying) and smoke
     const lie = cop.state === 'down' ? cop.fall : cop.lie || 0, ang = (Math.PI / 2) * lie * lie;
     const dx = cop.axis ? -cop.axis.z : 0, dz = cop.axis ? cop.axis.x : 0;
-    b.fireAcc += dt * 18;
+    const fade = cop.state === 'down' ? Math.max(0, Math.min(1, (BURN_CORPSE - (b.dead || 0)) / 4)) : 1;   // dying down
+    b.fireAcc += dt * 18 * fade;
     while (b.fireAcc >= 1) {
       b.fireAcc -= 1;
       const h = rnd(0.02, 0.13);
       w.spawn('fire', cop.x + dx * h * Math.sin(ang) + rnd(-0.01, 0.01), 0.045 + h * Math.cos(ang), cop.z + dz * h * Math.sin(ang) + rnd(-0.01, 0.01),
-        { vy: rnd(0.15, 0.35), size: rnd(0.012, 0.024), life: rnd(0.25, 0.45) });
+        { vy: rnd(0.15, 0.35), size: rnd(0.012, 0.024) * (0.5 + fade / 2), life: rnd(0.25, 0.45) });
     }
     w.startEffects();
     const core = window.scCore;
-    if (core && core.smoke && (b.smokeAcc += dt * 3) >= 1) { b.smokeAcc -= 1; core.smoke('smoke', cop.x, lie > 0.5 ? 0.08 : 0.17, cop.z, { vy: rnd(0.15, 0.3), rise: 0.3, size: rnd(0.02, 0.035), grow: 3, life: rnd(1.5, 2.5) }); }
-    if (cop.state === 'down') { if ((b.dead = (b.dead || 0) + dt) > BURN_CORPSE) cop.burn = null; return; }
+    if (core && core.smoke && (b.smokeAcc += dt * 3 * (0.3 + fade * 0.7)) >= 1) { b.smokeAcc -= 1; core.smoke('smoke', cop.x, lie > 0.5 ? 0.08 : 0.17, cop.z, { vy: rnd(0.15, 0.3), rise: 0.3, size: rnd(0.02, 0.035), grow: 3, life: rnd(1.5, 2.5) }); }
+    if (cop.state === 'down') { if ((b.dead = (b.dead || 0) + dt) > BURN_CORPSE) { cop.burn = null; cop.charred = true; char(cop, 0, Infinity); } return; }
     if (cop.state === 'gone') { cop.burn = null; return; }
     // whoever they touch catches fire: other officers and residents
     for (const o of cops) if (o !== cop && !o.burn && Math.hypot(o.x - cop.x, o.z - cop.z) < BURN_TOUCH) ignite(o, cop.x, cop.z);
@@ -487,14 +490,20 @@
       if (b.t >= b.run) { b.phase = 'writhe'; b.t = 0; const a = rnd(0, Math.PI * 2); cop.axis = new K.V3(Math.sin(a), 0, -Math.cos(a)); yell(cop); }
     } else if (b.phase === 'writhe') {
       cop.lie = Math.min(1, (cop.lie || 0) + dt / 0.45);
-      if (Math.random() < 0.8 * dt) yell(cop, true);
-      if (b.t >= BURN_WRITHE) { b.phase = 'up'; b.t = 0; }
-    } else {
-      cop.lie = Math.max(0, (cop.lie || 0) - dt / 0.6);
-      if (!cop.lie) away();
-      if (Math.random() < 0.5 * dt) yell(cop);
-      if (b.t >= BURN_AFTER) { cop.burn = null; cop.lie = 0; cop.burnSafe = performance.now() + 6000; cop.nextShot = performance.now() + 1500; }
+      if (Math.random() < 0.8 * dt * (1 - b.t / BURN_WRITHE)) yell(cop, true);   // weaker and weaker…
+      if (b.t >= BURN_WRITHE && cop.lie >= 1) {                  // …and dead: lies still, burns on
+        cop.fall = 1; cop.lie = 0; cop.state = 'down'; b.dead = 0;
+        window.dispatchEvent(new CustomEvent('sc:kill', { detail: { x: cop.x, z: cop.z, cause: 'fire', who: 'cop' } }));
+      }
     }
+  }
+  // the officer blackens while burning: their own material (the shared one times a colour that goes
+  // from white to CHAR_COLOR: a bit while running, more writhing, all of it by the time the fire's out)
+  function char(cop, t, dead, phase) {
+    if (!cop.charMat) { cop.charMat = mat.clone(); cop.mesh.material = cop.charMat; if (cop.head) cop.head.material = cop.charMat; }
+    const a = dead === Infinity ? 1 : cop.state === 'down' ? 0.7 + 0.3 * Math.min(1, dead / BURN_CORPSE)
+      : phase === 'writhe' ? 0.3 + 0.4 * Math.min(1, t / BURN_WRITHE) : Math.min(0.3, t * 0.06);
+    if (a > (cop.charA || 0)) { cop.charA = a; cop.charMat.color.set(0xffffff).lerp(new K.Color(CHAR_COLOR), a); }
   }
   // the residents on fire close to an officer set them alight (a few times a second)
   let touchAt = 0;
@@ -516,9 +525,10 @@
     m.position.set(cop.x, 0.038, cop.z);
     const lie = cop.state === 'down' ? cop.fall : cop.lie || 0;
     if (lie > 0) {
-      const f = lie * lie, t = performance.now(), shake = cop.state !== 'down' && cop.burn && cop.burn.phase === 'writhe';
-      m.quaternion.setFromAxisAngle(cop.axis, (Math.PI / 2) * f + (shake ? Math.sin(t * 0.031 + cop.voice) * 0.14 * f : 0))
-        .multiply(new K.Q().setFromAxisAngle(new K.V3(0, 1, 0), cop.h + (shake ? Math.sin(t * 0.019 + cop.voice) * 0.35 * f : 0)));
+      const t = performance.now(), shake = cop.state !== 'down' && cop.burn && cop.burn.phase === 'writhe';
+      const f = lie * lie, k = shake ? f * Math.max(0, 1 - cop.burn.t / BURN_WRITHE) : 0;   // shaking less and less
+      m.quaternion.setFromAxisAngle(cop.axis, (Math.PI / 2) * f + Math.sin(t * 0.031 + cop.voice) * 0.14 * k)
+        .multiply(new K.Q().setFromAxisAngle(new K.V3(0, 1, 0), cop.h + Math.sin(t * 0.019 + cop.voice) * 0.35 * k));
       m.position.y += 0.011 * f;
     } else m.quaternion.setFromAxisAngle(new K.V3(0, 1, 0), cop.h);
   }

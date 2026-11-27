@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – residents
 // @namespace    savings-city-tweaks
-// @version      2.0
+// @version      2.1
 // @description  The app's people (who walk the sidewalks, cross at junctions and go in and out of buildings) now react to everything: shot, blown up, set alight, run over, buried. Panicking people run, scream and hide. A density slider.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -105,13 +105,13 @@
   const SCREAM_VOLUME = 0.45;
   const SCREAM_HEARING = 9;       // walk mode: tiles; further away you don't hear them
   const CRUSH_MARGIN = 0.3;       // a building coming down kills people outside this close to its walls
-  // On fire (flamethrower, explosions): run screaming, fall and writhe on the ground, get up, run on.
+  // On fire (flamethrower, explosions): run screaming, fall and writhe on the ground, die there.
   const BURN_RUN = [1, 5];        // seconds someone on fire runs screaming…
-  const BURN_WRITHE = 5;          // …then lies on the ground shaking this long…
-  const BURN_AFTER = 10;          // …then gets up and runs again; the fire goes out this many seconds later
+  const BURN_WRITHE = 5;          // …then lies on the ground shaking (less and less) this long, and dies
   const BURN_TOUCH = 0.035;       // tiles: someone on fire sets people this close alight
-  const BURN_IMMUNE = 6;          // seconds after their fire went out before someone can catch fire again
-  const BURN_CORPSE = 8;          // seconds a dead body keeps burning
+  const BURN_CORPSE = 8;          // seconds a dead body keeps burning (the fire dies down at the end)
+  const CHAR_COLOR = '#151210';   // a burnt body ends up this colour (charred)…
+  const CHAR_RATE = [0.15, 0.35, 0.6];   // …blackening this fast (per second) running, writhing, dead
   const BLAST_FIRE_BAND = 0.25;   // tiles (≈ 5 m) just outside where an explosion blows people apart…
   const BLAST_FIRE_CHANCE = 0.5;  // …this chance to be set on fire (instead of knocked down)
   const MAX_FLAMES = 1500;        // flames drawn on burning people (3 each)
@@ -281,7 +281,7 @@
     for (const [src, dst] of [[P.legs, legs], [P.torsos, torsos], [P.heads, heads], [P.hairs, hairs]]) {
       src.getColorAt(i, c); dst.setColorAt(slot, c); dst.instanceColor.needsUpdate = true;
     }
-    bald[slot] = P.bald[i];
+    bald[slot] = P.bald[i]; charredSlots.delete(slot);
     const r = { ...newPerson(), x: p.x, z: p.z, h: p.h, speed: p.speed || SPEED, slot, scId: idOf(p), temp: true, since: now() };
     if (p.k) { r.k = CHILD_HEIGHT; r.kw = CHILD_WIDTH; }
     if (p.parent) p.parent.child = null;     // a child taken over: the app's parent stays where they are
@@ -304,6 +304,7 @@
     if (slot < 0) return null;
     const r = { ...newPerson(), x, z, slot, scId: ++idCounter, temp: true, since: now() };
     bald[slot] = Math.random() < BALD ? 1 : 0;
+    dress(slot);
     own[slot] = r; ownSet.add(r);
     return r;
   }
@@ -386,14 +387,16 @@
   }
 
   // ---------- on fire ----------
-  // p.burn = { phase: 'run' | 'writhe' | 'up', t, run, from }. Running: panicking, screaming, away
-  // from where the fire came from. Writhing: lying on the ground (p.lie 0…1), shaking. Up: standing
-  // up and running on until the fire goes out. Dead bodies burn on for a while.
+  // p.burn = { phase: 'run' | 'writhe', t, run, from }. Running: panicking, screaming, away from
+  // where the fire came from. Writhing: lying on the ground (p.lie 0…1), shaking less and less, then
+  // dead (state 'down'). Dead bodies burn on for a while and the fire dies out. Meanwhile the body
+  // blackens (instance colours lerped to CHAR_COLOR); a body that burnt out stays charred (p.charred)
+  // and doesn't catch fire again. The slot gets fresh colours when it's reused (dress()).
   let burning = 0;
   function ignite(p, fx, fz) {
     if (!p || !V || p.state === 'inside' || p.state === 'gone' || p.state === 'enter') return false;
     p = ownOf(p);
-    if (!p || p.burn || (p.burnSafe && performance.now() < p.burnSafe)) return false;
+    if (!p || p.burn || p.charred) return false;
     fx = fx ?? p.x + rnd(-1, 1); fz = fz ?? p.z + rnd(-1, 1);
     if (p.state !== 'down') {
       if (p.parent) orphan(p);                                    // a child on fire runs on its own…
@@ -406,7 +409,12 @@
   function burnStep(p, dt) {
     const b = p.burn; b.t += dt;
     if (p.state === 'inside' || p.state === 'gone') { p.burn = null; return; }
-    if (p.state === 'down') { if ((b.dead = (b.dead || 0) + dt) > BURN_CORPSE) p.burn = null; return; }
+    if (p.state === 'down') {
+      char(p, CHAR_RATE[2] * dt);
+      if ((b.dead = (b.dead || 0) + dt) > BURN_CORPSE) { p.burn = null; char(p, 1); p.charred = true; }   // burnt out
+      return;
+    }
+    char(p, CHAR_RATE[b.phase === 'run' ? 0 : 1] * dt);
     if (b.phase === 'run') {
       if (!(p.panic > 1)) p.panic = 2;
       p.fleeFrom = b.from;
@@ -418,14 +426,33 @@
       }
     } else if (b.phase === 'writhe') {
       p.lie = Math.min(1, (p.lie || 0) + dt / FALL_SECONDS);
-      if (Math.random() < 0.8 * dt) scream(p, 0, true);
-      if (b.t >= BURN_WRITHE) { b.phase = 'up'; b.t = 0; panic(p, b.from[0], b.from[1], BURN_AFTER); }
-    } else {
-      p.lie = Math.max(0, (p.lie || 0) - dt / 0.6);              // gets up…
-      if (!(p.panic > 1)) p.panic = 2;                            // …and runs on, burning
-      if (Math.random() < 0.5 * dt) scream(p, 0);
-      if (b.t >= BURN_AFTER) { p.burn = null; p.lie = 0; p.burnSafe = performance.now() + BURN_IMMUNE * 1000; }
+      if (Math.random() < 0.8 * dt * (1 - b.t / BURN_WRITHE)) scream(p, 0, true);   // weaker and weaker…
+      if (b.t >= BURN_WRITHE && p.lie >= 1) {                     // …and dead: lies still, burns on
+        p.state = 'down'; p.fall = 1; p.lie = 0; p.panic = 0; p.away = 0; p.since = now();
+        b.dead = 0;
+        died(p, 'fire');
+      }
     }
+  }
+  // blacken p's figure by a (0…1: the share of the way to CHAR_COLOR)
+  let charCol = null, charTmp = null;
+  function char(p, a) {
+    if (!torsos || !(p.slot >= 0) || !(a > 0)) return;
+    if (!charCol) { const Col = torsos.material.color.constructor; charCol = new Col(CHAR_COLOR); charTmp = new Col(); }
+    for (const m of parts) { m.getColorAt(p.slot, charTmp); m.setColorAt(p.slot, charTmp.lerp(charCol, Math.min(1, a))); m.instanceColor.needsUpdate = true; }
+    charredSlots.add(p.slot);
+  }
+  // fresh colours for a slot that held a charred body (a new figure of ours takes it)
+  const charredSlots = new Set();
+  function dress(slot) {
+    if (!charredSlots.delete(slot) || !torsos) return;
+    const c = new (torsos.material.color.constructor)(), pick = (a) => a[Math.floor(Math.random() * a.length)];
+    const skin = pick(SKINS), hw = Object.entries(skin.hair);
+    let x = Math.random() * hw.reduce((s, [, w]) => s + w, 0), hair = hw[0][0];
+    for (const [k, w] of hw) { if ((x -= w) < 0) { hair = k; break; } }
+    torsos.setColorAt(slot, c.set(pick(SHIRTS))); legs.setColorAt(slot, c.set(pick(TROUSERS)));
+    heads.setColorAt(slot, c.set(skin.c)); hairs.setColorAt(slot, c.set(hair));
+    for (const m of parts) m.instanceColor.needsUpdate = true;
   }
 
   function newPerson() {
@@ -1064,6 +1091,9 @@
       box(p, n, c, -0.012 * s, (hy + 0.006) * s, -0.012 * s, 0.024 * s, (HEAD - 0.006) * s, 0.006 * s, W); // back
     });
     const mat = new Material({ vertexColors: true });
+    // no winter snow on our figures (the app's snow shader whitens every upward face): a body lying
+    // on its back – shot, or burnt black – would otherwise look snowed over at once
+    mat.defines = { ...(mat.defines || {}), SNOW_COVER: '-0.50' };
 
     const n = MAX_PEOPLE;
     legs = new InstancedMesh(legsGeo, mat, n);
@@ -1212,8 +1242,9 @@
         const f = lie * lie;
         let ang = (Math.PI / 2) * f;
         if (p.burn && p.state !== 'down' && p.burn.phase === 'writhe') {   // on fire on the ground: shaking
-          ang += Math.sin(t * 0.031 + i) * 0.14 * f;
-          m.makeRotationY(p.h + Math.sin(t * 0.019 + i * 1.7) * 0.35 * f);
+          const k = f * Math.max(0, 1 - p.burn.t / BURN_WRITHE);   // shaking less and less, then still
+          ang += Math.sin(t * 0.031 + i) * 0.14 * k;
+          m.makeRotationY(p.h + Math.sin(t * 0.019 + i * 1.7) * 0.35 * k);
         }
         tip.makeRotationAxis(p.axis, ang);
         m.premultiply(tip);
@@ -1249,7 +1280,7 @@
     for (const p of burners) {
       const lie = p.state === 'down' ? p.fall : p.lie || 0, ang = (Math.PI / 2) * lie * lie, sa = Math.sin(ang), ca = Math.cos(ang);
       const dx = p.axis ? -p.axis.z : 0, dz = p.axis ? p.axis.x : 0, kk = p.k || 1, y0 = SIDEWALK_HEIGHT + 0.004;
-      const fade = p.burn.phase === 'up' ? Math.min(1, (BURN_AFTER - p.burn.t) / 2) : p.state === 'down' ? Math.min(1, (BURN_CORPSE - (p.burn.dead || 0)) / 2) : 1;
+      const fade = p.state === 'down' ? Math.max(0, Math.min(1, (BURN_CORPSE - (p.burn.dead || 0)) / 4)) : 1;   // dying down
       for (let j = 0; j < 3 && k < MAX_FLAMES; j++, k++) {
         const h = (0.025 + j * 0.04) * kk * SCALE, fl = 0.75 + 0.5 * Math.random();
         const w = (0.03 - j * 0.004) * SCALE * fl * fade, hh = w * (1.6 + Math.random()), a = Math.random() * 6.28, c = Math.cos(a), s = Math.sin(a);

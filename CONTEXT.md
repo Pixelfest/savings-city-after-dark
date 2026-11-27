@@ -322,6 +322,16 @@ half the people catch fire instead of being knocked down (walk mode's car explos
 `blastResidents`, the cops' car explosions; not the monster's or nuke's knock-downs). Walk mode
 1.30: plugin weapons with `auto: true` fire every `interval` while the button is held.
 
+Residents 2.1 / cops 1.15 – burning is fatal: no `up` phase any more (and no `burnSafe`). After
+`BURN_WRITHE` (5 s, the shaking and screaming fade out) the person dies where they lie: state
+`down`, `fall` 1, `sc:kill` with cause `fire`. The body burns on for `BURN_CORPSE` (8 s), the
+flames shrinking over the last 4 s, and blackens meanwhile: residents lerp the slot's instance
+colours (all four parts) to `CHAR_COLOR` (`char()`); a burnt-out body gets `p.charred` (can't catch
+fire again), and a charred slot gets fresh colours when `newOwnAt` reuses it (`dress()`; `adopt`
+copies the app's colours anyway). Officers get their own clone of the shared vertex-colour
+material whose `color` goes from white to `CHAR_COLOR`. Residents' figure material also sets `SNOW_COVER` `-0.50` (no
+winter snow on our figures: a body lying on its back looked snowed over, a charred one grey).
+
 Walk mode 1.31: `scWalk.igniteCar(car)` (the car stops, its driver comes out via residents'
 `addRunner` and is set alight, flames and black smoke for 4–7 s, then the normal `explode()` and
 burning wreck; the car counts as abandoned, so no occupant deaths) and `carBurning(car)`. The

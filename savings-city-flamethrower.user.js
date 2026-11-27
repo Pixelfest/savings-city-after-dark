@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – flamethrower (walk mode)
 // @namespace    savings-city-tweaks
-// @version      1.3
-// @description  Adds a flamethrower to walk mode (key 4, hold the mouse button): a roaring stream of fire that sets residents alight – they run screaming, fall and writhe, get up and run on, and set others on fire.
+// @version      1.4
+// @description  Adds a flamethrower to walk mode (key 4, hold the mouse button): a roaring stream of fire that sets residents alight – they run screaming, fall and writhe, and burn to death (a charred body stays), setting others on fire.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -17,8 +17,8 @@
  *   orange and red to soot as they age. Where the stream meets a wall or the ground the blobs stop
  *   and spread out. Black smoke rises from the end of the stream (the core's solid puffs).
  * - Every shot (20 a second while held) checks the residents in a cone along the stream, up to the
- *   wall or ground it hits: whoever is in it catches fire (residents' ignite: run, writhe, get up,
- *   the fire goes out after a while; touching others sets them alight too). Cars in the stream heat
+ *   wall or ground it hits: whoever is in it catches fire (residents' ignite: run, writhe, die; the
+ *   fire on the body dies out and a charred body stays; touching others sets them alight too). Cars in the stream heat
  *   up; after CAR_HEAT seconds of flame they catch fire (walk mode 1.31: igniteCar) and explode a few
  *   seconds later. Police officers (cops 1.6) in the stream catch fire too.
  * - Sound: a roar of filtered noise while the button is held, through the core's output (follows
