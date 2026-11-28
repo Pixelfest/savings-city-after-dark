@@ -37,7 +37,7 @@ placeholder `https://your-savings-city-host.example/`.
   it's minified, one line per file (e.g. `grep -o '.{300}isMeshBasicMaterial.{300}'`). When a
   developer brings in a newer copy, follow `AGENTS.md` → "Updating the app files".
 - Menu buttons live in `.hz-tr .menu-mini` (scripts add `button.icon-btn.small` there). The
-  disasters (monster, meteors, nuke) don't add their own: they're entries in the core's **Rampen**
+  disasters (monster, meteors, alien invasion, nuke) don't add their own: they're entries in the core's **Rampen**
   dropdown (`#sc-disasters`, core 1.8: `scCore.menu.add({ id, label, icon, active, order, onClick })`,
   `menu.update()` after a state change, `menu.items()`, `menu.open()`).
 - The HUD (`.hud`): `.hz-tl` left (logo `h1.brand`, `section.totals`, `nav#project-list`), `.hz-tr`
@@ -266,6 +266,7 @@ while they run, swaps in `placed` / `lamps` / `entries` without the dark buildin
 | balloon | registers weapon `balloon` (key 9); takes residents via `scResidents.skin(p, 'balloon')`, officers via `scCops.skin(i, 'balloon')`; `scWalk.addTarget` (shooting a balloon pops it), listens to `sc:blast`; `window.scBalloon` test hooks |
 | monster | `scBuildings.list()` / `alive()` / `collapse(bd, { at, push, force, spread })`; dust from `scCore.puff` |
 | meteors | `scBuildings.list()` / `near()` / `prepare()` / `crater()` / `collapse()`, `scResidents.gibAround` / `blast` / `avoid` / `alarm`, `scWalk.wreck` / `igniteCar` / `propsNear` / `knockProp`, `scCore.lampsOut` / `smoke`; sends `sc:blast` and `damage({ kind: 'meteor' })`; `window.scMeteors` test hooks |
+| aliens | `scBuildings.list()` / `prepare()` / `alive()` / `covers()` / `ray()` / `crater()` (never `collapse`), `scResidents.people` / `skin(p, 'ufo')` / `alarm`, `scCops.officers()` / `skin(i, 'ufo')`, `scCore.smoke` / `audio`; Rampen entry `aliens`; `window.scAliens` test hooks |
 | nuke | plans its own ruins and flight with `scBuildings.geometry` + `chunkSet` + `launch`; claims the buildings it cuts (`claim`) at the flash; `blastWave` for buildings already in chunks |
 | car tyres | patches `BufferGeometry.translate` (route 1) and repairs car models in the scene (route 2) |
 
@@ -974,3 +975,39 @@ Test hooks: `scResidents.freeze(x, z)` (returns the id) and the skinner harness 
 - Test hooks: `scMeteors.start({ count, aimed, azimuth, elevation, duration, at: [x, z] })` (returns
   the plan), `stop()`, `plan(opts)`, `meteors`, `shower`, `damage(id)`, `fires`. Headless: skip drawing between
   screenshots (`scCore.onDraw(() => skip)`), and zoom out (the zoom-out button) to see the city.
+
+## Alien invasion (savings-city-aliens 1.0)
+
+- A 👽 entry in the core's Rampen menu (`id: 'aliens'`, order 25). One invasion at a time: 10 s
+  arriving (`ARRIVE`), 10 s attack (`ATTACK`), 5 s leaving (`LEAVE`); the timeline runs on the core's
+  frame loop (`inv.t`), so it follows game time in the test city.
+- Saucers: 4–12 (`round(buildings / 6) + 3`), each with a station over the city box (at least
+  `MIN_GAP` apart) at the tallest building + 1–1.8 tiles (at least 2.2). They fly in from 28 tiles
+  out (spread around the compass), ease onto the station, circle and bob there, and leave outward
+  and up (quadratic). Built from lathed triangle lists (hull with vertex colours, dome, emitter) and
+  12 rim-light cubes whose material is swapped to make them chase. Materials are `side: 2`.
+- Buildings: at the start every standing building (at most `MAX_TARGETS`, random) gets 2–4 shots
+  (`SHOTS`, never more than 4) at random times in the attack, and `prepare()` is called right away
+  so the cutting is done before the first shot. A shot: the nearest saucer aims at a random point in
+  one of the building's boxes; `ray()` against the chunks (when `covers(id)`) or a slab test
+  against the boxes gives the hit point and normal; after `REACH` (0.05 s) the beam arrives and
+  `crater(bd, p, n, 0.13…0.2)` blasts a hole. Craters only: buildings stay standing.
+- Panic: from `PANIC_AT` (2.5 s) until the saucers are gone, every `PANIC_EVERY` (2.5 s)
+  `scResidents.alarm(u.x, u.z, 60, …)` is called below every saucer (random order), so everyone
+  outside keeps running away from them – also people who calmed down or came out of a door.
+- People: when the invasion starts (before the panic sends people indoors), half
+  (`PEOPLE_SHARE`) of the residents outside (not inside, down or gone) plus the officers in
+  `exit` / `fight` are counted, and that many shots are spread evenly over the attack. Each shot
+  picks someone at random who's still outside then (running or not; a shot with nobody outside
+  is lost), `skin(…, 'ufo')` takes them (sc:kill, cause `ufo`), a red beam goes to their chest and
+  they become `PARTICLES` cubes in their colours (from `skin()`'s `colors`; officers: fixed cop
+  colours) that rise (negative gravity), swirl around their column and shrink to nothing.
+- Beams: two InstancedMeshes per colour (an opaque core and an additive see-through glow), a unit
+  box along +z placed from the saucer's emitter (followed every frame) to the target; the beam grows
+  to its target in `REACH`, then thins out. Particles (vapour and green sparks): one InstancedMesh,
+  a ring buffer of `CAP_PARTS`.
+- Sound through `scCore.audio()` / `out()`: a warbling hum (two detuned oscillators with an LFO) that
+  rises in pitch as they leave, a sawtooth "pew" per green shot plus a low thud on impact, a short
+  square "pew" per red shot (at most `MAX_ZAPS` per second).
+- `window.scAliens`: `start({ ufos, shots })`, `state` (`t`, `shotsLeft`, `people`, `killed`, `ufos`),
+  `ufos` (positions).
