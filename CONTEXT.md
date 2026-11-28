@@ -496,6 +496,79 @@ shell collapse of the 1.2 × 1.2 × 1.57 tower: 10–50 % of pieces moving 613 �
 save), 10–50 % 1160 → 682 KB, under 10 % 351 → 151 KB, 76.6 → 70.5 MB. Uploads per frame: about 2 →
 up to 48 calls per set.
 
+Buildings 1.11 – the GPU moves the pieces (`gpuPieces`, `GPU_PIECES`). Positions and normals of a
+set never change after it's made (still pieces and `ray()` keep using them). Per piece a 3×4
+transform `[L | t]` in a float texture (3 RGBA32F texels, `PIECE_ROW` 256 pieces a row; a vertex
+p goes to L·p + t with t = pivot + off − L·pivot, so the identity is "where it was cut"); every
+vertex has `aPiece`. L = stretch · R · scale (the black hole's spaghetti: st4·I + (st3 − st4)·d·dᵀ),
+normals are L·n (normalised by three). The core lends no DataTexture: it's the facade map's
+`Texture` class with `isDataTexture`, `image: {data, width, height}`, RGBA (1023), Float (1015),
+Nearest (1003), no mipmaps, no flipY. `pieceMat(m, set)` clones the material, runs its
+`onBeforeCompile` (the app's facade and night code read `transformed` / `objectNormal` after
+`begin_vertex` / `beginnormal_vertex`, so they follow) and then inserts the transform; cache key
+`facade+scPieces`. Lights out: `set.base` → `darkFacade(set.base)` → `pieceMat` again (the clone
+isn't `isFacade`). Shadows: the shadow pass would draw the pieces where they were cut, so the
+mesh's `onBeforeShadow` takes three's own `MeshDepthMaterial` the first time (the core can't lend
+the class), clones it with the same transform (`D` key) and sets `customDepthMaterial` (checked:
+the shadow of a collapsed building goes with it). `writePiece` replaces `writeChunk` for such sets:
+12 numbers and the bounds from the piece's distinct corners (`fr.hull`, ~8 points, made once)
+instead of 36+ vertices; `upload` sets `tex.needsUpdate` (the whole texture: 48 bytes a piece).
+Measured (same runs as 1.10): vertex uploads of moving pieces 8.9 MB → 0 for the collapse, 67.7 →
+0 for 1 kt; the texture adds 1.1 and 6.6 MB. Page script time in SwiftShader didn't change
+measurably (0.5 → 0.5 s, 2.9 → 3.2 s: most of it is elsewhere there).
+
+Nuke 3.8 – mushroom cloud twice as big: `CLOUD_PER_KT` 25 → 50 (1 km for 1 kt), minimum 1.2 → 2.4,
+`CLOUD_MAX` 150 → 170. The app's camera is orthographic about 150 units from its target with near 1:
+the cloud's top (≈ 1.2 × H, ×√3 nearer along the view) is cut off from about H 210, sooner when
+ground zero lies towards the camera. After `CLOUD_LINGER` (20 s) the cloud lifts off out of the
+view on purpose (its shadow stays a while).
+
+Buildings 1.12 – progressive collapse (both models). `settle()` (after a crater) starts waves
+(`stepCollapses`, every `WAVE_DT` 0.2 s, at most `WAVE_MAX` 60; stops after three quiet waves with
+nothing falling; `poke()` starts it again when rubble lands on the building). A wave (`wave()`):
+`holdCosts` (as 1.9, now also the order pieces were reached) and `loadsOf`: every still piece's
+load = own weight (`weightOf`: its box volume) + pieces resting on it (`carried`) + landing impact
+(`fr.impact`, `IMPACT` 1.5 × weight × fall speed ÷ 2, used once); pieces are handled top down (by
+height, then furthest from support first) and pass their load to the touching pieces under them
+(weight 1 ÷ (1 + 8·dh)) and a little (0.25) sideways to neighbours nearer support; pieces on the
+ground pass it on to the ground. Baseline in `graphOf` while the building is undamaged (`st.damaged`
+is set by the first `settle`): `c0` and `L0` from the intact building, recomputed after a refine;
+after damage refined pieces inherit (L0 × footprint share × 1.5). Fails: `cost > c0 + SUPPORT_SPAN`
+(nothing holds it) or the overload ratio load ÷ max(L0, 3 × weight), averaged over the piece and
+its still neighbours, above `STRENGTH[setting]` × `capF` (1 ± `STRENGTH_SPREAD` 0.2, per piece).
+First tries: routing load by `holdCosts`' order (a DAG) gave ratios of 5× after one crater (a hole
+reshuffles the order, whole loads take other routes) – geometry order fixed that (1.75×); judging
+each piece alone let one hot piece start a runaway cascade every time – the neighbourhood average
+fixed that; reserve 1.3–2.0 with ± 30 % and impact 2.5 still brought down 7 of 8 buildings.
+Measured (mid-size towers, shell, Normaal): one crater 0–3 extra pieces; three in a row 91 (7
+waves); a corner (both walls) 351, half the building, 18 waves; 3rd floor 6. Zwak (1.8): one crater
+0, three in a row 352, a corner the whole building. Sterk (2.8): 0–20. Solid (Normaal): 0–13, wide
+building with 5 craters 271. A wave takes 1.4–7 ms for 744 pieces.
+`fallBlocks`: the pieces that fail in a wave, in connected groups; groups under 3 drop as before,
+bigger ones are a block (`fr.block`: c0, P, R, v, axis, w): if part of it touches still pieces and
+its middle is off that contact (> max(0.05, ¼ of its size)), it turns around a horizontal axis
+through the contact (`HINGE_ACC` 2.5 rad/s², free after `HINGE_RELEASE` 0.45 rad, then falling and
+turning on); otherwise it falls straight with a slow turn. `stepSets` places a block's pieces from
+the block (`stepBlock` once per frame, `frameNo`); when one touches its floor the block breaks
+(`breakBlock`): every piece goes on alone with its point's speed. `state()` has `collapsing`.
+
+Buildings 1.13 – the support graph runs in the cutter (worker). Measured on the page at detail 5
+(~13,000 pieces a building): building the graph took 13–100 ms and the intact baseline 30–90 ms
+per building, and every wave 30–60 ms – a stutter five times a second while a building gave way.
+Now the cutter keeps `bld.all`: every piece it cut, by gid (the cut's pieces 0…P−1, then each
+refinement's, `gid0` in the refine reply; the page's `indexGids` sets `fr.gid` and `st.byGid`).
+Messages: `baseline` { b, still, slack, spread } – posted by the first `crater` before anything
+flies (`st.damaged`), the intact building; `wave` { b, still: Uint8Array[gid], extra:
+Float32Array[gid] (rubble lying on a piece + landing impact, taken from the page and reset),
+reserve, span, slack, spread } → { blocks: [{ gids, hinge }] } – computed between cutting slices
+(`graphOf` made again when the cutter has new pieces). The page's constants travel with the
+messages (cutterCore is rebuilt from its own text and can't see them). `requestWave` waits for the
+answer (one at a time per building; `settle` during a pending one makes the next go at once),
+`applyWave` maps gids back and `fallGroup` drops or blocks them (hinge from the cutter). Without a
+worker the same code answers on the page. Page script time while corner damage spread through a
+building at detail 5 (Zwak, 17,300 pieces): 11.7 s → 2.0 s; at detail 1 no measurable change (0.6
+→ 0.9 s, collapses of different sizes).
+
 Residents 1.19 – on fire: `ignite(i, fromX, fromZ)` sets `p.burn = { phase: 'run' | 'writhe' |
 'up', t, run, from }`. Run (1–5 s, panicking away from `from`, screaming often, never into a
 building), writhe (state stays `walk`, `p.lie` 0…1 tips the figure like a fall, shaking; `step()`
