@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Savings City – solid buildings
 // @namespace    savings-city-tweaks
-// @version      1.13
+// @version      1.14
 // @description  Shared building destruction for the Savings City scripts: buildings turn into solid chunks (facade outside, concrete inside) that can be blasted into craters, collapse from an impact or be pushed over. Used by the rocket launcher, the monster and the nuke. Needs the core script.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
@@ -370,6 +370,9 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
         }
         const before = fr.bb ? fr.bb[4] : Infinity;                 // its lowest point last step
         let minY = writeChunk(set, fr);
+        if (fr.holder && fr.holder.state !== 'still') {             // what it was falling onto is gone (cut finer, eaten): look again
+          fr.holder = null; fr.floorY = undefined; if (set.st) landOn(set.st, set, fr);
+        }
         let floor = set.piles ? pileHeight(fr) : GROUND;            // the shell model's rubble piles up
         if (fr.floorY > floor) floor = fr.floorY;                   // it falls onto a floor that still stands (local collapse)
         // already below the heap's surface (the heap grew around it, or it tipped into it): it stays
@@ -794,6 +797,8 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     if (st.down) lightsOut(st);
     const collapse = (owner, fr) => {
       fr.state = 'gone';
+      // what lay on the coarse chunk lands on the finer pieces that take its place (it was left floating)
+      if (fr.carried) { const list = fr.carried; fr.carried = null; for (const c of list) if (c.fr.holder === fr && (c.fr.state === 'rest' || c.fr.state === 'flying')) drop(c.set, c.fr); }
       for (let k = fr.start; k < fr.start + fr.count; k++) owner.pos.setXYZ(k, fr.pivot[0], fr.pivot[1], fr.pivot[2]);
       if (owner.pos.addUpdateRange) owner.pos.addUpdateRange(fr.start * 3, fr.count * 3);
       owner.pos.needsUpdate = true;
@@ -1277,11 +1282,11 @@ mat3 scL = mat3( scR0.x, scR1.x, scR2.x, scR0.y, scR1.y, scR2.y, scR0.z, scR1.z,
     isSolid: (id) => solids.has(id),
     isDown: (id) => !!(solids.get(id) && solids.get(id).down),
     alive: (x) => { const bd = byId(x); if (!bd) return false; const st = solids.get(bd.id); return !(st && st.down) && !!(bd.grp && bd.grp.parent); },
-    // how a building is doing: { solid, down, hits, chunks, standing } (null: not in chunks yet)
+    // how a building is doing: { solid, down, hits, chunks, standing, floating (rubble on a piece that no longer stands: should be 0), … } (null: not in chunks yet)
     state(x) { const id = x && typeof x === 'object' ? x.id : x, st = solids.get(id); if (!st || st.claimed) return st ? { claimed: true } : null;
       const all = st.sets.flatMap((x) => x.frs).filter((f) => f.state !== 'gone');
       return { solid: true, model: st.shell ? 'shell' : 'solid', ready: st.ready, cutMs: st.cutMs && Math.round(st.cutMs), down: st.down, hits: st.hits, fine: all.filter((f) => f.fine).length, chunks: all.length, standing: all.filter((f) => f.state === 'still').length,
-        flying: all.filter((f) => f.state === 'flying').length, collapsing: !!st.collapse, pile: st.shell ? Math.round(Math.max(0, ...all.filter((f) => f.stamp).map((f) => f.bb[4])) * 1000) / 1000 : undefined }; },
+        flying: all.filter((f) => f.state === 'flying').length, floating: all.filter((f) => f.holder && f.holder.state !== 'still' && (f.state === 'rest' || f.state === 'flying')).length, collapsing: !!st.collapse, pile: st.shell ? Math.round(Math.max(0, ...all.filter((f) => f.stamp).map((f) => f.bb[4])) * 1000) / 1000 : undefined }; },
     crater, hit, collapse, blastWave, claim, well,
     // shots against buildings in chunks: ray(o, d, maxT) → { t, n, id } | null; covers(id): the
     // building is shown as chunks (rays should use ray(), not its own meshes)

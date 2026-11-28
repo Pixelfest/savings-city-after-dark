@@ -474,7 +474,8 @@ Buildings 1.9 / walk mode 1.39 / nuke 3.7 – lower heaps, inside colours, local
   craters side by side → 0–10 extra pieces fall; the front wall of storeys 1–2 removed over 0.9 of
   1.2 → 17–23 fall (the facade above in a V); solid: 0–3. A falling piece lands on the highest
   still piece under its middle (`landOn`: `fr.floorY`, `fr.holder`; the holder's `carried` list
-  drops it again when the holder goes) and isn't stamped into the ground heap.
+  drops it again when the holder goes – launched, or swapped out for finer pieces by a refinement,
+  `applyRefine`; a falling piece whose holder is no longer still looks for a new one) and isn't stamped into the ground heap.
 - `scBuildings.ray(o, d, maxT)` → `{ t, n, id }`: Möller–Trumbore against the still chunks of
   buildings shown as chunks (AABB first). Walk mode's `rayBuildings` skips the groups of buildings
   `scBuildings.covers(id)` and asks `ray` instead, so bullets and rockets (they use
