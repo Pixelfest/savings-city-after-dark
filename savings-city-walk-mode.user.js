@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Savings City – walk mode (first person)
 // @namespace    savings-city-tweaks
-// @version      1.39
-// @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, Esc to stop.
+// @version      1.40
+// @description  Adds a "Lopen" button: walk through the city in first person. Mouse to look, WASD to walk, Shift to run, scroll wheel for weapons, , and . for speed, R/F up and down (to 500 m), V for a top-down view, Esc to stop.
 // @match        https://your-savings-city-host.example/*
 // @run-at       document-start
 // @grant        none
@@ -93,6 +93,12 @@
   const GUN_BOB = 1;              // how much the gun bobs while walking and lags behind when you look (0 = still)
   const START_FACING = 'street';  // starting at a building: 'street' = back to the door, looking away; 'building' = look at it
   const OPEN_GROUND = 1;           // tiles: double-click the ground at least this far from roads and buildings to start walking there, facing the city centre
+  const MAX_EYE = 25;             // tiles: R takes you up to here (≈ 500 m)
+  const CLIMB_RATE = 0.8;         // R/F: height changes by (0.4 + this × height) tiles per second, so going up high doesn't take ages
+  const TOP_DOWN_HEIGHT = 5;      // V (top-down flight) lifts you to at least this height (≈ 100 m)
+  const SUN_DISC = true;          // the sun as a disc in the sky, where the light comes from
+  const SUN_SIZE = 0.53;          // its apparent diameter in degrees (the real sun: 0.53°)
+  const SUN_GLOW = 7;             // a soft glow around it, this many times its radius (0 = none)
   // ---------------------------------------------------------------------------------------------
 
   let renderer = null;
@@ -277,6 +283,7 @@
   // ---------- 3. walking ----------
   const keys = new Set();
   let yaw = 0, pitch = 0, speed = WALK_SPEED, eye = 0.15, eyeSet = false, lastT = 0;
+  let topDown = false, maxTop = Infinity;   // top-down flight (V); the tallest building's top (above it nothing blocks you)
   const pos = { x: 0, z: 0 };
   const stick = { x: 0, y: 0 };       // touch joystick (-1..1)
 
@@ -306,7 +313,7 @@
     const now = performance.now();
     const dt = Math.min(0.1, lastT ? (now - lastT) / 1000 : 0);
     lastT = now;
-    if (now - checkedAt > 2000) { checkedAt = now; buildColliders(false); }   // rebuilt only when buildings change
+    if (now - checkedAt > 2000) { checkedAt = now; buildColliders(false); maxTop = boxes.reduce((m, b) => Math.max(m, b[4]), 0); }   // rebuilt only when buildings change
     if (DESTRUCTIBLE_PROPS && now - propsAt > 3000) { propsAt = now; try { scanProps(); } catch (e) { console.warn('[walk] trees/lamps', e); } }
     stepBullets(dt);
     if (SHOOTING) stepWeapons(dt);
@@ -320,7 +327,7 @@
       const c = (v && v.cam) || { x: pos.x, y: eye, z: pos.z };
       const el = renderer.domElement;
       cam.aspect = (el.clientWidth || 1) / (el.clientHeight || 1);
-      cam.updateProjectionMatrix();
+      fitDepth();
       cam.position.set(c.x, c.y, c.z);
       cam.rotation.set(pitch, yaw, (v && v.roll) || 0);
       cam.updateMatrixWorld();
@@ -337,40 +344,58 @@
     f += -stick.y; s += stick.x;
     const len = Math.hypot(f, s);
     if (len > 1) { f /= len; s /= len; }
-    const sp = speed * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? RUN_FACTOR : 1) * dt;
+    // above every roof (or flying top-down) nothing is in the way, and you move faster the higher you are
+    const flying = topDown || eye > maxTop + 0.05;
+    const sp = speed * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? RUN_FACTOR : 1) * dt * (flying ? Math.max(1, eye) : 1);
     const dx = (-Math.sin(yaw) * f + Math.cos(yaw) * s) * sp;
     const dz = (-Math.cos(yaw) * f - Math.sin(yaw) * s) * sp;
-    // slide along walls: try each axis separately
+    // slide along walls: try each axis separately (landed inside a wall: free until you're out)
     const px = pos.x, pz = pos.z;
-    if (!blocked(pos.x + dx, pos.z)) pos.x += dx;
-    if (!blocked(pos.x, pos.z + dz)) pos.z += dz;
+    const free = flying || blocked(pos.x, pos.z);
+    if (free || !blocked(pos.x + dx, pos.z)) pos.x += dx;
+    if (free || !blocked(pos.x, pos.z + dz)) pos.z += dz;
     gunMotion.dt = dt; gunMotion.moved = Math.hypot(pos.x - px, pos.z - pz);
-    if (keys.has('KeyR')) eye = Math.min(5, eye + 0.4 * dt);
-    if (keys.has('KeyF')) eye = Math.max(0.03, eye - 0.4 * dt);
+    const climb = (0.4 + CLIMB_RATE * eye) * dt;
+    if (keys.has('KeyR')) eye = Math.min(MAX_EYE, eye + climb);
+    if (keys.has('KeyF')) eye = Math.max(topDown ? 0.5 : 0.03, eye - climb);
 
     const el = renderer.domElement;
     cam.aspect = (el.clientWidth || 1) / (el.clientHeight || 1);
-    cam.updateProjectionMatrix();
+    fitDepth();
     cam.position.set(pos.x, eye, pos.z);
-    cam.rotation.set(pitch, yaw, 0);
+    cam.rotation.set(pitch, yaw, 0);   // top-down: pitch is straight down, so W = up on screen
     cam.updateMatrixWorld();
     followView();
+  }
+
+  // The near plane grows with the height: with 0.01 at 100 m up, the depth buffer can't tell the
+  // asphalt from the ground under it any more and roads flicker away. Fog and the camera's reach
+  // grow too, so the city doesn't vanish into haze from up high.
+  function fitDepth() {
+    const h = eye;
+    cam.near = Math.min(0.5, Math.max(0.01, h * 0.02));
+    cam.far = 400 + h * 8;
+    cam.updateProjectionMatrix();
+    if (walkFog && appScene && appScene.fog === walkFog) { walkFog.near = 12 + h * 3; walkFog.far = 55 + h * 8; }
   }
 
   function followView() {
     // sun shadows around you instead of around the app's view
     if (sun) {
-      const d = appSunDir();                    // the app's sun direction, so shadows follow the clock
-      if (d) {
-        const k = 48 / Math.hypot(d.x, d.y, d.z);
-        sun.position.set(pos.x + d.x * k, d.y * k, pos.z + d.z * k);
-      } else sun.position.set(pos.x - 18, 40, pos.z + 26);
+      // the light comes from where the sun disc is (sunDir: the app's direction, kept on the
+      // horizon at night); the shadowed area grows with your height
+      const range = SHADOW_RANGE * Math.max(1, eye / 4);
+      const d = sunDir(true), dist = 48 + range;
+      if (d) sun.position.set(pos.x + d[0] * dist, d[1] * dist, pos.z + d[2] * dist);
+      else sun.position.set(pos.x - 18, 40, pos.z + 26);
       sun.target.position.set(pos.x, 0, pos.z);
       sun.target.updateMatrixWorld();
       const sc = sun.shadow.camera;
-      sc.left = sc.bottom = -SHADOW_RANGE; sc.right = sc.top = SHADOW_RANGE;
+      sc.left = sc.bottom = -range; sc.right = sc.top = range;
+      if (sunSaved) sc.far = Math.max(sunSaved.far, dist + range * 1.5);
       sc.updateProjectionMatrix();
     }
+    placeSun();
     // snowfall around you (the app re-centres it on its own view every frame)
     for (const u of snowUniforms) {
       u.uCenter.value.set(pos.x, 0, pos.z);
@@ -453,9 +478,100 @@
     return l < 1e-9 ? 40 : Math.asin(dy / l) / DEG;
   }
 
+  // Where the sun is, as a unit vector [x, y, z] towards it. The azimuth is the app's (its light
+  // follows the clock); the elevation too while the sun is up, so the disc sits exactly where the
+  // shadows come from. Below the horizon the app keeps its light on the horizon; the disc sinks
+  // with the real altitude instead. forLight: never below the horizon (the light).
+  function sunDir(forLight) {
+    const d = appSunDir(), alt = sunAltitude();
+    let ax = -0.6, az = 0.8;                    // no app sun yet: somewhere south-west
+    let elev = alt;
+    if (d) {
+      const l = Math.hypot(d.x, d.y, d.z), hl = Math.hypot(d.x, d.z);
+      if (hl > 1e-6) { ax = d.x / hl; az = d.z / hl; }
+      if (skyOverride === null && alt > 0) elev = Math.asin(Math.max(-1, Math.min(1, d.y / l))) / DEG;
+    } else if (skyOverride === null) return null;
+    if (forLight) elev = Math.max(0, elev);
+    const ce = Math.cos(elev * DEG);
+    return [ax * ce, Math.sin(elev * DEG), az * ce];
+  }
+
+  // ---------- the sun: a disc of the real sun's apparent size, with a soft glow ----------
+  // Its colour is the app's light colour (white at noon, orange and red low down, like the light
+  // on the buildings); it sinks below the horizon and fades out there.
+  let sunDisc = null, sunHalo = null;
+  function buildSun(K) {
+    const N = 48, pos = [], col = [];
+    const ring = (r, a) => [r * Math.cos(a), r * Math.sin(a), 0];
+    // the disc: a fan of radius 1 (scaled to size), one colour
+    for (let i = 0; i < N; i++) {
+      const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2;
+      pos.push(0, 0, 0, ...ring(1, a0), ...ring(1, a1));
+    }
+    const g = new K.Geometry();
+    g.setAttribute('position', new K.Attr(new Float32Array(pos), 3));
+    sunDisc = new K.Mesh(g, flatMat(K, { transparent: true, depthWrite: false, fog: false, toneMapped: false }));
+    // the glow: bright in the middle, fading to nothing at the edge (added light)
+    const hp = [], hc = [], steps = [[0, 1], [0.12, 0.55], [0.3, 0.22], [0.6, 0.06], [1, 0]];
+    for (let i = 0; i < N; i++) {
+      const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2;
+      for (let k = 0; k < steps.length - 1; k++) {
+        const [r0, v0] = steps[k], [r1, v1] = steps[k + 1];
+        const p00 = ring(r0, a0), p01 = ring(r0, a1), p10 = ring(r1, a0), p11 = ring(r1, a1);
+        for (const [p, v] of [[p00, v0], [p10, v1], [p11, v1], [p00, v0], [p11, v1], [p01, v0]]) { hp.push(...p); hc.push(v, v, v); }
+      }
+    }
+    const hg = new K.Geometry();
+    hg.setAttribute('position', new K.Attr(new Float32Array(hp), 3));
+    hg.setAttribute('color', new K.Attr(new Float32Array(hc), 3));
+    sunHalo = new K.Mesh(hg, flatMat(K, { vertexColors: true, transparent: true, blending: 2, depthWrite: false, fog: false, toneMapped: false }));
+    for (const m of [sunDisc, sunHalo]) { m.frustumCulled = false; m.name = 'sc-walk-sun'; }
+    sunDisc.renderOrder = -998; sunHalo.renderOrder = -999;
+  }
+
+  // colour and visibility (with the sky, 20× a second)
+  function colourSun(alt) {
+    if (!sunDisc) return;
+    const light = sun || skySun, c = light && light.color;
+    let rgb = c ? [c.r, c.g, c.b] : [1, 0.95, 0.85];
+    const m = Math.max(rgb[0], rgb[1], rgb[2], 1e-6);
+    rgb = rgb.map((v) => v / m);
+    const r = SUN_SIZE / 2;
+    const vis = smoothstep(-r, r, alt) * (sunDir(false) ? 1 : 0);
+    sunDisc.visible = sunHalo.visible = vis > 0.001;
+    sunDisc.material.color.setRGB(rgb[0], rgb[1], rgb[2]);
+    sunDisc.material.opacity = vis;
+    const glow = 0.5 * vis * (0.6 + 0.4 * (1 - smoothstep(10, 40, alt)));   // a bigger glow when it's low
+    sunHalo.material.color.setRGB(rgb[0] * glow, rgb[1] * glow, rgb[2] * glow);
+    sunHalo.visible = sunHalo.visible && SUN_GLOW > 0;
+  }
+
+  // on the sky, in the sun's direction, facing you (every frame: it must not lag while you fly)
+  function placeSun() {
+    if (!sunDisc || !sunDisc.visible || !cam) return;
+    const d = sunDir(false); if (!d) return;
+    const R = SKY_RADIUS * 0.97, rad = R * Math.tan((SUN_SIZE / 2) * DEG);
+    for (const [m, k] of [[sunDisc, 1], [sunHalo, SUN_GLOW]]) {
+      m.position.set(cam.position.x + d[0] * R, cam.position.y + d[1] * R, cam.position.z + d[2] * R);
+      m.scale.setScalar(rad * Math.max(k, 1e-3));
+      m.lookAt(cam.position);
+      m.updateMatrixWorld();
+    }
+  }
+
+  // An unlit material. The core only finds MeshBasicMaterial when the app already uses one (a
+  // summer day has none), so otherwise: a Lambert material whose shader skips the lighting.
+  function flatMat(K, params) {
+    if (K.Basic) return new K.Basic(params);
+    const m = new K.Lambert(params);
+    m.onBeforeCompile = (sh) => { sh.fragmentShader = sh.fragmentShader.replace(/vec3 outgoingLight = [^;]*;/, 'vec3 outgoingLight = diffuseColor.rgb;'); };
+    m.customProgramCacheKey = () => 'sc-walk-unlit';
+    return m;
+  }
+
   function buildSky() {
     const K = window.scCore && window.scCore.classes && window.scCore.classes();
-    if (!K || !K.Geometry || !K.Attr || !K.Basic || !K.Mesh || !K.Color) return false;
+    if (!K || !K.Geometry || !K.Attr || !(K.Basic || K.Lambert) || !K.Mesh || !K.Color) return false;
     const R = SKY_RADIUS, pos = [], kind = [];
     const elevOf = (i) => -8 + (98 * i) / SKY_RINGS;                      // degrees; the bottom ring sits under the ground
     const at = (e, a) => [R * Math.cos(e) * Math.cos(a), R * Math.sin(e), R * Math.cos(e) * Math.sin(a)];
@@ -492,9 +608,10 @@
     const colAttr = new K.Attr(skyCol, 3);
     skyCol = colAttr.array;                     // the borrowed attribute class copies its array: write into its own
     g.setAttribute('color', colAttr);
-    skyMesh = new K.Mesh(g, new K.Basic({ vertexColors: true, side: 2, depthWrite: false, fog: false }));
+    skyMesh = new K.Mesh(g, flatMat(K, { vertexColors: true, side: 2, depthWrite: false, fog: false }));
     skyMesh.frustumCulled = false; skyMesh.renderOrder = -1000; skyMesh.name = 'sc-walk-sky';
     skyMesh.userData.colAttr = colAttr;
+    if (SUN_DISC) buildSun(K);
     return true;
   }
 
@@ -526,11 +643,12 @@
       if (appScene && appScene.fog && appScene.fog.isFog) appScene.fog.color = new K.Color().setRGB(hz[0], hz[1], hz[2]);
     }
     if (cam) skyMesh.position.copy(cam.position);
+    colourSun(alt);
   }
   whenCore((c) => c.onFrame((dt) => { if (walking && SKY_DOME) updateSky(dt); }));
 
   // ---------- 4. entering / leaving ----------
-  let sun = null, sunSaved = null, snowUniforms = [], fogSaved, bgSaved, hud = [];
+  let sun = null, sunSaved = null, snowUniforms = [], fogSaved, bgSaved, hud = [], walkFog = null;
 
   function enter(e, startAt) {
     // Mouse or touch? Decided by what you clicked the button with, not by the device type
@@ -543,6 +661,7 @@
     buildColliders(true);
     if (!boxes.length) { alert('Geen gebouwen gevonden om tussen te lopen.'); return; }
     if (startAt) applyStart(startAt); else startPosition();
+    maxTop = boxes.reduce((m, b) => Math.max(m, b[4]), 0); topDown = false;
 
     sun = null; snowUniforms = [];
     appScene.traverse((o) => {
@@ -552,7 +671,7 @@
     });
     if (sun) {
       const c = sun.shadow.camera;
-      sunSaved = { p: sun.position.clone(), t: sun.target.position.clone(), b: [c.left, c.right, c.top, c.bottom] };
+      sunSaved = { p: sun.position.clone(), t: sun.target.position.clone(), b: [c.left, c.right, c.top, c.bottom], far: c.far };
     }
     // The app's canvas is transparent: the sky is a CSS gradient behind it. Glowing things such as
     // the Christmas-light halos are drawn by *adding* light, which turns black against a transparent
@@ -562,13 +681,14 @@
     if (Color) { bgSaved = appScene.background; appScene.background = new Color(SKY); }
     if (FOG && !appScene.fog) {
       // three's Fog class isn't in this build; the renderer only needs these fields.
-      if (Color) { fogSaved = appScene.fog; appScene.fog = { isFog: true, name: '', color: new Color(SKY), near: 12, far: 55 }; }
+      if (Color) { fogSaved = appScene.fog; appScene.fog = walkFog = { isFog: true, name: '', color: new Color(SKY), near: 12, far: 55 }; }
     }
 
     skySun = null;
     appScene.traverse((o) => { if (!skySun && o.isDirectionalLight) skySun = o; });
     if (SKY_DOME && !skyMesh) buildSky();
     if (skyMesh) { if (!skyMesh.parent) appScene.add(skyMesh); skyMesh.visible = true; skyAcc = 1; updateSky(0); }
+    for (const m of [sunDisc, sunHalo]) if (m && !m.parent) appScene.add(m);
 
     hud = [...document.querySelectorAll('.hud, .city-overlay')];
     hud.forEach((h) => { h.dataset.scWalkDisplay = h.style.display; h.style.display = 'none'; });
@@ -591,11 +711,13 @@
     if (document.pointerLockElement) document.exitPointerLock();
     if (sun && sunSaved) {
       sun.position.copy(sunSaved.p); sun.target.position.copy(sunSaved.t); sun.target.updateMatrixWorld();
-      const c = sun.shadow.camera; [c.left, c.right, c.top, c.bottom] = sunSaved.b; c.updateProjectionMatrix();
+      const c = sun.shadow.camera; [c.left, c.right, c.top, c.bottom] = sunSaved.b; c.far = sunSaved.far; c.updateProjectionMatrix();
     }
     if (fogSaved !== undefined || (appScene && appScene.fog && appScene.fog.isFog)) { appScene.fog = fogSaved ?? null; fogSaved = undefined; }
     if (bgSaved !== undefined) { appScene.background = bgSaved; bgSaved = undefined; }
     if (skyMesh) skyMesh.visible = false;
+    for (const m of [sunDisc, sunHalo]) if (m) m.visible = false;
+    topDown = false;
     hud.forEach((h) => { h.style.display = h.dataset.scWalkDisplay || ''; });
     keys.clear(); stick.x = stick.y = 0;
     showUi(false);
@@ -642,6 +764,7 @@
     else if (driver) keys.add(e.code);                                     // driving: the keys are the car's
     else if (SHOOTING && WEAPON_KEYS[e.code]) selectWeapon(WEAPON_KEYS[e.code]);
     else if (SHOOTING && e.code === 'KeyQ' && !e.repeat) cycleWeapon(1);
+    else if (e.code === 'KeyV' && !e.repeat) setTopDown(!topDown);
     else if (e.code === 'Comma' || e.code === 'Period') changeSpeed(e.code === 'Period' ? SPEED_STEP : 1 / SPEED_STEP);
     else keys.add(e.code);
     e.preventDefault(); e.stopImmediatePropagation();
@@ -1298,6 +1421,11 @@
     get player() { return { x: pos.x, y: eye, z: pos.z, yaw, pitch }; },
     // test: the sun's altitude in degrees for the sky (null: the app's sun again)
     skyAltitude(deg) { skyOverride = deg == null ? null : Number(deg); skyAcc = 1; },
+    // top-down flight on/off (like V) and your height in tiles (1 tile ≈ 20 m)
+    get topDown() { return topDown; },
+    set topDown(on) { setTopDown(on); },
+    get height() { return eye; },
+    set height(h) { eye = Math.max(0.03, Math.min(MAX_EYE, Number(h) || eye)); },
     leave: () => leave(),
     moveTo(x, z) { pos.x = x; pos.z = z; },
     lookAt(x, y, z) { const dx = x - pos.x, dz = z - pos.z; yaw = Math.atan2(-dx, -dz); pitch = Math.atan2(y - eye, Math.hypot(dx, dz)); },
@@ -2111,7 +2239,17 @@
     if (driver) { driverLook.x += dx; driverLook.y += dy; return; }
     gunMotion.lookX += dx; gunMotion.lookY += dy;
     yaw -= dx * LOOK_SENSITIVITY;
-    pitch = Math.max(-1.4, Math.min(1.4, pitch - dy * LOOK_SENSITIVITY));
+    if (!topDown) pitch = Math.max(-1.4, Math.min(1.4, pitch - dy * LOOK_SENSITIVITY));   // top-down: the mouse only turns the map
+  }
+
+  // Top-down flight (V): straight down over the city, WASD flies (faster the higher you are),
+  // the mouse turns, R/F up and down. V again: back to looking ahead, at the same height
+  // (F takes you down to the street).
+  function setTopDown(on) {
+    if (driver || on === topDown) return;
+    topDown = !!on;
+    if (topDown) { eye = Math.max(eye, TOP_DOWN_HEIGHT); pitch = -Math.PI / 2 + 1e-4; flash(`Bovenaanzicht · ${Math.round(eye * 20)} m`, 1500); }
+    else { pitch = -0.5; flash('Vooruit kijken', 1200); }
   }
 
   // ---------- 6. on-screen UI ----------
@@ -2137,7 +2275,7 @@
           #sc-walk-ui.touch .pad{display:block}#sc-walk-ui.touch .help{display:none}
         </style>
         <div class="cross"></div>
-        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–9: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager · Esc: stoppen</div>
+        <div class="help">WASD / pijltjes: lopen · muis: kijken · Shift: rennen · klik: schieten (minigun, vlammenwerper: ingedrukt houden) · scrollwiel / Q / 0–9: wapen · komma / punt: langzamer / sneller · R/F: hoger/lager (tot 500 m) · V: bovenaanzicht · Esc: stoppen</div>
         <button class="stop" type="button">Stoppen met lopen</button>
         <div class="sc-note"></div>
         <div class="pad"><i></i></div>`;

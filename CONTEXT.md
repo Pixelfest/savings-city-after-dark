@@ -631,6 +631,25 @@ shadows follow the time of day. Road lamps (`view.lampPosts`, instanced pole + h
 merged lamps (squares, highways) could be shot down. A lamp that lands calls `scCore.lampsOut` for
 itself (glow, light pool and lit head go out).
 
+Walk mode 1.40: **the sun disc** (`SUN_DISC`, `SUN_SIZE` 0.53°, `SUN_GLOW`): two meshes next to
+the sky dome (`sc-walk-sun`, transparent, `toneMapped: false`, no fog): a disc and an additive glow
+(vertex colours fading out), at 0.97 × `SKY_RADIUS` from the camera, facing it, placed every frame
+in `followView` (not with the throttled sky, it would lag while flying). `sunDir(forLight)` is the
+one direction for both disc and light: the app's azimuth (`view.sunDirection`), its elevation while
+the sun is up, the real altitude (`sunAltitude()`) below the horizon (the light stays at ≥ 0°).
+Colour = the app's light colour scaled to max 1 (so it reddens with the light), fading out within
+the sun's radius of the horizon. **Unlit material fallback:** the core's `classes().Basic` is only
+found when the scene already has a `MeshBasicMaterial` (winter / night); on a summer day it hasn't,
+and the sky dome silently didn't build. `flatMat(K, params)` falls back to a Lambert material whose
+fragment shader sets `outgoingLight = diffuseColor.rgb`. **Height:** R/F up to `MAX_EYE` 25 tiles
+(≈ 500 m) at `(0.4 + CLIMB_RATE × eye)` tiles/s; above the tallest box top (`maxTop`) or in top-down
+mode there's no collision and speed × eye. `fitDepth()` scales the camera's near plane
+(`eye × 0.02`, 0.01…0.5) – with near 0.01 the depth buffer couldn't separate asphalt from the
+ground from ~100 m up (roads flickered away) – plus `far`, the walk fog and the shadow area
+(`SHADOW_RANGE × max(1, eye/4)`, shadow camera `far` widened, restored on leave). **Top-down (V):**
+`pitch` = −90° (so aiming and plugins see it), the mouse only turns yaw, height ≥ `TOP_DOWN_HEIGHT`;
+`scWalk.topDown` (get/set) and `scWalk.height` (tiles) for tests.
+
 Residents 1.21: nobody walks on highways (their asphalt covers where the sidewalk line is), on a road
 that touches a highway junction, or through a door onto either. `buildNetwork()` builds the walking
 network from the roads that are not highway or next to one; the asphalt cells still include highways.
